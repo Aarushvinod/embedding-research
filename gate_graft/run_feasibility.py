@@ -45,14 +45,16 @@ def run_language(lang: str, k: int, epsilon: float, knn: int) -> dict:
     en_words, Xe = load_fasttext_topk("en", k=k)
     dictionary = load_muse_dict(lang, "en")  # EVAL ONLY
 
-    res = A.align(Xs, Xe, epsilon=epsilon, csls_k=knn)
+    res = A.align(Xs, Xe, src_words=src_words, tgt_words=en_words, method="anchored",
+                  epsilon=epsilon, csls_k=knn)
     W = res["W"]
-    gate = G.reliability(Xs, Xe, W, res["coupling"], k=knn)
+    gate = G.reliability(Xs, Xe, W, k=knn)
 
     Xs_mapped = l2norm(Xs @ W)
     b = bli(src_words, Xs_mapped, en_words, Xe, dictionary, csls_k=knn)
 
     out = {"lang": lang, "tier": C.TIERS.get(lang, "?"), "k": k,
+           "method": res["method"], "seed_size": res["seed_size"],
            "n_eval": b["n"], "p_at_1": b["p_at_1"], "p_at_5": b["p_at_5"],
            "seconds": round(time.time() - t0, 1)}
 

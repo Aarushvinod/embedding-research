@@ -7,6 +7,7 @@ loaded for EVALUATION ONLY (bilingual lexicon induction), never to fit the map.
 from __future__ import annotations
 
 import gzip
+import io
 import os
 from pathlib import Path
 
@@ -47,22 +48,32 @@ def load_fasttext_topk(
     Vectors are returned L2-normalized.
     """
     cache_dir = cache_dir or DATA_DIR / "fasttext"
-    gz = _download(FASTTEXT_URL.format(lang=lang), cache_dir / f"cc.{lang}.300.vec.gz")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache = cache_dir / f"cc.{lang}.top{k}.npz"
+    if cache.exists():
+        d = np.load(cache, allow_pickle=True)
+        return d["words"].tolist(), d["X"]
 
+    # Stream-decompress the .gz over HTTP and stop after k lines, so we download only the
+    # prefix (~tens of MB) instead of the full multi-GB file.
     words: list[str] = []
     vecs: list[np.ndarray] = []
-    with gzip.open(gz, "rt", encoding="utf-8", errors="replace") as f:
-        next(f)  # header: "<count> <dim>"
-        for line in f:
-            if len(words) >= k:
-                break
-            parts = line.rstrip().split(" ")
-            if len(parts) != 301:
-                continue
-            words.append(parts[0])
-            vecs.append(np.asarray(parts[1:], dtype=np.float32))
+    with requests.get(FASTTEXT_URL.format(lang=lang), stream=True, timeout=120) as r:
+        r.raise_for_status()
+        with gzip.GzipFile(fileobj=r.raw) as gz:
+            text = io.TextIOWrapper(gz, encoding="utf-8", errors="replace")
+            next(text)  # header: "<count> <dim>"
+            for line in text:
+                if len(words) >= k:
+                    break
+                parts = line.rstrip().split(" ")
+                if len(parts) != 301:
+                    continue
+                words.append(parts[0])
+                vecs.append(np.asarray(parts[1:], dtype=np.float32))
     X = np.vstack(vecs)
     X /= np.linalg.norm(X, axis=1, keepdims=True) + 1e-9
+    np.savez(cache, words=np.array(words, dtype=object), X=X)
     return words, X
 
 
