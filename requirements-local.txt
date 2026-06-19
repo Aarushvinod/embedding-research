@@ -1,0 +1,11 @@
+# GATE-GRAFT feasibility (laptop, no training, no GPU required)
+numpy>=1.26
+scipy>=1.11
+scikit-learn>=1.4
+POT>=0.9.4          # Gromov-Wasserstein / Sinkhorn (CPU)
+requests>=2.31
+tqdm>=4.66
+
+# Optional: the downstream "graft into a real sentence encoder" extension.
+# Needs a Blackwell-compatible torch (see requirements-cloud.txt). Uncomment to use.
+# sentence-transformers>=3.0

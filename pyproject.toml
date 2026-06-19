@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "embedding-research"
+version = "0.0.1"
+description = "Feasibility experiments: GATE-GRAFT (gated cross-lingual grafting) and ByteEmbed (byte-level retriever)"
+requires-python = ">=3.11"
+
+[tool.setuptools]
+packages = ["common", "gate_graft", "byte_embed"]

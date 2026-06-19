@@ -1,0 +1,17 @@
+# ByteEmbed feasibility (Colab A100 / cloud GPU — training)
+#
+# IMPORTANT (Blackwell / RTX 50-series local use): install a cu128 build, e.g.
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+# Colab / cloud A100 images already ship a compatible torch; the line below is a floor.
+torch>=2.7
+transformers>=4.44
+sentence-transformers>=3.0
+datasets>=2.20
+accelerate>=0.33
+numpy>=1.26
+tqdm>=4.66
+matplotlib>=3.8
+
+# Optional: decouples contrastive batch size from VRAM (only needed for the
+# contrastive route; the default distillation route does not require it).
+# grad-cache>=0.1.0
