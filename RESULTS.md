@@ -183,9 +183,23 @@ weak at retrieval (26%) but strong monolingually (86%). Reading: cross-lingual *
 precise alignment (bounded by fastText quality); *monolingual* classification only needs
 internally-discriminative target embeddings, which the graft provides. So the graft is **more
 than "retrieve English translations"** — the frozen English encoder gains genuinely usable
-in-language embeddings. *Caveat:* SIB is coarse (7 topics, lexical cues), so it does not fully
-separate "deep understanding" from "translation good enough for topics"; a harder monolingual
-task (target STS / paraphrase) would settle that.
+in-language embeddings.
+
+**Harder task — STS22 (fine-grained monolingual similarity, Spearman):**
+
+| lang | graft | raw e5 (floor) | topline m-e5 | recovery |
+|------|------:|---------------:|-------------:|---------:|
+| de | 0.35 | 0.21 | 0.56 | 63% |
+| ru | 0.46 | 0.25 | 0.65 | 70% |
+| ar | 0.47 | 0.23 | 0.61 | 76% |
+
+The graft is clearly above the raw-English-encoder floor on fine-grained similarity (+0.15–0.24
+Spearman) — so it captures REAL in-language semantic structure, not just topic words. But recovery
+drops from coarse topics (85–95%) to fine-grained similarity (63–76%). **Settled answer: the graft
+gives real-but-COARSE in-language structure** — more than coarse-topic translation, yet it loses
+fine semantic nuance a model trained on the language retains. Quality degrades smoothly with task
+difficulty: coarse classification (85–95%) > fine STS (63–76%) > exact cross-lingual retrieval
+(43–85%, resource-bounded).
 
 ## 9. Novelty & strength reckoning (literature check)
 - **Mechanism (honest):** bitext-free WORD translation in embedding space (Procrustes-aligned
