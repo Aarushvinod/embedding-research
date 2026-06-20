@@ -161,3 +161,43 @@ therefore *better monolingual representations* (so unsupervised alignment works)
 motivates a byte-level / Glot500-style bridge. Reframing: the frozen English encoder reliably
 turns grafted structure into **emergent multilingual ability without training** — bridge quality
 gates how good.
+
+## 8. Monolingual target-language quality (SIB-200) — the strongest, least-expected result
+Does the grafted model produce useful TARGET-language embeddings, or only retrieve English
+translations? SIB-200 in-language topic classification (logistic-regression probe on grafted
+embeddings):
+
+| lang | graft | raw e5 (floor) | topline m-e5 | recovery |
+|------|------:|---------------:|-------------:|---------:|
+| de | 0.838 | 0.809 | 0.887 | 94% |
+| ca | 0.819 | 0.750 | 0.858 | 95% |
+| ar | 0.819 | **0.333** | 0.877 | 93% |
+| hi | 0.824 | **0.417** | 0.877 | 94% |
+| uk | 0.770 | 0.480 | 0.897 | 86% |
+| ru | 0.765 | 0.490 | 0.902 | 85% |
+
+The grafted embeddings recover **85–95% of a trained multilingual model on a MONOLINGUAL task,
+flat across scripts**, with huge gains over raw English e5 for non-Latin languages (ar +0.49,
+hi +0.41). This is far flatter/higher than cross-lingual *retrieval* recovery (43–85%): uk is
+weak at retrieval (26%) but strong monolingually (86%). Reading: cross-lingual *retrieval* needs
+precise alignment (bounded by fastText quality); *monolingual* classification only needs
+internally-discriminative target embeddings, which the graft provides. So the graft is **more
+than "retrieve English translations"** — the frozen English encoder gains genuinely usable
+in-language embeddings. *Caveat:* SIB is coarse (7 topics, lexical cues), so it does not fully
+separate "deep understanding" from "translation good enough for topics"; a harder monolingual
+task (target STS / paraphrase) would settle that.
+
+## 9. Novelty & strength reckoning (literature check)
+- **Mechanism (honest):** bitext-free WORD translation in embedding space (Procrustes-aligned
+  fastText) fed into a frozen English composer — a bitext-free, embedding-space "translate-test".
+- **Novelty:** not algorithmically novel; a recombination of known pieces — input-layer embedding
+  injection into a frozen encoder ([GiBERT 2021](https://aclanthology.org/2021.findings-emnlp.200.pdf),
+  but gated + trained), linear cross-lingual BERT mapping ([CLBT 2019](https://aclanthology.org/D19-1575/)),
+  unsupervised Procrustes/CSLS (MUSE/VecMap), frozen-encoder composition. The one genuine
+  distinction from translate-test: no MT system / no bitext needed.
+- **Strength:** cross-lingual retrieval recovery (43–85% mid-resource) is typical-to-competitive
+  for unsupervised offline alignment (cf. LASER ~78% of LaBSE on Tatoeba; MUSE/VecMap 75–84% on
+  related pairs). The low-resource collapse is a UNIVERSAL limitation (Søgaard 2018, Vulić 2019),
+  not method-specific. But the paradigm is weaker than multilingual-pretraining methods (mSimCSE
+  on XLM-R reaches 82–99% even on low-resource) — which is why a multilingual model wins where one
+  exists. **The monolingual result (§8) is where this method looks genuinely useful.**
