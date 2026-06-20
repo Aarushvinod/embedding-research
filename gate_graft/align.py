@@ -59,6 +59,26 @@ def identical_string_seed(src_words, tgt_words, translit=False, max_pairs=2000):
     return pairs
 
 
+def muse_seed_pairs(src_words, tgt_words, dictionary, max_pairs=100):
+    """Index pairs (i, j) from a bilingual dictionary where both words are in vocab.
+    A tiny seed (~100 pairs) = weak supervision, vs the unsupervised identical-string anchors."""
+    src_index = {w: i for i, w in enumerate(src_words)}
+    tgt_index = {w: i for i, w in enumerate(tgt_words)}
+    pairs = []
+    for s, tgts in dictionary.items():
+        i = src_index.get(s)
+        if i is None:
+            continue
+        for t in tgts:
+            j = tgt_index.get(t)
+            if j is not None:
+                pairs.append((i, j))
+                break
+        if len(pairs) >= max_pairs:
+            break
+    return pairs
+
+
 def _self_learn(Xs, Xt, W, iters=5, csls_k=10):
     """Iterative refinement: induce a CSLS dictionary under W, refit Procrustes, repeat."""
     fwd = None
@@ -84,8 +104,18 @@ def gw_coupling(Xs, Xt, epsilon=5e-3, max_iter=500):
 
 
 def align(Xs, Xt, src_words=None, tgt_words=None, method="anchored", translit=False,
-          epsilon=5e-3, iters=5, csls_k=10, min_seed=20):
-    """Return {W, match, seed_size, method}. Defaults to the anchored path with GW fallback."""
+          seed_pairs=None, epsilon=5e-3, iters=5, csls_k=10, min_seed=20):
+    """Return {W, match, seed_size, method}. Defaults to the anchored path with GW fallback.
+
+    If `seed_pairs` (weak supervision, ~100 dictionary pairs) is given, it seeds Procrustes
+    directly (then self-learning), bypassing the unsupervised identical-string anchors.
+    """
+    if seed_pairs:
+        si = [p[0] for p in seed_pairs]
+        ti = [p[1] for p in seed_pairs]
+        W, fwd = _self_learn(Xs, Xt, procrustes(Xs[si], Xt[ti]), iters=iters, csls_k=csls_k)
+        return {"W": W, "match": fwd, "seed_size": len(seed_pairs), "method": "seed"}
+
     if method == "anchored" and src_words is not None and tgt_words is not None:
         seed = identical_string_seed(src_words, tgt_words, translit=translit)
         if len(seed) >= min_seed:

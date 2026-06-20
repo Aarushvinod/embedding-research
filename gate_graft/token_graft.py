@@ -73,7 +73,8 @@ def _bootstrap_ci(correct, n_boot=1000, seed=0):
 
 
 def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
-        filt="none", init="graft", translit=False, out="results/token_graft.json"):
+        filt="none", init="graft", translit=False, seed_n=0,
+        out="results/token_graft.json"):
     from transformers import AutoModel, AutoTokenizer
 
     from byte_embed.data import load_parallel
@@ -83,8 +84,13 @@ def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
     # 1) bitext-free alignment + gate
     src_words, Xs = load_fasttext_topk(lang, k=align_k)
     en_words, Xe = load_fasttext_topk("en", k=align_k)
+    seed_pairs = None
+    if seed_n > 0:
+        from common.data import load_muse_dict
+        seed_pairs = A.muse_seed_pairs(src_words, en_words, load_muse_dict(lang, "en"),
+                                       max_pairs=seed_n)
     res = A.align(Xs, Xe, src_words=src_words, tgt_words=en_words, method="anchored",
-                  translit=translit)
+                  translit=translit, seed_pairs=seed_pairs)
     gate = G.reliability(Xs, Xe, res["W"])
     Xs_mapped = Xs @ res["W"]  # target fastText in English-fastText space (orthogonal W -> unit norm)
     r = gate["r"].astype(np.float32)
@@ -167,9 +173,9 @@ def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
         float(correct_u[order[:max(1, int(c * len(order)))]].mean()), 3) for c in (0.25, 0.5, 1.0)}
 
     result = {"lang": lang, "tier": C.TIERS.get(lang, "?"), "init": init, "filter": filt,
-              "translit": translit, "align_k": align_k,
-              "grafted_tokens": int(len(graft_idx)), "seed_size": res["seed_size"],
-              "n_eval": len(par[lang]),
+              "translit": translit, "seed_n": seed_n, "align_method": res["method"],
+              "align_k": align_k, "grafted_tokens": int(len(graft_idx)),
+              "seed_size": res["seed_size"], "n_eval": len(par[lang]),
               "sent_p1": round(_p1(P_u, E_en), 3), "p1_ci95": ci,   # primary: ungated graft + 95% CI
               "sent_p1_gateblend": round(_p1(P_g, E_en), 3),        # ablation: blend (hurts)
               **cov}
@@ -190,11 +196,13 @@ def main():
                     default="none")
     ap.add_argument("--init", choices=["graft", "random", "mean"], default="graft")
     ap.add_argument("--translit", action="store_true", help="romanize-seed the alignment")
+    ap.add_argument("--seed-n", type=int, default=0, dest="seed_n",
+                    help="weak supervision: use N MUSE dict pairs to seed the alignment")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--out", default="results/token_graft.json")
     a = ap.parse_args()
     run(a.lang, align_k=a.align_k, graft_n=a.graft_n, n_eval=a.n_eval, device=a.device,
-        filt=a.filter, init=a.init, translit=a.translit, out=a.out)
+        filt=a.filter, init=a.init, translit=a.translit, seed_n=a.seed_n, out=a.out)
 
 
 if __name__ == "__main__":
