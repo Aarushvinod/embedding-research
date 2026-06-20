@@ -46,6 +46,29 @@ def sib_probe(encode_fn, lang):
     return round(float(clf.score(Xte, list(te["category"]))), 3)
 
 
+# STS22 monolingual tracks (MTEB) — harder, FINE-GRAINED semantic similarity (vs coarse topics)
+STS22_LANGS = {"de", "ru", "ar", "en", "es", "fr", "it", "pl", "tr", "zh"}
+
+
+def sts_probe(encode_fn, lang):
+    """Monolingual TARGET-language STS (STS22): Spearman correlation of cosine(emb1, emb2)
+    with human similarity scores. Fine-grained — separates real semantic structure from
+    'topic-words translated well enough'. Returns None if unavailable."""
+    if lang not in STS22_LANGS:
+        return None
+    from datasets import load_dataset
+    from scipy.stats import spearmanr
+
+    try:
+        ds = load_dataset("mteb/sts22-crosslingual-sts", lang, split="test")
+    except Exception:  # noqa: BLE001
+        return None
+    a = l2norm(encode_fn(list(ds["sentence1"])))
+    b = l2norm(encode_fn(list(ds["sentence2"])))
+    cos = (a * b).sum(1)
+    return round(float(spearmanr(cos, list(ds["score"])).correlation), 3)
+
+
 def _mean_topk_sim(query: np.ndarray, bank: np.ndarray, k: int) -> np.ndarray:
     """For each row of `query`, mean cosine to its k nearest neighbours in `bank`.
     Inputs assumed L2-normalized so dot == cosine."""

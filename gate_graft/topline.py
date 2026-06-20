@@ -34,13 +34,15 @@ def run(langs, n_eval=400, device="cuda", mono=False, out="results/topline.json"
             p1 = float(((l2norm(T) @ l2norm(E).T).argmax(1) == np.arange(len(T))).mean())
             row = {"lang": lang, "topline_p1": round(p1, 3), "n": len(par[lang])}
             if mono:
-                from common.eval import sib_probe
-                row["mono_sib"] = sib_probe(
-                    lambda xs: m.encode(["query: " + x for x in xs], normalize_embeddings=True,
-                                        convert_to_numpy=True, show_progress_bar=False), lang)
+                from common.eval import sib_probe, sts_probe
+                enc = lambda xs: m.encode(["query: " + x for x in xs], normalize_embeddings=True,  # noqa: E731
+                                          convert_to_numpy=True, show_progress_bar=False)
+                row["mono_sib"] = sib_probe(enc, lang)
+                row["mono_sts"] = sts_probe(enc, lang)
             rows.append(row)
             print(f"  {lang}: topline p@1={p1:.3f}"
-                  + (f"  mono_sib={row.get('mono_sib')}" if mono else ""))
+                  + (f"  mono_sib={row.get('mono_sib')} mono_sts={row.get('mono_sts')}"
+                     if mono else ""))
         except Exception as e:  # noqa: BLE001 — one bad pair shouldn't kill the rest
             print(f"  {lang}: topline FAILED ({type(e).__name__})")
     Path(out).parent.mkdir(parents=True, exist_ok=True)

@@ -26,7 +26,7 @@ import torch
 import torch.nn.functional as F
 from tokenizers import AddedToken
 
-from common.eval import l2norm, sib_probe
+from common.eval import l2norm, sib_probe, sts_probe
 from gate_graft import align as A
 from gate_graft import gate as G
 
@@ -124,6 +124,7 @@ def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
     E_en = _encode(par["en"], tok, model, device)
     # monolingual floor: pristine English e5 on target text (byte fallback), before grafting
     mono_raw = sib_probe(lambda xs: _encode(xs, tok, model, device), lang) if mono else None
+    sts_raw = sts_probe(lambda xs: _encode(xs, tok, model, device), lang) if mono else None
 
     # 3) fit L_in : English fastText -> e5 input-embedding space (mean of a word's subwords)
     rows, feats = [], []
@@ -173,8 +174,9 @@ def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
 
     set_rows(grafted)
     P_u = _encode(par[lang], tok, model, device)
-    # monolingual target classification with the grafted model (rows = ungated graft)
+    # monolingual target classification + STS with the grafted model (rows = ungated graft)
     mono_graft = sib_probe(lambda xs: _encode(xs, tok, model, device), lang) if mono else None
+    sts_graft = sts_probe(lambda xs: _encode(xs, tok, model, device), lang) if mono else None
     set_rows(gated)
     P_g = _encode(par[lang], tok, model, device)
 
@@ -196,7 +198,8 @@ def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
               "seed_size": res["seed_size"], "n_eval": len(par[lang]),
               "sent_p1": round(_p1(P_u, E_en), 3), "p1_ci95": ci,   # primary: ungated graft + 95% CI
               "sent_p1_gateblend": round(_p1(P_g, E_en), 3),        # ablation: blend (hurts)
-              "mono_sib_graft": mono_graft, "mono_sib_raw": mono_raw,  # monolingual target task
+              "mono_sib_graft": mono_graft, "mono_sib_raw": mono_raw,  # monolingual classification
+              "mono_sts_graft": sts_graft, "mono_sts_raw": sts_raw,    # monolingual STS (fine-grained)
               **cov}
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     Path(out).write_text(json.dumps(result, indent=2, ensure_ascii=False))
