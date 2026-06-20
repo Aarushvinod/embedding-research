@@ -72,7 +72,35 @@ MONOLINGUAL sentences (`load_mono`, Wikipedia→FLORES) that always load, so the
 come back fully empty again; only cross-lingual P@1 needs parallel data (FLORES with
 trust_remote_code+retries → OPUS-100 fallback) and degrades gracefully. Errors are surfaced.
 
-## 5. Novelty (verified literature deep-dive)
+## 5. Standard benchmarks (byte student vs multilingual-e5 teacher) — the reality check
+SIB-200 (classification), Tatoeba (bitext mining), STS22 (STS), scored clean and romanized.
+The teacher's Tatoeba ~0.89 matches published m-e5, so the harness is sound.
+
+| task | teacher | student | stu/tea |
+|------|--------:|--------:|--------:|
+| SIB-200 classification (clean) | 0.882 | 0.802 | 0.91 |
+| SIB-200 classification (romanized) | 0.600 | **0.611** | 1.02 |
+| Tatoeba bitext mining (clean) | 0.892 | **0.206** | **0.23** |
+| Tatoeba bitext mining (rom src) | 0.295 | 0.059 | 0.20 |
+| STS22 (Spearman) | 0.636 | 0.388 | 0.61 |
+
+**Downstream robustness (clean → romanized):** SIB teacher 0.882→0.600 (drop 0.28) vs student
+0.802→0.611 (drop 0.19) — student drops LESS *and ends up higher*. Tatoeba teacher 0.892→0.295
+vs student 0.206→0.059 — student drops less in absolute terms but is near-floor either way.
+
+**Revised, benchmark-grounded conclusion (this supersedes the rosy custom-eval read):**
+- **ByteEmbed is a robust CLASSIFIER, not (yet) a competitive RETRIEVER.** SIB clean recovers 91%
+  of the teacher and **beats it under romanization** — the H2 robustness translates downstream
+  for classification.
+- **Cross-lingual RETRIEVAL is weak: Tatoeba 0.206 vs 0.892 (23%).** The standard benchmark
+  reveals this and CORRECTS the custom FLORES/OPUS P@1 (0.66), which was optimistic (Tatoeba is
+  harder: 1000 candidates, out-of-domain). align-cosine 0.92 is enough for coarse classification
+  but NOT for 1-in-1000 nearest-neighbor matching.
+- **Nuances the c-RoLASER positioning:** we overturn them on classification robustness, but
+  partially confirm their concern (the distilled byte student doesn't fully match the teacher on
+  the hardest task, retrieval) at feasibility scale.
+
+## 6. Novelty (verified literature deep-dive)
 - **Algorithmic novelty: LOW–MEDIUM.** A recombination of published parts — cosine embedding
   distillation (Reimers & Gurevych 2020), distill-into-a-different-tokenizer *embedder* (2026
   Turkish tokenizer-surgery paper), subword→byte distillation (Minixhofer ALM NeurIPS 2025;
