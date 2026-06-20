@@ -140,3 +140,24 @@ is **not** a long-tail solution: the genuine low-resource tail lacks the monolin
 quality the alignment needs, and neither bigger vocab, transliteration, nor a small seed
 dictionary closes that gap. The realistic lever for the tail is *better monolingual
 representations*, not more cross-lingual supervision.
+
+## 7. Bridge swap — the graft *mechanism* is sound; the *bridge* is the limiter
+Swapping the per-word bridge from fastText to a strong multilingual encoder isolates the graft
+MECHANISM (lift + frozen-transformer composition) from alignment/representation quality.
+*Caveat:* LaBSE / multilingual-e5 are multilingual, so they import cross-lingual alignment —
+this is a CEILING test, not a clean bitext-free fix.
+
+| lang | fastText | LaBSE | m-e5 |
+|------|---------:|------:|-----:|
+| ca (high-resource) | 0.585 | 0.635 | 0.492 |
+| uk (weak) | 0.212 | **0.375** | 0.352 |
+| fa (weak) | 0.318 | **0.552** | 0.388 |
+
+For the strong language (ca) the bridge barely matters — fastText was already good enough. For
+the weak languages a high-quality bridge **rescues them**: uk +77%, fa +74% (LaBSE). So the
+**graft mechanism is sound, and the low-resource bottleneck is the bridge** (unsupervised
+alignment + representation quality) — confirming §6. The bitext-free path to the tail is
+therefore *better monolingual representations* (so unsupervised alignment works), which
+motivates a byte-level / Glot500-style bridge. Reframing: the frozen English encoder reliably
+turns grafted structure into **emergent multilingual ability without training** — bridge quality
+gates how good.
