@@ -215,3 +215,25 @@ difficulty: coarse classification (85–95%) > fine STS (63–76%) > exact cross
   not method-specific. But the paradigm is weaker than multilingual-pretraining methods (mSimCSE
   on XLM-R reaches 82–99% even on low-resource) — which is why a multilingual model wins where one
   exists. **The monolingual result (§8) is where this method looks genuinely useful.**
+
+## 10. Adversarial audit (multi-agent) — the numbers hold
+A 5-dimension multi-agent audit (21 candidates → 11 adversarially confirmed) checked for eval
+cheating/leakage and bugs. **Verdict: no leak contaminates any fitted component** (W is fit on
+fastText anchors, L_in on English Wikipedia word-means; neither touches the OPUS/SIB/STS eval
+data) **and no bug inflates a reported value.** Confirmed + fixed (commit c8922cf):
+- **A1 (integrity):** a requested MUSE seed with no usable dictionary silently fell through to the
+  anchored path. The published record was already correct — the seed conclusion is attributed only
+  to uk/fa (which genuinely ran `method="seed"`) and §-above notes mr/ne/ur "fell back"; results/
+  is gitignored so nothing mislabeled was ever committed. Code now **fails loudly**.
+- **B5:** English retrieval bank now deduped (was a DOWNWARD bias). Spot-check: immaterial —
+  ca 0.585 (identical), uk 0.212 (vs 0.23, within CI).
+- **A2:** eval split now recorded; spot-check confirms ca and uk both use the held-out TEST split.
+- **A3:** random floor made on-manifold (centroid + per-dim std). Significance holds and the floor
+  barely moved: ca floor 0.117 (≈ old 0.12), uk floor **0.013** ≪ uk graft **0.212 [0.172, 0.253]**;
+  ca graft 0.585 [0.537, 0.633]. CIs non-overlapping by a wide margin.
+- **B1/B2/B4/B7:** bare-except → specific exceptions; empty-pairs clean skip; argpartition guard;
+  OPUS-100 docstring fix.
+
+Net: every headline number survives; cross-lingual retrieval is if anything *conservative*. Two
+latent issues (malformed-fastText-line skip; translit homograph collapse, default-off) noted, not
+fixed — neither fires on the reported runs.
