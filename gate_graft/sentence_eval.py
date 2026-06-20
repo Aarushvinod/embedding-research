@@ -115,15 +115,65 @@ def run(lang, align_k=10000, n_eval=400, device="cuda", out="results/sentence_ev
     return result
 
 
+def run_bow(lang, align_k=10000, n_eval=400, out="results/sentence_bow.json"):
+    """Cleaner sentence test: gate-weighted bag-of-words retrieval DIRECTLY in the aligned
+    fastText space (no e5, no lift). Isolates whether the gate helps at the sentence level
+    without the lossy lift-into-e5 step. Pure numpy; no GPU."""
+    from byte_embed.data import load_parallel
+    from common.data import load_fasttext_topk
+    from gate_graft import config as C
+
+    src_words, Xs = load_fasttext_topk(lang, k=align_k)
+    en_words, Xe = load_fasttext_topk("en", k=align_k)
+    res = A.align(Xs, Xe, src_words=src_words, tgt_words=en_words, method="anchored")
+    gate = G.reliability(Xs, Xe, res["W"])
+    Xs_mapped = l2norm(Xs @ res["W"])
+    src_index = {w: i for i, w in enumerate(src_words)}
+    en_index = {w: i for i, w in enumerate(en_words)}
+
+    par = load_parallel(lang, n=n_eval)
+    if lang not in par or "en" not in par:
+        print(f"[{lang}] parallel unavailable; skipping.")
+        return {"lang": lang, "error": "no parallel"}
+
+    B_en = _bow(par["en"], Xe, en_index)
+    B_u = _bow(par[lang], Xs_mapped, src_index)
+    B_g = _bow(par[lang], Xs_mapped, src_index, gate_r=gate["r"])
+    keep = (np.linalg.norm(B_en, axis=1) > 0) & (np.linalg.norm(B_u, axis=1) > 0)
+    B_en, B_u, B_g = B_en[keep], B_u[keep], B_g[keep]
+    Rconf = _confidence(par[lang], src_index, gate["r"])[keep]
+
+    p1_u, p1_g = _p1(B_u, B_en), _p1(B_g, B_en)
+    correct_g = (l2norm(B_g) @ l2norm(B_en).T).argmax(1) == np.arange(len(B_g))
+    order = np.argsort(-Rconf)
+    cov = {f"P@{int(c * 100)}%": round(
+        float(correct_g[order[:max(1, int(c * len(order)))]].mean()), 3)
+        for c in (0.25, 0.5, 1.0)}
+    result = {"lang": lang, "tier": C.TIERS.get(lang, "?"), "mode": "bow-fasttext",
+              "align_k": align_k, "n_eval": int(keep.sum()), "seed_size": res["seed_size"],
+              "xling_sent_p1_ungated": round(p1_u, 3), "xling_sent_p1_gated": round(p1_g, 3),
+              **cov}
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    Path(out).write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    print(json.dumps(result, indent=2, ensure_ascii=False))
+    print(f"\nSaved -> {out}")
+    return result
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lang", default="ca")
+    ap.add_argument("--mode", choices=["bow", "lift"], default="bow",
+                    help="bow = pure aligned-fastText retrieval (clean); lift = graft into e5")
     ap.add_argument("--align-k", type=int, default=10000, dest="align_k")
     ap.add_argument("--n-eval", type=int, default=400, dest="n_eval")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--out", default="results/sentence_eval.json")
     a = ap.parse_args()
-    run(a.lang, align_k=a.align_k, n_eval=a.n_eval, device=a.device, out=a.out)
+    if a.mode == "bow":
+        run_bow(a.lang, align_k=a.align_k, n_eval=a.n_eval, out=a.out)
+    else:
+        run(a.lang, align_k=a.align_k, n_eval=a.n_eval, device=a.device, out=a.out)
 
 
 if __name__ == "__main__":
