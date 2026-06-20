@@ -29,10 +29,11 @@ SCRIPTS = {
     "Greek": ["el"],
     "Hebrew": ["he"],
 }
-# low-resource tier (multilingual-e5 coverage weaker) -> the fairer comparison
-LOWRES = {"Latin": ["yo", "ig"], "Ethiopic": ["am"], "Other": ["km", "si", "ka"]}
+# low-resource tier (multilingual-e5 coverage weaker) -> the fairer comparison.
+# Flat lang->script to avoid colliding with SCRIPTS keys; ig dropped (no fastText vectors).
+LOWRES = {"yo": "Latin", "am": "Ethiopic", "km": "Khmer", "si": "Sinhala", "ka": "Georgian"}
 NONLATIN = {"Cyrillic", "Arabic", "Devanagari", "Bengali", "Greek", "Hebrew",
-            "Ethiopic", "Other"}
+            "Ethiopic", "Khmer", "Sinhala", "Georgian"}
 
 ALIGN_K = 20000
 RANDOM_SUBSET = ["ca", "ru", "ar", "hi", "bn"]
@@ -56,7 +57,12 @@ def main():
     import os
     os.chdir(Path(__file__).resolve().parent.parent)
 
-    lang2script = {l: s for s, ls in {**SCRIPTS, **LOWRES}.items() for l in ls}
+    lang2script = {}
+    for s, ls in SCRIPTS.items():
+        for l in ls:
+            lang2script[l] = s
+    lowres_set = set(LOWRES)
+    lang2script.update(LOWRES)
     all_langs = list(lang2script)
     rows: dict = {}
 
@@ -64,8 +70,7 @@ def main():
         try:
             r = _graft(lang, script)
             if "error" not in r:
-                rows[lang] = {"script": script, "lowres": script in {"Ethiopic", "Other"}
-                              or lang in sum(LOWRES.values(), []),
+                rows[lang] = {"script": script, "lowres": lang in lowres_set,
                               "graft_p1": r["sent_p1"], "ci": r["p1_ci95"],
                               "conf_p25": r["conf_P@25%"], "graft_n": r["grafted_tokens"]}
         except Exception as e:  # noqa: BLE001

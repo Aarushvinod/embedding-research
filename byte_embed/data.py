@@ -71,9 +71,21 @@ def load_parallel(tgt, n=400):
     from datasets import load_dataset
 
     cfg = "-".join(sorted([tgt, "en"]))
-    ds = load_dataset("Helsinki-NLP/opus-100", cfg, split="test")
+    ds = None
+    for split in ("test", "validation"):  # some low-resource pairs lack a test split
+        try:
+            ds = load_dataset("Helsinki-NLP/opus-100", cfg, split=split)
+            break
+        except Exception:  # noqa: BLE001
+            ds = None
+    if ds is None:
+        try:
+            ds = load_dataset("Helsinki-NLP/opus-100", cfg, split="train", streaming=True)
+        except Exception:  # noqa: BLE001
+            return {}
     out = {tgt: [], "en": []}
-    for tr in ds["translation"]:
+    for ex in ds:  # works for both map-style and streaming datasets
+        tr = ex["translation"]
         s_t, s_e = tr.get(tgt), tr.get("en")
         if s_t and s_e and len(s_e) > 15:
             out[tgt].append(s_t)
