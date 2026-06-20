@@ -23,16 +23,19 @@ def run(langs, n_eval=400, device="cuda", out="results/topline.json"):
     m = SentenceTransformer("intfloat/multilingual-e5-base", device=device)
     rows = []
     for lang in langs:
-        par = load_parallel(lang, n=n_eval)
-        if lang not in par or "en" not in par:
-            continue
-        T = m.encode(["query: " + s for s in par[lang]], normalize_embeddings=True,
-                     convert_to_numpy=True, show_progress_bar=False)
-        E = m.encode(["query: " + s for s in par["en"]], normalize_embeddings=True,
-                     convert_to_numpy=True, show_progress_bar=False)
-        p1 = float(((l2norm(T) @ l2norm(E).T).argmax(1) == np.arange(len(T))).mean())
-        rows.append({"lang": lang, "topline_p1": round(p1, 3), "n": len(par[lang])})
-        print(f"  {lang}: topline target->en p@1 = {p1:.3f}")
+        try:
+            par = load_parallel(lang, n=n_eval)
+            if lang not in par or "en" not in par:
+                continue
+            T = m.encode(["query: " + s for s in par[lang]], normalize_embeddings=True,
+                         convert_to_numpy=True, show_progress_bar=False)
+            E = m.encode(["query: " + s for s in par["en"]], normalize_embeddings=True,
+                         convert_to_numpy=True, show_progress_bar=False)
+            p1 = float(((l2norm(T) @ l2norm(E).T).argmax(1) == np.arange(len(T))).mean())
+            rows.append({"lang": lang, "topline_p1": round(p1, 3), "n": len(par[lang])})
+            print(f"  {lang}: topline target->en p@1 = {p1:.3f}")
+        except Exception as e:  # noqa: BLE001 — one bad pair shouldn't kill the rest
+            print(f"  {lang}: topline FAILED ({type(e).__name__})")
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     Path(out).write_text(json.dumps(rows, indent=2))
     return rows

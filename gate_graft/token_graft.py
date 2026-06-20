@@ -64,8 +64,16 @@ def _p1(P, B):
     return float(((l2norm(P) @ l2norm(B).T).argmax(1) == np.arange(len(P))).mean())
 
 
+def _bootstrap_ci(correct, n_boot=1000, seed=0):
+    """95% bootstrap CI on a mean of binary outcomes."""
+    rng = np.random.default_rng(seed)
+    n = len(correct)
+    means = correct[rng.integers(0, n, size=(n_boot, n))].mean(1)
+    return [round(float(np.percentile(means, 2.5)), 3), round(float(np.percentile(means, 97.5)), 3)]
+
+
 def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
-        filt="none", init="graft", out="results/token_graft.json"):
+        filt="none", init="graft", translit=False, out="results/token_graft.json"):
     from transformers import AutoModel, AutoTokenizer
 
     from byte_embed.data import load_parallel
@@ -75,7 +83,8 @@ def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
     # 1) bitext-free alignment + gate
     src_words, Xs = load_fasttext_topk(lang, k=align_k)
     en_words, Xe = load_fasttext_topk("en", k=align_k)
-    res = A.align(Xs, Xe, src_words=src_words, tgt_words=en_words, method="anchored")
+    res = A.align(Xs, Xe, src_words=src_words, tgt_words=en_words, method="anchored",
+                  translit=translit)
     gate = G.reliability(Xs, Xe, res["W"])
     Xs_mapped = Xs @ res["W"]  # target fastText in English-fastText space (orthogonal W -> unit norm)
     r = gate["r"].astype(np.float32)
@@ -152,15 +161,17 @@ def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
         float(np.mean([r[src_index[t]] for t in _TOK.findall(s.lower()) if t in src_index]
                       or [0.0])) for s in par[lang]])
     correct_u = (l2norm(P_u) @ l2norm(E_en).T).argmax(1) == np.arange(len(P_u))
+    ci = _bootstrap_ci(correct_u)
     order = np.argsort(-Rconf)
     cov = {f"conf_P@{int(c * 100)}%": round(
         float(correct_u[order[:max(1, int(c * len(order)))]].mean()), 3) for c in (0.25, 0.5, 1.0)}
 
     result = {"lang": lang, "tier": C.TIERS.get(lang, "?"), "init": init, "filter": filt,
-              "align_k": align_k, "grafted_tokens": int(len(graft_idx)),
-              "seed_size": res["seed_size"], "n_eval": len(par[lang]),
-              "sent_p1": round(_p1(P_u, E_en), 3),               # primary: ungated graft
-              "sent_p1_gateblend": round(_p1(P_g, E_en), 3),     # ablation: blend toward mean (hurts)
+              "translit": translit, "align_k": align_k,
+              "grafted_tokens": int(len(graft_idx)), "seed_size": res["seed_size"],
+              "n_eval": len(par[lang]),
+              "sent_p1": round(_p1(P_u, E_en), 3), "p1_ci95": ci,   # primary: ungated graft + 95% CI
+              "sent_p1_gateblend": round(_p1(P_g, E_en), 3),        # ablation: blend (hurts)
               **cov}
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     Path(out).write_text(json.dumps(result, indent=2, ensure_ascii=False))
@@ -178,11 +189,12 @@ def main():
     ap.add_argument("--filter", choices=["none", "keep_bengali", "drop_bengali"],
                     default="none")
     ap.add_argument("--init", choices=["graft", "random", "mean"], default="graft")
+    ap.add_argument("--translit", action="store_true", help="romanize-seed the alignment")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--out", default="results/token_graft.json")
     a = ap.parse_args()
     run(a.lang, align_k=a.align_k, graft_n=a.graft_n, n_eval=a.n_eval, device=a.device,
-        filt=a.filter, init=a.init, out=a.out)
+        filt=a.filter, init=a.init, translit=a.translit, out=a.out)
 
 
 if __name__ == "__main__":
