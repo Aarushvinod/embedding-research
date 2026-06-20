@@ -15,7 +15,7 @@ import numpy as np
 from common.eval import l2norm
 
 
-def run(langs, n_eval=400, device="cuda", out="results/topline.json"):
+def run(langs, n_eval=400, device="cuda", mono=False, out="results/topline.json"):
     from sentence_transformers import SentenceTransformer
 
     from byte_embed.data import load_parallel
@@ -32,8 +32,15 @@ def run(langs, n_eval=400, device="cuda", out="results/topline.json"):
             E = m.encode(["query: " + s for s in par["en"]], normalize_embeddings=True,
                          convert_to_numpy=True, show_progress_bar=False)
             p1 = float(((l2norm(T) @ l2norm(E).T).argmax(1) == np.arange(len(T))).mean())
-            rows.append({"lang": lang, "topline_p1": round(p1, 3), "n": len(par[lang])})
-            print(f"  {lang}: topline target->en p@1 = {p1:.3f}")
+            row = {"lang": lang, "topline_p1": round(p1, 3), "n": len(par[lang])}
+            if mono:
+                from common.eval import sib_probe
+                row["mono_sib"] = sib_probe(
+                    lambda xs: m.encode(["query: " + x for x in xs], normalize_embeddings=True,
+                                        convert_to_numpy=True, show_progress_bar=False), lang)
+            rows.append(row)
+            print(f"  {lang}: topline p@1={p1:.3f}"
+                  + (f"  mono_sib={row.get('mono_sib')}" if mono else ""))
         except Exception as e:  # noqa: BLE001 — one bad pair shouldn't kill the rest
             print(f"  {lang}: topline FAILED ({type(e).__name__})")
     Path(out).parent.mkdir(parents=True, exist_ok=True)
@@ -44,10 +51,11 @@ def run(langs, n_eval=400, device="cuda", out="results/topline.json"):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--langs", nargs="+", default=["ca", "tr", "fi", "bn"])
+    ap.add_argument("--mono", action="store_true", help="also run SIB-200 monolingual probe")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--out", default="results/topline.json")
     a = ap.parse_args()
-    run(a.langs, device=a.device, out=a.out)
+    run(a.langs, device=a.device, mono=a.mono, out=a.out)
 
 
 if __name__ == "__main__":

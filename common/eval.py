@@ -14,6 +14,38 @@ def l2norm(X: np.ndarray) -> np.ndarray:
     return X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)
 
 
+# FLORES-200 codes for SIB-200 (massively-multilingual topic classification; MMTEB family)
+SIB_CODE = {
+    "en": "eng_Latn", "ca": "cat_Latn", "de": "deu_Latn", "id": "ind_Latn",
+    "pl": "pol_Latn", "vi": "vie_Latn", "ru": "rus_Cyrl", "uk": "ukr_Cyrl",
+    "bg": "bul_Cyrl", "ar": "arb_Arab", "fa": "pes_Arab", "ur": "urd_Arab",
+    "hi": "hin_Deva", "mr": "mar_Deva", "ne": "npi_Deva", "bn": "ben_Beng",
+    "el": "ell_Grek", "he": "heb_Hebr", "tr": "tur_Latn", "fi": "fin_Latn",
+    "am": "amh_Ethi", "km": "khm_Khmr", "si": "sin_Sinh", "ka": "kat_Geor",
+}
+
+
+def sib_probe(encode_fn, lang):
+    """Monolingual TARGET-language topic classification (SIB-200): embed train/test target
+    sentences, fit a logistic-regression probe, return test accuracy. Tests whether the
+    representation captures target-language semantics on its own — not just retrieval to
+    English. Returns None if the language is unavailable."""
+    from datasets import load_dataset
+    from sklearn.linear_model import LogisticRegression
+
+    code = SIB_CODE.get(lang)
+    if code is None:
+        return None
+    try:
+        tr = load_dataset("Davlan/sib200", code, split="train")
+        te = load_dataset("Davlan/sib200", code, split="test")
+    except Exception:  # noqa: BLE001
+        return None
+    Xtr, Xte = encode_fn(list(tr["text"])), encode_fn(list(te["text"]))
+    clf = LogisticRegression(max_iter=2000, C=10.0).fit(Xtr, list(tr["category"]))
+    return round(float(clf.score(Xte, list(te["category"]))), 3)
+
+
 def _mean_topk_sim(query: np.ndarray, bank: np.ndarray, k: int) -> np.ndarray:
     """For each row of `query`, mean cosine to its k nearest neighbours in `bank`.
     Inputs assumed L2-normalized so dot == cosine."""

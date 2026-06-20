@@ -26,7 +26,7 @@ import torch
 import torch.nn.functional as F
 from tokenizers import AddedToken
 
-from common.eval import l2norm
+from common.eval import l2norm, sib_probe
 from gate_graft import align as A
 from gate_graft import gate as G
 
@@ -78,7 +78,7 @@ _BRIDGES = {"labse": "sentence-transformers/LaBSE",
 
 def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
         filt="none", init="graft", translit=False, seed_n=0, bridge="fasttext",
-        out="results/token_graft.json"):
+        mono=False, out="results/token_graft.json"):
     from transformers import AutoModel, AutoTokenizer
 
     from byte_embed.data import load_parallel
@@ -122,6 +122,8 @@ def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
         return {"lang": lang, "error": "no parallel"}
     par[lang] = _filter_sents(par[lang], filt)  # ablation (default: no filtering)
     E_en = _encode(par["en"], tok, model, device)
+    # monolingual floor: pristine English e5 on target text (byte fallback), before grafting
+    mono_raw = sib_probe(lambda xs: _encode(xs, tok, model, device), lang) if mono else None
 
     # 3) fit L_in : English fastText -> e5 input-embedding space (mean of a word's subwords)
     rows, feats = [], []
@@ -171,6 +173,8 @@ def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
 
     set_rows(grafted)
     P_u = _encode(par[lang], tok, model, device)
+    # monolingual target classification with the grafted model (rows = ungated graft)
+    mono_graft = sib_probe(lambda xs: _encode(xs, tok, model, device), lang) if mono else None
     set_rows(gated)
     P_g = _encode(par[lang], tok, model, device)
 
@@ -192,6 +196,7 @@ def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
               "seed_size": res["seed_size"], "n_eval": len(par[lang]),
               "sent_p1": round(_p1(P_u, E_en), 3), "p1_ci95": ci,   # primary: ungated graft + 95% CI
               "sent_p1_gateblend": round(_p1(P_g, E_en), 3),        # ablation: blend (hurts)
+              "mono_sib_graft": mono_graft, "mono_sib_raw": mono_raw,  # monolingual target task
               **cov}
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     Path(out).write_text(json.dumps(result, indent=2, ensure_ascii=False))
@@ -214,12 +219,14 @@ def main():
                     help="weak supervision: use N MUSE dict pairs to seed the alignment")
     ap.add_argument("--bridge", choices=["fasttext", "labse", "me5"], default="fasttext",
                     help="per-word bridge representation (labse/me5 isolate the graft mechanism)")
+    ap.add_argument("--mono", action="store_true",
+                    help="also run monolingual target-language SIB-200 classification")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--out", default="results/token_graft.json")
     a = ap.parse_args()
     run(a.lang, align_k=a.align_k, graft_n=a.graft_n, n_eval=a.n_eval, device=a.device,
         filt=a.filter, init=a.init, translit=a.translit, seed_n=a.seed_n, bridge=a.bridge,
-        out=a.out)
+        mono=a.mono, out=a.out)
 
 
 if __name__ == "__main__":
