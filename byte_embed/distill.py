@@ -23,7 +23,10 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
     for step in range(1, steps + 1):
         texts = [sentences[i] for i in random.sample(range(n), min(batch, n))]
         with torch.no_grad():
-            t_emb = teacher.encode(texts, as_tensor=True, device=device)
+            # .clone() converts the teacher's inference-mode tensor (sentence-transformers
+            # encodes under inference_mode) into a normal tensor; an inference tensor cannot
+            # be saved for backward when multiplied with the student's grad-requiring output.
+            t_emb = teacher.encode(texts, as_tensor=True, device=device).clone()
         with torch.autocast(device_type="cuda", dtype=amp_dtype):
             s_emb = student(texts, device=device)
             loss = (1.0 - (s_emb * t_emb).sum(-1)).mean()  # cosine distance to teacher

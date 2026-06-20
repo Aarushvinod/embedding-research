@@ -45,8 +45,11 @@ def _flores(lang, split="dev"):
 
     code = FLORES_CODE.get(lang, lang)
     try:
-        ds = load_dataset("openlanguagedata/flores_plus", code, split=split)
-        return [r["text"] for r in ds]
+        # Muennighoff/flores200 = PUBLIC FLORES-200 mirror, same eng_Latn/swh_Latn codes.
+        # (The canonical openlanguagedata/flores_plus is gated -> 401 without HF auth, which
+        # silently zeroed the entire eval on Colab.)
+        ds = load_dataset("Muennighoff/flores200", code, split=split)
+        return [r["sentence"] for r in ds]
     except Exception as e:  # noqa: BLE001
         print(f"  [data] FLORES unavailable for {lang}/{code}: {e}")
         return []

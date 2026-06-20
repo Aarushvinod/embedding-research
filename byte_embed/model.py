@@ -16,7 +16,10 @@ class TeacherEncoder:
         self.model = SentenceTransformer(name, device=device)
         self.model.eval()
         self.prefix = prefix
-        self.dim = self.model.get_sentence_embedding_dimension()
+        # get_sentence_embedding_dimension was renamed to get_embedding_dimension; support both
+        self.dim = (self.model.get_embedding_dimension()
+                    if hasattr(self.model, "get_embedding_dimension")
+                    else self.model.get_sentence_embedding_dimension())
 
     @torch.no_grad()
     def encode(self, texts, batch_size=128, as_tensor=True, device="cuda"):
