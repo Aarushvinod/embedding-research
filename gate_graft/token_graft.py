@@ -31,6 +31,20 @@ from gate_graft import align as A
 from gate_graft import gate as G
 
 _TOK = re.compile(r"\w+", re.UNICODE)
+_BENGALI = (0x0980, 0x09FF)
+
+
+def _has_bengali(t):
+    return any(_BENGALI[0] <= ord(c) <= _BENGALI[1] for c in t)
+
+
+def _filter_sents(sents, mode):
+    """Ablation: keep_bengali = only Bengali-script words; drop_bengali = only the rest
+    (shared Latin/digits/entities). Tests whether the bn signal is real or a confound."""
+    if mode == "none":
+        return sents
+    keep = _has_bengali if mode == "keep_bengali" else (lambda t: not _has_bengali(t))
+    return [" ".join(t for t in s.split() if keep(t)) for s in sents]
 
 
 @torch.no_grad()
@@ -51,7 +65,7 @@ def _p1(P, B):
 
 
 def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
-        out="results/token_graft.json"):
+        filt="none", init="graft", out="results/token_graft.json"):
     from transformers import AutoModel, AutoTokenizer
 
     from byte_embed.data import load_parallel
@@ -78,6 +92,7 @@ def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
     if lang not in par or "en" not in par:
         print(f"[{lang}] parallel unavailable; skipping.")
         return {"lang": lang, "error": "no parallel"}
+    par[lang] = _filter_sents(par[lang], filt)  # ablation (default: no filtering)
     E_en = _encode(par["en"], tok, model, device)
 
     # 3) fit L_in : English fastText -> e5 input-embedding space (mean of a word's subwords)
@@ -90,8 +105,15 @@ def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
     Bw, Fw = np.vstack(rows), np.vstack(feats)
     L_in = np.linalg.solve(Fw.T @ Fw + 1e-1 * np.eye(Fw.shape[1]), Fw.T @ Bw)  # [300,768]
 
-    # 4) grafted rows (ungated + gate-blended)
-    grafted = (Xs_mapped @ L_in).astype(np.float32)
+    # 4) grafted rows (ungated + gate-blended), with init baselines for ablation
+    d_model = input_np.shape[1]
+    if init == "random":  # baseline: new rows are random noise (no alignment used)
+        grafted = (np.random.default_rng(0).standard_normal((len(Xs), d_model))
+                   * input_np.std()).astype(np.float32)
+    elif init == "mean":  # baseline: all words = the mean token (no information)
+        grafted = np.tile(fallback, (len(Xs), 1)).astype(np.float32)
+    else:                 # graft: the bitext-free aligned + lifted rows
+        grafted = (Xs_mapped @ L_in).astype(np.float32)
     gated = r[:, None] * grafted + (1 - r[:, None]) * fallback
 
     # 5) extend tokenizer (lowercased to match the uncased e5 tokenizer); set new rows only
@@ -134,9 +156,9 @@ def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
     cov = {f"conf_P@{int(c * 100)}%": round(
         float(correct_u[order[:max(1, int(c * len(order)))]].mean()), 3) for c in (0.25, 0.5, 1.0)}
 
-    result = {"lang": lang, "tier": C.TIERS.get(lang, "?"), "align_k": align_k,
-              "grafted_tokens": int(len(graft_idx)), "seed_size": res["seed_size"],
-              "n_eval": len(par[lang]),
+    result = {"lang": lang, "tier": C.TIERS.get(lang, "?"), "init": init, "filter": filt,
+              "align_k": align_k, "grafted_tokens": int(len(graft_idx)),
+              "seed_size": res["seed_size"], "n_eval": len(par[lang]),
               "sent_p1": round(_p1(P_u, E_en), 3),               # primary: ungated graft
               "sent_p1_gateblend": round(_p1(P_g, E_en), 3),     # ablation: blend toward mean (hurts)
               **cov}
@@ -153,10 +175,14 @@ def main():
     ap.add_argument("--align-k", type=int, default=15000, dest="align_k")
     ap.add_argument("--graft-n", type=int, default=15000, dest="graft_n")
     ap.add_argument("--n-eval", type=int, default=400, dest="n_eval")
+    ap.add_argument("--filter", choices=["none", "keep_bengali", "drop_bengali"],
+                    default="none")
+    ap.add_argument("--init", choices=["graft", "random", "mean"], default="graft")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--out", default="results/token_graft.json")
     a = ap.parse_args()
-    run(a.lang, align_k=a.align_k, graft_n=a.graft_n, n_eval=a.n_eval, device=a.device, out=a.out)
+    run(a.lang, align_k=a.align_k, graft_n=a.graft_n, n_eval=a.n_eval, device=a.device,
+        filt=a.filter, init=a.init, out=a.out)
 
 
 if __name__ == "__main__":
