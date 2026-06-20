@@ -72,8 +72,32 @@ MONOLINGUAL sentences (`load_mono`, Wikipedia→FLORES) that always load, so the
 come back fully empty again; only cross-lingual P@1 needs parallel data (FLORES with
 trust_remote_code+retries → OPUS-100 fallback) and degrades gracefully. Errors are surfaced.
 
+## 5. Novelty (verified literature deep-dive)
+- **Algorithmic novelty: LOW–MEDIUM.** A recombination of published parts — cosine embedding
+  distillation (Reimers & Gurevych 2020), distill-into-a-different-tokenizer *embedder* (2026
+  Turkish tokenizer-surgery paper), subword→byte distillation (Minixhofer ALM NeurIPS 2025;
+  AI2 Bolmo) — but those byte-distillation works target *generative* LMs, not embedders.
+- **Application novelty: MEDIUM–HIGH.** No raw-byte multilingual *retrieval embedder* exists;
+  ByT5/CANINE are LMs, the T5 dual-encoder line (GTR) is subword. The intersection is open.
+- **Empirical-finding novelty: HIGH**, and *contrarian*. The single closest prior work,
+  **c-RoLASER (Nishimwe, Sagot & Bawden, LREC-COLING 2024, arXiv:2403.17220)** — a near-exact
+  twin (sentence embeddings × orthographic robustness × frozen-teacher distillation × char-vs-
+  subword student) — found the OPPOSITE: their character student "never outperforms" subword and
+  failed to align to the teacher (cosine dist 0.05–0.13). **Our result overturns it:** byte >
+  subword on 8/8 perturbations WITH tight 0.92 alignment, and the random-init control (0.01→0.92)
+  directly answers their stated failure mode. ByteEmbed is best framed as a causally-controlled
+  rebuttal of a published negative — which REQUIRES engaging c-RoLASER head-on.
+- **Reportable:** workshop/short (MRL, RepL4NLP, Findings) as-is; full main-conference needs an
+  explicit c-RoLASER head-to-head, standard benchmarks (MTEB/MIRACL/BEIR, not just P@1), more
+  languages, and a downstream task where the robustness gain matters.
+- Closest priors — overall: c-RoLASER (LREC-COLING 2024); method: 2026 Turkish tokenizer-surgery
+  + cosine distillation; retrieval-robustness: CharacterBERT-DR (SIGIR 2022, arXiv:2204.00716).
+
 ## Caveats
 - Feasibility scale (2000 steps, 80k sentences); NOT the iso-compute / fertility-curve study.
+- The ~66% cross-lingual P@1 recovery is the weakness reviewers will probe first.
+- A few 2026-stamped preprints cited above were confirmed to exist but need author-roster checks
+  before citing in a manuscript.
 - Absolute robustness gaps are modest outside romanize/diacritics (both encoders fairly stable).
 - Non-Latin cross-lingual P@1 (bn/hi ~0.42) lags the Latin/Cyrillic langs.
 - The random-init "robustness" baseline embeds near-randomly, so its stability is itself only
