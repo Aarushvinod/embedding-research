@@ -20,7 +20,7 @@ from gate_graft import topline as TL
 
 # diverse: Romance, Germanic, Slavic/Cyrillic, Greek, Turkic, Uralic, Semitic x2,
 # Indic x2, Austronesian, Bantu  (all in fastText-157 + OPUS-100 + MUSE)
-LANGS = ["ca", "de", "ru", "el", "tr", "fi", "ar", "he", "hi", "bn", "id", "sw"]
+LANGS = ["ca", "de", "ru", "el", "tr", "fi", "ar", "he", "hi", "bn", "id"]  # sw absent from OPUS-100
 RANDOM_SUBSET = ["ca", "tr", "fi", "bn"]
 SWEEP = [5000, 15000, 30000]
 
@@ -31,6 +31,8 @@ def _clean():
 
 
 def main():
+    import os
+    os.chdir(Path(__file__).resolve().parent.parent)  # write results under the repo, not the CWD
     rows: dict = {}
     for l in LANGS:
         try:
