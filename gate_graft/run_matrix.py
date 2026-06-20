@@ -127,7 +127,8 @@ def _print_table(rows, sweep):
     print(f"{'lang':5}{'scr':11}{'graft':>6} {'CI':>15}{'top':>6}{'rec%':>6}"
           f"{'rand':>6}{'cf25':>6}{'lowR':>5}")
     for l, d in sorted(rows.items(), key=lambda x: (x[1]["script"], -x[1]["graft_p1"])):
-        rec = round(100 * d["graft_p1"] / d["topline_p1"]) if d.get("topline_p1") else "-"
+        _top = d.get("topline_p1")  # None=missing, 0.0=can't form a recovery ratio -> "-"
+        rec = round(100 * d["graft_p1"] / _top) if _top else "-"
         ci = f"[{d['ci'][0]:.2f},{d['ci'][1]:.2f}]"
         print(f"{l:5}{d['script'][:10]:11}{d['graft_p1']:>6} {ci:>15}"
               f"{str(d.get('topline_p1', '-')):>6}{str(rec):>6}"
@@ -138,7 +139,9 @@ def _print_table(rows, sweep):
         by.setdefault(d["script"], []).append(d)
     for s, ds in by.items():
         gm = np.mean([d["graft_p1"] for d in ds])
-        recs = [d["graft_p1"] / d["topline_p1"] for d in ds if d.get("topline_p1")]
+        # recovery needs a positive topline; None or 0.0 is excluded (can't divide)
+        recs = [d["graft_p1"] / d["topline_p1"] for d in ds
+                if d.get("topline_p1") is not None and d["topline_p1"] > 0]
         rm = f"{100*np.mean(recs):.0f}%" if recs else "-"
         print(f"  {s:11} n={len(ds)}  graft_p1={gm:.3f}  recovery={rm}")
     print("\ntranslit ablation:", {l: (rows[l]["graft_p1"], rows[l].get("graft_p1_notranslit"))

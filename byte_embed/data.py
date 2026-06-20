@@ -1,7 +1,8 @@
 """Training + evaluation data for ByteEmbed.
 
 Training sentences come from Wikipedia (monolingual, multilingual mix). Cross-lingual
-retrieval eval uses FLORES-200 (parallel, EVAL-ONLY). Both are streamed from the HF Hub.
+retrieval eval uses OPUS-100 (`load_parallel`, parallel, EVAL-ONLY); `load_flores_parallel`
+is an alternate FLORES-200 path, currently unused by the eval. Both stream from the HF Hub.
 Swap `load_sentences` for any text source you like.
 """
 from __future__ import annotations
@@ -66,30 +67,40 @@ def load_flores_parallel(langs, n=400):
 
 
 def load_parallel(tgt, n=400):
-    """Aligned {tgt: [...], 'en': [...]} parallel sentences from OPUS-100 (public,
-    non-gated). Used for cross-lingual sentence-retrieval eval (EVAL ONLY)."""
+    """Aligned {tgt: [...], 'en': [...], '_split': str} parallel sentences from OPUS-100
+    (public, non-gated). Cross-lingual sentence-retrieval eval (EVAL ONLY).
+
+    Prefers a held-out split: test > validation > (train fallback for pairs that ship no
+    eval split). `_split` records which was used so a train fallback is never silently read
+    as "held-out". The English bank is deduplicated (keeping target alignment) because
+    OPUS-100 repeats English sentences, and index-based P@1 would otherwise count a correct
+    retrieval of a duplicate as a miss (a downward bias on the reported score).
+    """
     from datasets import load_dataset
 
     cfg = "-".join(sorted([tgt, "en"]))
-    ds = None
-    for split in ("test", "validation"):  # some low-resource pairs lack a test split
+    ds, used_split = None, None
+    for split in ("test", "validation", "train"):  # some low-resource pairs lack test/validation
         try:
-            ds = load_dataset("Helsinki-NLP/opus-100", cfg, split=split)
+            ds = load_dataset("Helsinki-NLP/opus-100", cfg, split=split,
+                              streaming=(split == "train"))
+            used_split = split
             break
-        except Exception:  # noqa: BLE001
+        except (ValueError, FileNotFoundError):  # unknown config/split -> try next (NOT net/auth)
             ds = None
     if ds is None:
-        try:
-            ds = load_dataset("Helsinki-NLP/opus-100", cfg, split="train", streaming=True)
-        except Exception:  # noqa: BLE001
-            return {}
-    out = {tgt: [], "en": []}
+        return {}
+    out = {tgt: [], "en": [], "_split": used_split}
+    seen = set()
     for ex in ds:  # works for both map-style and streaming datasets
         tr = ex["translation"]
         s_t, s_e = tr.get(tgt), tr.get("en")
-        if s_t and s_e and len(s_e) > 15:
+        if s_t and s_e and len(s_e) > 15 and s_e not in seen:  # dedup English bank
+            seen.add(s_e)
             out[tgt].append(s_t)
             out["en"].append(s_e)
             if len(out["en"]) >= n:
                 break
+    if not out["en"]:  # nothing passed the filter -> clean skip, not a downstream crash
+        return {}
     return out

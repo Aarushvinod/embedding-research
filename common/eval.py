@@ -39,7 +39,7 @@ def sib_probe(encode_fn, lang):
     try:
         tr = load_dataset("Davlan/sib200", code, split="train")
         te = load_dataset("Davlan/sib200", code, split="test")
-    except Exception:  # noqa: BLE001
+    except (ValueError, FileNotFoundError):  # config genuinely absent -> None; let net/auth/OOM raise
         return None
     Xtr, Xte = encode_fn(list(tr["text"])), encode_fn(list(te["text"]))
     clf = LogisticRegression(max_iter=2000, C=10.0).fit(Xtr, list(tr["category"]))
@@ -61,7 +61,7 @@ def sts_probe(encode_fn, lang):
 
     try:
         ds = load_dataset("mteb/sts22-crosslingual-sts", lang, split="test")
-    except Exception:  # noqa: BLE001
+    except (ValueError, FileNotFoundError):  # config genuinely absent -> None; let net/auth/OOM raise
         return None
     a = l2norm(encode_fn(list(ds["sentence1"])))
     b = l2norm(encode_fn(list(ds["sentence2"])))
@@ -116,7 +116,7 @@ def bli(
                 "per_word_correct": {}}
 
     scores = csls_scores(src_emb[eval_rows], tgt_emb, k=csls_k)
-    top5 = np.argpartition(-scores, kth=5, axis=1)[:, :5]
+    top5 = np.argpartition(-scores, kth=min(5, scores.shape[1] - 1), axis=1)[:, :5]
     # order the 5 by score
     order = np.argsort(-np.take_along_axis(scores, top5, axis=1), axis=1)
     top5 = np.take_along_axis(top5, order, axis=1)

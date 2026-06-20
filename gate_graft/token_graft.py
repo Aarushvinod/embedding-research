@@ -102,6 +102,11 @@ def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
         from common.data import load_muse_dict
         seed_pairs = A.muse_seed_pairs(src_words, en_words, load_muse_dict(lang, "en"),
                                        max_pairs=seed_n)
+        if not seed_pairs or len(seed_pairs) < 20:  # no usable MUSE dict -> record, don't fake it
+            print(f"[{lang}] seed requested (n={seed_n}) but no usable MUSE dict (<20 pairs); "
+                  "skipping (would otherwise silently run anchored).")
+            return {"lang": lang, "seed_n": seed_n,
+                    "error": "no usable MUSE seed dict (<20 pairs)"}
     res = A.align(Xs, Xe, src_words=src_words, tgt_words=en_words, method="anchored",
                   translit=translit, seed_pairs=seed_pairs)
     gate = G.reliability(Xs, Xe, res["W"])
@@ -138,9 +143,11 @@ def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
 
     # 4) grafted rows (ungated + gate-blended), with init baselines for ablation
     d_model = input_np.shape[1]
-    if init == "random":  # baseline: new rows are random noise (no alignment used)
-        grafted = (np.random.default_rng(0).standard_normal((len(Xs), d_model))
-                   * input_np.std()).astype(np.float32)
+    if init == "random":  # baseline: random rows ON the embedding manifold (no alignment used)
+        # fair floor: real centroid + per-dimension std (NOT zero-mean scalar-std, which lands
+        # off-manifold and the frozen LayerNorm over-collapses -> an unfairly weak floor).
+        grafted = (fallback + np.random.default_rng(0).standard_normal((len(Xs), d_model))
+                   * input_np.std(0)).astype(np.float32)
     elif init == "mean":  # baseline: all words = the mean token (no information)
         grafted = np.tile(fallback, (len(Xs), 1)).astype(np.float32)
     else:                 # graft: the bitext-free aligned + lifted rows
@@ -196,6 +203,7 @@ def run(lang, align_k=15000, graft_n=15000, n_eval=400, device="cuda",
               "align_method": res["method"], "align_k": align_k,
               "grafted_tokens": int(len(graft_idx)),
               "seed_size": res["seed_size"], "n_eval": len(par[lang]),
+              "eval_split": par.get("_split"),  # provenance: test / validation / train-fallback
               "sent_p1": round(_p1(P_u, E_en), 3), "p1_ci95": ci,   # primary: ungated graft + 95% CI
               "sent_p1_gateblend": round(_p1(P_g, E_en), 3),        # ablation: blend (hurts)
               "mono_sib_graft": mono_graft, "mono_sib_raw": mono_raw,  # monolingual classification

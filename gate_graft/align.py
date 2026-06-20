@@ -61,16 +61,24 @@ def identical_string_seed(src_words, tgt_words, translit=False, max_pairs=2000):
 
 def muse_seed_pairs(src_words, tgt_words, dictionary, max_pairs=100):
     """Index pairs (i, j) from a bilingual dictionary where both words are in vocab.
-    A tiny seed (~100 pairs) = weak supervision, vs the unsupervised identical-string anchors."""
-    src_index = {w: i for i, w in enumerate(src_words)}
-    tgt_index = {w: i for i, w in enumerate(tgt_words)}
+    A tiny seed (~100 pairs) = weak supervision, vs the unsupervised identical-string anchors.
+
+    Both sides are lowercased before matching: fastText `cc.*.vec` tokens are NOT lowercased
+    while MUSE dictionary entries are, so a verbatim match silently drops capitalized words.
+    First occurrence wins (fastText is frequency-sorted, so that keeps the most frequent form).
+    """
+    src_index, tgt_index = {}, {}
+    for i, w in enumerate(src_words):
+        src_index.setdefault(w.lower(), i)
+    for j, w in enumerate(tgt_words):
+        tgt_index.setdefault(w.lower(), j)
     pairs = []
     for s, tgts in dictionary.items():
-        i = src_index.get(s)
+        i = src_index.get(s.lower())
         if i is None:
             continue
         for t in tgts:
-            j = tgt_index.get(t)
+            j = tgt_index.get(t.lower())
             if j is not None:
                 pairs.append((i, j))
                 break
@@ -110,11 +118,15 @@ def align(Xs, Xt, src_words=None, tgt_words=None, method="anchored", translit=Fa
     If `seed_pairs` (weak supervision, ~100 dictionary pairs) is given, it seeds Procrustes
     directly (then self-learning), bypassing the unsupervised identical-string anchors.
     """
-    if seed_pairs:
+    if seed_pairs is not None and len(seed_pairs) >= min_seed:
         si = [p[0] for p in seed_pairs]
         ti = [p[1] for p in seed_pairs]
         W, fwd = _self_learn(Xs, Xt, procrustes(Xs[si], Xt[ti]), iters=iters, csls_k=csls_k)
         return {"W": W, "match": fwd, "seed_size": len(seed_pairs), "method": "seed"}
+    if seed_pairs is not None:  # seed requested but too few pairs -> FAIL LOUDLY, never silently
+        raise ValueError(                                    # fall through to anchored (was a bug)
+            f"seed_pairs requested but only {len(seed_pairs)} usable pairs "
+            f"(< min_seed={min_seed}); no usable bilingual dictionary for this language")
 
     if method == "anchored" and src_words is not None and tgt_words is not None:
         seed = identical_string_seed(src_words, tgt_words, translit=translit)
