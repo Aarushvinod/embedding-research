@@ -9,6 +9,7 @@ TIERS = {
     "ca": "Near   (Romance, Latin script) — expect strong alignment",
     "tr": "Mid    (Turkic, agglutinative, Latin) — expect moderate",
     "bn": "Mid    (Indo-Aryan, Bengali script) — expect weaker",
+    "fi": "Far    (Uralic, agglutinative, Latin) — distant but Latin; has a MUSE dict",
     "eu": "Far    (isolate, Latin) — expect poor; the gate should flag it",
 }
 

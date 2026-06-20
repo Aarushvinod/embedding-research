@@ -63,3 +63,21 @@ def load_flores_parallel(langs, n=400):
         m = min(len(v) for v in par.values())
         par = {k: v[:m] for k, v in par.items()}
     return par
+
+
+def load_parallel(tgt, n=400):
+    """Aligned {tgt: [...], 'en': [...]} parallel sentences from OPUS-100 (public,
+    non-gated). Used for cross-lingual sentence-retrieval eval (EVAL ONLY)."""
+    from datasets import load_dataset
+
+    cfg = "-".join(sorted([tgt, "en"]))
+    ds = load_dataset("Helsinki-NLP/opus-100", cfg, split="test")
+    out = {tgt: [], "en": []}
+    for tr in ds["translation"]:
+        s_t, s_e = tr.get(tgt), tr.get("en")
+        if s_t and s_e and len(s_e) > 15:
+            out[tgt].append(s_t)
+            out["en"].append(s_e)
+            if len(out["en"]) >= n:
+                break
+    return out

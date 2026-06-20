@@ -26,14 +26,34 @@ def procrustes(A: np.ndarray, B: np.ndarray, w: np.ndarray | None = None) -> np.
     return U @ Vt
 
 
-def identical_string_seed(src_words, tgt_words, max_pairs=2000):
-    """Pairs (i, j) where the surface string is identical in both vocabularies."""
-    tgt_index = {w: i for i, w in enumerate(tgt_words)}
-    pairs = []
+def identical_string_seed(src_words, tgt_words, translit=False, max_pairs=2000):
+    """Pairs (i, j) where the surface string matches across vocabularies.
+
+    With translit=True, both sides are romanized (unidecode) + lowercased before matching,
+    so cross-script cognates / loanwords / numerals can seed the alignment for non-Latin
+    scripts (e.g. Bengali).
+    """
+    if translit:
+        from unidecode import unidecode
+
+        def norm(w):
+            return unidecode(w).lower()
+    else:
+        def norm(w):
+            return w
+
+    tgt_index = {}
+    for j, w in enumerate(tgt_words):
+        tgt_index.setdefault(norm(w), j)
+    pairs, used = [], set()
     for i, w in enumerate(src_words):
-        j = tgt_index.get(w)
-        if j is not None:
+        key = norm(w)
+        if len(key) < 2 and not key.isdigit():  # keep numerals (good anchors), drop lone letters
+            continue
+        j = tgt_index.get(key)
+        if j is not None and i not in used:
             pairs.append((i, j))
+            used.add(i)
             if len(pairs) >= max_pairs:
                 break
     return pairs
@@ -63,11 +83,11 @@ def gw_coupling(Xs, Xt, epsilon=5e-3, max_iter=500):
     return np.asarray(T)
 
 
-def align(Xs, Xt, src_words=None, tgt_words=None, method="anchored",
+def align(Xs, Xt, src_words=None, tgt_words=None, method="anchored", translit=False,
           epsilon=5e-3, iters=5, csls_k=10, min_seed=20):
     """Return {W, match, seed_size, method}. Defaults to the anchored path with GW fallback."""
     if method == "anchored" and src_words is not None and tgt_words is not None:
-        seed = identical_string_seed(src_words, tgt_words)
+        seed = identical_string_seed(src_words, tgt_words, translit=translit)
         if len(seed) >= min_seed:
             si = [p[0] for p in seed]
             ti = [p[1] for p in seed]

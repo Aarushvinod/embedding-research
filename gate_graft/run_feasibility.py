@@ -39,14 +39,14 @@ def auc(scores: np.ndarray, labels: np.ndarray) -> float:
     return float((r_pos - len(pos) * (len(pos) - 1) / 2) / (len(pos) * len(neg)))
 
 
-def run_language(lang: str, k: int, epsilon: float, knn: int) -> dict:
+def run_language(lang: str, k: int, epsilon: float, knn: int, translit: bool = False) -> dict:
     t0 = time.time()
     src_words, Xs = load_fasttext_topk(lang, k=k)
     en_words, Xe = load_fasttext_topk("en", k=k)
     dictionary = load_muse_dict(lang, "en")  # EVAL ONLY
 
     res = A.align(Xs, Xe, src_words=src_words, tgt_words=en_words, method="anchored",
-                  epsilon=epsilon, csls_k=knn)
+                  translit=translit, epsilon=epsilon, csls_k=knn)
     W = res["W"]
     gate = G.reliability(Xs, Xe, W, k=knn)
 
@@ -78,6 +78,8 @@ def main():
     ap.add_argument("--k", type=int, default=C.DEFAULT_K)
     ap.add_argument("--epsilon", type=float, default=C.DEFAULT_EPSILON)
     ap.add_argument("--knn", type=int, default=C.DEFAULT_KNN)
+    ap.add_argument("--translit", action="store_true",
+                    help="romanize target words before seeding (helps non-Latin scripts)")
     ap.add_argument("--out", default="results/gate_graft.json")
     args = ap.parse_args()
 
@@ -85,7 +87,7 @@ def main():
     for lang in args.langs:
         print(f"\n=== {lang} ===")
         try:
-            r = run_language(lang, args.k, args.epsilon, args.knn)
+            r = run_language(lang, args.k, args.epsilon, args.knn, translit=args.translit)
             rows.append(r)
             print(json.dumps(r, indent=2, ensure_ascii=False))
         except Exception as e:  # noqa: BLE001 — feasibility script, keep going

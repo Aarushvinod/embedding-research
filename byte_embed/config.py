@@ -12,7 +12,8 @@ TRAIN_LANGS = ["en", "tr", "sw", "bn"]
 EVAL_LANGS = ["en", "tr", "sw", "bn"]
 
 # flores-200 codes for the eval languages (parallel cross-lingual retrieval)
-FLORES_CODE = {"en": "eng_Latn", "tr": "tur_Latn", "sw": "swh_Latn", "bn": "ben_Beng"}
+FLORES_CODE = {"en": "eng_Latn", "tr": "tur_Latn", "sw": "swh_Latn", "bn": "ben_Beng",
+               "ca": "cat_Latn", "fi": "fin_Latn"}
 
 N_PER_LANG = 20000   # training sentences per language
 MAX_BYTES = 256      # truncation length in BYTES (byte-level => longer than subword)
