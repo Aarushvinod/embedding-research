@@ -39,20 +39,72 @@ def load_sentences(langs, n_per_lang=20000, min_len=20, max_len=300):
 
 
 def _flores(lang, split="dev"):
+    """Robust FLORES-200 load via the PUBLIC Muennighoff/flores200 mirror (same eng_Latn
+    codes; the canonical openlanguagedata/flores_plus is GATED -> 401). Retries, and tries
+    both with and without trust_remote_code so it survives whatever `datasets` version the
+    runtime ships (a script-based config on a newer datasets needs trust_remote_code=True;
+    an older one rejects the kwarg). Errors are PRINTED, never silently swallowed."""
     from datasets import load_dataset
 
     from byte_embed.config import FLORES_CODE
 
     code = FLORES_CODE.get(lang, lang)
+    last = None
+    for _ in range(3):
+        for kwargs in ({}, {"trust_remote_code": True}):
+            try:
+                ds = load_dataset("Muennighoff/flores200", code, split=split, **kwargs)
+                return [r["sentence"] for r in ds]
+            except TypeError:  # this datasets version doesn't accept trust_remote_code
+                continue
+            except Exception as e:  # noqa: BLE001
+                last = e
+    print(f"  [data] FLORES unavailable for {lang}/{code}: {type(last).__name__}: {last}")
+    return []
+
+
+def load_mono(lang, n=200, min_len=20, max_len=300):
+    """n monolingual sentences for ONE language (Wikipedia stream -> FLORES dev fallback).
+
+    The orthographic-robustness probe (H2) and teacher-alignment need only target-language
+    text, NOT parallel data, so this is the ROBUST CORE of the eval: it runs even when every
+    parallel corpus is unavailable. Wikipedia loaded fine on Colab (80k training sentences),
+    so this path is reliable where the FLORES-parallel path was not."""
+    from datasets import load_dataset
+
+    out: list[str] = []
     try:
-        # Muennighoff/flores200 = PUBLIC FLORES-200 mirror, same eng_Latn/swh_Latn codes.
-        # (The canonical openlanguagedata/flores_plus is gated -> 401 without HF auth, which
-        # silently zeroed the entire eval on Colab.)
-        ds = load_dataset("Muennighoff/flores200", code, split=split)
-        return [r["sentence"] for r in ds]
+        ds = load_dataset("wikimedia/wikipedia", f"20231101.{lang}",
+                          split="train", streaming=True)
+        for ex in ds:
+            for para in ex.get("text", "").split("\n"):
+                para = para.strip()
+                if min_len <= len(para) <= max_len:
+                    out.append(para)
+                    if len(out) >= n:
+                        return out
     except Exception as e:  # noqa: BLE001
-        print(f"  [data] FLORES unavailable for {lang}/{code}: {e}")
-        return []
+        print(f"  [data] wikipedia unavailable for {lang} ({type(e).__name__}); trying FLORES dev")
+    if len(out) < n:
+        out.extend(_flores(lang, split="dev"))
+    return out[:n]
+
+
+def load_eval_parallel(lang, n=400):
+    """Index-aligned {'tgt': [...], 'en': [...], '_src': str} for cross-lingual P@1.
+
+    Tries FLORES first (lang and en share sentence indices -> naturally parallel), then falls
+    back to OPUS-100 (bilingual; lacks some langs e.g. Swahili). Returns {} if neither works,
+    so the caller can skip xP@1 while still reporting robustness + alignment from load_mono."""
+    tgt = _flores(lang, split="dev")[:n]
+    en = _flores("en", split="dev")[:n]
+    if tgt and en:
+        m = min(len(tgt), len(en))
+        return {"tgt": tgt[:m], "en": en[:m], "_src": "flores"}
+    par = load_parallel(lang, n=n)
+    if par and lang in par and par.get("en"):
+        return {"tgt": par[lang], "en": par["en"], "_src": f"opus-{par.get('_split')}"}
+    return {}
 
 
 def load_flores_parallel(langs, n=400):

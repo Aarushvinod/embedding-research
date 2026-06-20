@@ -33,7 +33,7 @@ class ByteStudent(nn.Module):
     """Tokenizer-free student: ByT5 byte encoder -> mean pool -> projection to teacher dim."""
 
     def __init__(self, backbone: str, out_dim: int, max_bytes: int = 256,
-                 grad_checkpoint: bool = True):
+                 grad_checkpoint: bool = True, pooling: str = "mean"):
         super().__init__()
         from transformers import AutoTokenizer, T5EncoderModel
 
@@ -43,13 +43,17 @@ class ByteStudent(nn.Module):
             self.enc.gradient_checkpointing_enable()
         self.proj = nn.Linear(self.enc.config.d_model, out_dim)
         self.max_bytes = max_bytes
+        self.pooling = pooling  # "mean" | "max"
 
     def forward(self, texts, device="cuda"):
         b = self.tok(texts, padding=True, truncation=True, max_length=self.max_bytes,
                      return_tensors="pt").to(device)
         h = self.enc(**b).last_hidden_state
         m = b["attention_mask"].unsqueeze(-1).float()
-        pooled = (h * m).sum(1) / m.sum(1).clamp(min=1.0)
+        if self.pooling == "max":
+            pooled = h.masked_fill(m == 0, -1e9).max(dim=1).values
+        else:
+            pooled = (h * m).sum(1) / m.sum(1).clamp(min=1.0)
         return F.normalize(self.proj(pooled), dim=-1)
 
     @torch.no_grad()

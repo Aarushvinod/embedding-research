@@ -7,15 +7,18 @@ fit a 24 GB 4090 (and even a 12 GB laptop for a tiny smoke test).
 TEACHER = "intfloat/multilingual-e5-base"  # frozen multilingual subword teacher (768-d)
 STUDENT_BACKBONE = "google/byt5-small"   # byte-level encoder = the tokenizer-free student
 
-# high- + low-resource mix so we can see whether byte-level helps the tail specifically
-TRAIN_LANGS = ["en", "tr", "sw", "bn"]
-EVAL_LANGS = ["en", "tr", "sw", "bn"]
+# script- + resource-diverse set (train == eval; the student must see a language to reproduce
+# the teacher there). Latin (en/tr/sw/vi), Cyrillic (ru), Arabic (ar), Devanagari (hi),
+# Bengali (bn); high-resource (en/ru/ar) down to low-resource (sw); heavy diacritics (vi/tr).
+EVAL_LANGS = ["en", "tr", "sw", "bn", "ar", "ru", "hi", "vi"]
+TRAIN_LANGS = EVAL_LANGS  # kept for back-compat; the orchestrator trains on EVAL_LANGS
 
-# flores-200 codes for the eval languages (parallel cross-lingual retrieval)
+# flores-200 codes (used by data._flores for cross-lingual P@1 + monolingual fallback)
 FLORES_CODE = {"en": "eng_Latn", "tr": "tur_Latn", "sw": "swh_Latn", "bn": "ben_Beng",
+               "ar": "arb_Arab", "ru": "rus_Cyrl", "hi": "hin_Deva", "vi": "vie_Latn",
                "ca": "cat_Latn", "fi": "fin_Latn"}
 
-N_PER_LANG = 20000   # training sentences per language
+N_PER_LANG = 15000   # training sentences per language (× 8 langs)
 MAX_BYTES = 256      # truncation length in BYTES (byte-level => longer than subword)
 BATCH = 64
 LR = 2e-4

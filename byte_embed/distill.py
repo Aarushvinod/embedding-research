@@ -12,7 +12,7 @@ from torch.optim import AdamW
 
 
 def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
-            lr=2e-4, log_every=100):
+            lr=2e-4, log_every=100, objective="cosine"):
     opt = AdamW(student.parameters(), lr=lr)
     student.train()
     n = len(sentences)
@@ -29,7 +29,10 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
             t_emb = teacher.encode(texts, as_tensor=True, device=device).clone()
         with torch.autocast(device_type="cuda", dtype=amp_dtype):
             s_emb = student(texts, device=device)
-            loss = (1.0 - (s_emb * t_emb).sum(-1)).mean()  # cosine distance to teacher
+            if objective == "mse":  # MSE on the (L2-normalized) embeddings
+                loss = ((s_emb - t_emb) ** 2).sum(-1).mean()
+            else:                   # default: cosine distance to teacher
+                loss = (1.0 - (s_emb * t_emb).sum(-1)).mean()
         loss.backward()
         opt.step()
         opt.zero_grad(set_to_none=True)
