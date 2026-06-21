@@ -150,9 +150,29 @@ romanization (script change) and punctuation; (5) the downstream win survives co
 gain (within-script r=−0.18); it predicts romanization vulnerability (r=−0.77). The fertility
 "unifier" is rejected.
 
+## 8. Breaking the tradeoff — augmentation-consistency + MoCo queue
+Two new objectives (`run_paper --only byte-robust byte-robust-queue`), teacher unchanged:
+
+| config | align | Tatoeba | Tat-rom | SIB | SIB-rom | STS | mean rob-gap |
+|--------|------:|--------:|--------:|----:|--------:|----:|-------------:|
+| byte-robust (augmentation) | 0.747 | 0.383 | 0.159 | 0.818 | 0.626 | 0.424 | +0.008 |
+| byte-robust-queue (augment+MoCo) | 0.460 | 0.543 | 0.252 | 0.798 | 0.613 | 0.418 | −0.003 |
+
+byte-robust robustness by perturbation (vs teacher; held-out = diacritics/swap/delete/punct):
+diacritics +0.020 (6/8) · romanize +0.017 (4/8) · spelling +0.009 (8/8) · keyboard +0.004 (7/8) ·
+swap +0.007 (8/8) · delete +0.007 (8/8) · case +0.014 (7/8) · punct −0.012 (0/8)
+
+Findings: (1) augmentation FIXES romanization — byte-both romanize −0.087 → byte-robust **+0.017**;
+positive on 7/8 perturbations incl. held-out diacritics/swap/delete (generalization). (2) byte-robust
+is the only contrastive-trained config with positive mean robustness (+0.008) that also retrieves
+(0.383) — it pushes the robustness↔retrieval frontier outward; best-balanced (uniform robustness +
+best STS 0.424). (3) the MoCo queue scales retrieval (0.514 → **0.543**, best byte config) but trades
+robustness back → the tradeoff is a frontier you re-balance, not escape. (4) methods are standard
+(augmentation, MoCo) → contribution stays empirical (now covers the script-change case), not methodological.
+
 ## Caveats
 - Feasibility scale (2000 steps, 80k sentences); NOT the iso-compute / fertility-curve study.
-- §1–5 used cosine-only distillation; §7 (objectives) is the authoritative, current result.
+- §1–5 used cosine-only distillation; §7–8 (objectives) are the authoritative, current results.
 - The ~66% cross-lingual P@1 recovery is the weakness reviewers will probe first.
 - A few 2026-stamped preprints cited above were confirmed to exist but need author-roster checks
   before citing in a manuscript.

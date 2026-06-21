@@ -87,6 +87,8 @@ SIB-rom 0.600, STS 0.637).**
 | **byte-both** | 0.767 | 0.514 | 0.178 | 0.826 | **0.644** | 0.419 | −0.007 |
 | subword-mt5-both (iso-compute) | 0.707 | 0.240 | 0.058 | 0.782 | 0.536 | 0.520 | −0.021 |
 | byte-random (control) | 0.014 | 0.023 | 0.022 | 0.601 | 0.467 | 0.122 | −0.003 |
+| **byte-robust** (augmentation) | 0.747 | 0.383 | 0.159 | 0.818 | 0.626 | **0.424** | **+0.008** |
+| byte-robust-queue (augment + MoCo) | 0.460 | **0.543** | **0.252** | 0.798 | 0.613 | 0.418 | −0.003 |
 
 1. **Contrastive closes the retrieval gap.** Tatoeba **0.121 → 0.558** (cosine → contrastive),
    ~63% of the teacher (vs 14%). The gap was an objective problem (cosine makes embeddings aligned
@@ -109,6 +111,17 @@ SIB-rom 0.600, STS 0.637).**
 6. **Random control:** alignment (0.014) and retrieval (0.023) are ≈0 untrained → 100% from
    distillation. (Classification has a random-features floor of 0.60 — SIB is easy enough that even
    random byte features classify; so the causal control is cleanest for alignment/retrieval.)
+7. **Breaking the tradeoff (partial, honest).** Augmentation-consistency (`byte-robust`) is the only
+   contrastive-trained config with **positive** robustness (+0.008): it pushes the robustness↔retrieval
+   frontier outward and **fixes the romanization failure** (romanize −0.087 → **+0.017**), giving
+   positive gaps on **7/8** perturbations incl. *held-out* ones (diacritics/swap/delete — generalization,
+   not memorization). It's the **best-balanced** config (uniform robustness + best STS 0.424 + strong
+   classification), at a retrieval cost (0.383 vs both's 0.514). The MoCo queue (`byte-robust-queue`)
+   instead **scales retrieval to 0.543** (best byte config) but trades the robustness back. → the
+   tradeoff is a **frontier you can push and re-balance, not a free lunch you escape.**
+8. **Toward a better retriever (modest).** The queue lifts retrieval 0.514 → 0.543 (~61% of the
+   teacher) — scaling negatives helps, but the byte student is not yet SOTA-competitive at feasibility
+   scale; more negatives/steps/data is the lever, and the positive slope suggests headroom.
 
 ---
 
@@ -134,9 +147,15 @@ I hoped would unify the two methods does not exist; the link is thematic, not me
 ## Limitations & honest scope (state up front in the paper)
 - **GRAFT** is a bitext-free translate-test (not a new algorithm), **resource-bounded** (fails on
   the low-resource tail where fastText collapses).
-- **ByteEmbed** retrieval is now competitive via the contrastive objective (Tatoeba ~63% of the
-  teacher) but still below it; byte is weaker on STS and **loses to subword on romanization** of
-  non-Latin scripts. Its robustness advantage is **within-script only**.
+- **ByteEmbed** retrieval is competitive via contrastive (Tatoeba 0.51–0.54, ~58–61% of the teacher)
+  but below it. Cosine-only robustness is within-script and *loses* on romanization; **augmentation
+  (byte-robust) fixes the romanization loss** (−0.087 → +0.017) and makes robustness uniform across
+  all 8 perturbations — but at a retrieval cost (0.51 → 0.38), so it re-balances the frontier rather
+  than escaping it. byte is still below the teacher on STS and absolute retrieval.
+- **Novelty is still empirical, not methodological.** The new objectives (augmentation-consistency,
+  MoCo queue) are standard techniques; they make the robustness story more *complete* (it now covers
+  the script-change case) and map the frontier, but they are not a new mechanism. The contribution
+  remains "a rigorous study," now stronger — not a methods paper.
 - **Combined-paper verdict (honest):** the fertility analysis did NOT quantitatively unify the two
   methods (Part III), so the pairing is *thematic, not mechanistic*. For a top venue, **ByteEmbed is
   the stronger standalone** (contrastive retrieval fix + iso-compute byte>subword + within-script
