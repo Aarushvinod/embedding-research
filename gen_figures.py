@@ -170,6 +170,42 @@ def fig_fertility(R):
     plt.close(fig)
 
 
+def fig_tradeoff():
+    """The contribution figure: robustness vs retrieval for every objective. Robustness axis =
+    mean gap on HELD-OUT within-script perturbations (diacritics/swap/delete — never in any
+    training augmentation, so fair for all configs). byte-robust should sit top-right."""
+    import json
+    import numpy as np
+    cfgs = {}
+    for p in ("results/byte_paper.json", "results/byte_robust.json"):
+        pp = Path(p)
+        if pp.exists():
+            cfgs.update(json.loads(pp.read_text(encoding="utf-8")).get("configs", {}))
+    held = ["diacritics", "swap", "delete"]
+    pts = {}
+    for name, c in cfgs.items():
+        if name == "byte-random":
+            continue
+        x = c.get("tatoeba_mean")
+        ra = c.get("robust_agg", {})
+        ys = [ra[p]["gap"] for p in held if p in ra]
+        if x is not None and ys:
+            pts[name] = (x, float(np.mean(ys)))
+    if not pts:
+        return
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    ax.axhline(0, c="#bbb", lw=0.8)
+    for name, (x, y) in pts.items():
+        hl = name.startswith("byte-robust")
+        ax.scatter(x, y, s=100 if hl else 60, c="#2a7" if hl else "#27a", zorder=3)
+        ax.annotate(name, (x, y), fontsize=9, xytext=(5, 4), textcoords="offset points")
+    ax.set_xlabel("retrieval — Tatoeba accuracy  (→ better)")
+    ax.set_ylabel("robustness — held-out within-script gap vs teacher  (↑ better)")
+    ax.set_title("Breaking the tradeoff: top-right = robust AND retrieves")
+    fig.savefig(FIG / "fig6_tradeoff.png")
+    plt.close(fig)
+
+
 def main():
     fig_graft_recovery()
     print("fig1 (GRAFT recovery) written")
@@ -183,6 +219,11 @@ def main():
             print(f"{fn.__name__} written")
         except Exception as e:  # noqa: BLE001
             print(f"{fn.__name__} FAILED: {type(e).__name__}: {e}")
+    try:
+        fig_tradeoff()
+        print("fig6 (tradeoff) written")
+    except Exception as e:  # noqa: BLE001
+        print(f"fig_tradeoff FAILED: {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":
