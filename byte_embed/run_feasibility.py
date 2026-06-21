@@ -260,13 +260,15 @@ def main():
     ap.add_argument("--max-bytes", type=int, dest="max_bytes")
     ap.add_argument("--n-per-lang", type=int, dest="n_per_lang")
     ap.add_argument("--langs", nargs="+", default=None)
+    ap.add_argument("--objective", choices=["cosine", "mse", "contrastive", "both"], default=None)
+    ap.add_argument("--backbone", default=None, help="student backbone (e.g. google/byt5-small)")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--out", default="results/byte_embed.json")
     ap.add_argument("--save-student", dest="save_student", default=None)
     a = ap.parse_args()
     run(device=a.device, out=a.out, save_student=a.save_student, smoke=a.smoke, ablate=a.ablate,
         steps=a.steps, batch=a.batch, max_bytes=a.max_bytes, n_per_lang=a.n_per_lang,
-        langs=a.langs)
+        langs=a.langs, objective=a.objective, backbone=a.backbone)
 
 
 if __name__ == "__main__":

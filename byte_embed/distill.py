@@ -8,11 +8,12 @@ import random
 import time
 
 import torch
+import torch.nn.functional as F
 from torch.optim import AdamW
 
 
 def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
-            lr=2e-4, log_every=100, objective="cosine"):
+            lr=2e-4, log_every=100, objective="cosine", temp=0.05):
     opt = AdamW(student.parameters(), lr=lr)
     student.train()
     n = len(sentences)
@@ -31,6 +32,17 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
             s_emb = student(texts, device=device)
             if objective == "mse":  # MSE on the (L2-normalized) embeddings
                 loss = ((s_emb - t_emb) ** 2).sum(-1).mean()
+            elif objective in ("contrastive", "both"):
+                # in-batch contrastive distillation (CLIP-style): student_i must match
+                # teacher_i against all other teacher embeddings in the batch -> makes the
+                # student DISCRIMINATIVE (cosine-only alignment is necessary but not
+                # sufficient for retrieval; this is the fix for the Tatoeba gap).
+                logits = (s_emb @ t_emb.t()) / temp           # [B,B], both L2-normalized
+                labels = torch.arange(s_emb.size(0), device=s_emb.device)
+                loss = 0.5 * (F.cross_entropy(logits, labels)
+                              + F.cross_entropy(logits.t(), labels))
+                if objective == "both":                       # + absolute alignment term
+                    loss = loss + (1.0 - (s_emb * t_emb).sum(-1)).mean()
             else:                   # default: cosine distance to teacher
                 loss = (1.0 - (s_emb * t_emb).sum(-1)).mean()
         loss.backward()

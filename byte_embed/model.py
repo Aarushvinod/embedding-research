@@ -35,13 +35,26 @@ class ByteStudent(nn.Module):
     def __init__(self, backbone: str, out_dim: int, max_bytes: int = 256,
                  grad_checkpoint: bool = True, pooling: str = "mean"):
         super().__init__()
-        from transformers import AutoTokenizer, T5EncoderModel
+        from transformers import AutoConfig, AutoTokenizer
 
-        self.tok = AutoTokenizer.from_pretrained(backbone)   # byte-level: no subword vocab
-        self.enc = T5EncoderModel.from_pretrained(backbone)
+        self.tok = AutoTokenizer.from_pretrained(backbone)   # byte- or subword-level
+        # architecture-aware encoder load so this serves BOTH the byte student (ByT5 = "t5")
+        # AND the iso-compute subword baseline (mt5-small = "mt5"); falls back to AutoModel
+        # for BERT/RoBERTa-style subword encoders.
+        mtype = AutoConfig.from_pretrained(backbone).model_type
+        if mtype == "mt5":
+            from transformers import MT5EncoderModel
+            self.enc = MT5EncoderModel.from_pretrained(backbone)
+        elif mtype in ("t5", "longt5", "umt5"):
+            from transformers import T5EncoderModel
+            self.enc = T5EncoderModel.from_pretrained(backbone)
+        else:
+            from transformers import AutoModel
+            self.enc = AutoModel.from_pretrained(backbone)
         if grad_checkpoint:
             self.enc.gradient_checkpointing_enable()
-        self.proj = nn.Linear(self.enc.config.d_model, out_dim)
+        d = getattr(self.enc.config, "d_model", None) or self.enc.config.hidden_size
+        self.proj = nn.Linear(d, out_dim)
         self.max_bytes = max_bytes
         self.pooling = pooling  # "mean" | "max"
 
