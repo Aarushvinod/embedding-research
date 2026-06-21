@@ -138,7 +138,7 @@ def _strip(robust):
 
 
 def run(device="cuda", out="results/byte_paper.json", smoke=False, steps=2000, batch=24,
-        n_per_lang=10000):
+        n_per_lang=10000, only=None):
     import torch
 
     from byte_embed import config as C
@@ -158,7 +158,13 @@ def run(device="cuda", out="results/byte_paper.json", smoke=False, steps=2000, b
         {"name": "byte-both", "backbone": "google/byt5-small", "objective": "both"},
         {"name": "subword-mt5-both", "backbone": "google/mt5-small", "objective": "both"},
         {"name": "byte-random", "backbone": "google/byt5-small", "objective": "both", "train": False},
+        {"name": "byte-robust", "backbone": "google/byt5-small", "objective": "both",
+         "augment": True},
+        {"name": "byte-robust-queue", "backbone": "google/byt5-small", "objective": "both",
+         "augment": True, "queue_size": 4096},
     ]
+    if only:
+        configs = [c for c in configs if c["name"] in only]
 
     teacher = TeacherEncoder(C.TEACHER, device=device)
 
@@ -196,7 +202,9 @@ def run(device="cuda", out="results/byte_paper.json", smoke=False, steps=2000, b
             hist = []
             if cfg.get("train", True):
                 hist = distill(student, teacher, sents, device=device, steps=steps, batch=batch,
-                               lr=C.LR, objective=cfg["objective"], log_every=max(100, steps // 4))
+                               lr=C.LR, objective=cfg["objective"], log_every=max(100, steps // 4),
+                               augment=cfg.get("augment", False),
+                               queue_size=cfg.get("queue_size", 0))
 
             def s_enc(xs, _st=student):
                 return _st.encode(xs, device=device)
@@ -264,9 +272,10 @@ def main():
     ap.add_argument("--n-per-lang", type=int, dest="n_per_lang", default=10000)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--out", default="results/byte_paper.json")
+    ap.add_argument("--only", nargs="+", default=None, help="run only these config names")
     a = ap.parse_args()
     run(device=a.device, out=a.out, smoke=a.smoke, steps=a.steps, batch=a.batch,
-        n_per_lang=a.n_per_lang)
+        n_per_lang=a.n_per_lang, only=a.only)
 
 
 if __name__ == "__main__":

@@ -116,6 +116,27 @@ PERTURBATIONS = {
 # a smaller core set for quick ablations
 CORE_PERTURBATIONS = ("diacritics", "romanize", "spelling", "keyboard")
 
+# TRAIN-time augmentation uses only these perturbation TYPES; the eval suite's other types
+# (diacritics, swap, delete, punct) are HELD OUT, so robustness on them measures generalization,
+# not memorization of the training noise.
+AUGMENT_TYPES = ("romanize", "spelling", "keyboard", "case")
+HELD_OUT_PERTS = ("diacritics", "swap", "delete", "punct")
+
+
+def random_augment(s: str, rng: random.Random) -> str:
+    """Stochastic orthographic augmentation for TRAINING (distinct noise per call), drawn from
+    AUGMENT_TYPES. The parametric noises get a fresh random seed each call so the student never
+    sees the same corruption twice."""
+    k = rng.randint(0, 10 ** 9)
+    t = rng.choice(AUGMENT_TYPES)
+    if t == "romanize":
+        return romanize(s)
+    if t == "spelling":
+        return spelling_noise(s, p=0.10, seed=k)
+    if t == "keyboard":
+        return keyboard_typo(s, p=0.10, seed=k)
+    return case_noise(s, p=0.25, seed=k)
+
 
 def _l2(x: np.ndarray) -> np.ndarray:
     return x / (np.linalg.norm(x, axis=1, keepdims=True) + 1e-9)
