@@ -111,18 +111,48 @@ vs student 0.206→0.059 — student drops less in absolute terms but is near-fl
   **c-RoLASER (Nishimwe, Sagot & Bawden, LREC-COLING 2024, arXiv:2403.17220)** — a near-exact
   twin (sentence embeddings × orthographic robustness × frozen-teacher distillation × char-vs-
   subword student) — found the OPPOSITE: their character student "never outperforms" subword and
-  failed to align to the teacher (cosine dist 0.05–0.13). **Our result overturns it:** byte >
-  subword on 8/8 perturbations WITH tight 0.92 alignment, and the random-init control (0.01→0.92)
-  directly answers their stated failure mode. ByteEmbed is best framed as a causally-controlled
-  rebuttal of a published negative — which REQUIRES engaging c-RoLASER head-on.
+  failed to align to the teacher (cosine dist 0.05–0.13). **Our result overturns it where it
+  counts:** at iso-compute the byte student beats the subword (mt5) student on retrieval and
+  classification (incl. romanized), and is more robust on within-script noise (6/8 perturbations,
+  §7), with the random-init control (0.01→0.92) answering their alignment failure mode. *Refined
+  by §7:* byte LOSES on romanization (script change), so the rebuttal is scoped to within-script
+  robustness + retrieval/classification, not a blanket "byte more robust everywhere."
 - **Reportable:** workshop/short (MRL, RepL4NLP, Findings) as-is; full main-conference needs an
   explicit c-RoLASER head-to-head, standard benchmarks (MTEB/MIRACL/BEIR, not just P@1), more
   languages, and a downstream task where the robustness gain matters.
 - Closest priors — overall: c-RoLASER (LREC-COLING 2024); method: 2026 Turkish tokenizer-surgery
   + cosine distillation; retrieval-robustness: CharacterBERT-DR (SIGIR 2022, arXiv:2204.00716).
 
+## 7. FULL-PAPER RUN — objectives + iso-compute + nuanced robustness (supersedes §1–5 cosine-only)
+Single orchestrated run (`run_paper.py`): byt5-small {cosine, contrastive, both} + mt5-small
+subword baseline (iso-compute) + random control; 8 langs, 2000 steps, batch 16. Teacher m-e5:
+Tatoeba 0.892, SIB 0.882, SIB-rom 0.600, STS 0.637.
+
+| config | align | Tatoeba | Tat-rom | SIB | SIB-rom | STS | mean rob-gap |
+|--------|------:|--------:|--------:|----:|--------:|----:|-------------:|
+| byte-cosine | 0.917 | 0.121 | 0.041 | 0.791 | 0.600 | 0.387 | +0.021 |
+| byte-contrastive | 0.305 | 0.558 | 0.202 | 0.836 | 0.643 | 0.410 | −0.028 |
+| byte-both | 0.767 | 0.514 | 0.178 | 0.826 | 0.644 | 0.419 | −0.007 |
+| subword-mt5-both | 0.707 | 0.240 | 0.058 | 0.782 | 0.536 | 0.520 | −0.021 |
+| byte-random | 0.014 | 0.023 | 0.022 | 0.601 | 0.467 | 0.122 | −0.003 |
+
+robustness gap by perturbation (byte-both vs teacher, 95% CI · langs won):
+diacritics +0.015 [+.013,+.016] 7/8 · spelling +0.006 8/8 · swap +0.005 8/8 · delete +0.006 8/8 ·
+case +0.007 7/8 · keyboard +0.002 6/8 · **romanize −0.087 [−.095,−.079] 2/8** · punct −0.009 0/8
+
+Findings: (1) contrastive closes the retrieval gap (Tatoeba 0.121→0.558, ~63% of teacher) — §5's
+weakness was an OBJECTIVE problem; (2) a robustness↔retrieval tradeoff (cosine robust/can't
+retrieve; contrastive retrieves/loses robustness; both balances) — the §1–4 "byte more robust on
+all 8 perts" was a COSINE-ONLY artifact; (3) iso-compute byte > subword on retrieval/classification/
+romanized tasks (STS the exception); (4) byte robustness is WITHIN-SCRIPT (6/8); it LOSES on
+romanization (script change) and punctuation; (5) the downstream win survives contrastive
+(byte-both beats teacher on romanized SIB, 0.644 vs 0.600); (6) fertility does NOT predict the byte
+gain (within-script r=−0.18); it predicts romanization vulnerability (r=−0.77). The fertility
+"unifier" is rejected.
+
 ## Caveats
 - Feasibility scale (2000 steps, 80k sentences); NOT the iso-compute / fertility-curve study.
+- §1–5 used cosine-only distillation; §7 (objectives) is the authoritative, current result.
 - The ~66% cross-lingual P@1 recovery is the weakness reviewers will probe first.
 - A few 2026-stamped preprints cited above were confirmed to exist but need author-roster checks
   before citing in a manuscript.

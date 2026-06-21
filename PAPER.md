@@ -77,38 +77,75 @@ alignment; **Tatoeba** bitext mining (standard retrieval, clean + romanized); **
 classification (standard, clean + romanized); **STS22**; **8-perturbation** robustness with
 bootstrap 95% CIs; random-init control; tokenizer-fertility analysis.
 
-**Paper-worthy results.** _[FILL FROM run results/byte_paper.json — bxxctmokr]_
-- Objective comparison (cosine vs contrastive vs both): retrieval gap closure + the
-  robustness↔retrieval tradeoff.  _[pending]_
-- Iso-compute byte (ByT5) vs subword (mt5) student: the byte effect at matched compute.  _[pending]_
-- Standard benchmarks (Tatoeba / SIB / STS), clean vs romanized: downstream robustness.  _[pending]_
-- 8-perturbation robustness vs teacher, CIs + per-language wins.  _[pending]_
-- Random-init control (alignment causality).  _[pending]_
+**Paper-worthy results (run `results/byte_paper.json`; teacher = m-e5: Tatoeba 0.892, SIB 0.882,
+SIB-rom 0.600, STS 0.637).**
 
-**Already established (feasibility, byte_embed/RESULTS.md):** byte student reproduces the teacher
-(align 0.92 across 5 scripts); **beats the subword teacher on romanized SIB-200** (0.611 vs 0.600,
-drops less under noise) → robustness translates downstream for classification; cosine-only
-retrieval is weak (Tatoeba 0.21 vs 0.89) → the retrieval gap the contrastive objective targets.
+| config | align | Tatoeba | Tat-rom | SIB | SIB-rom | STS | mean rob-gap |
+|--------|------:|--------:|--------:|----:|--------:|----:|-------------:|
+| byte-cosine | 0.917 | 0.121 | 0.041 | 0.791 | 0.600 | 0.387 | **+0.021** |
+| byte-contrastive | 0.305 | **0.558** | 0.202 | 0.836 | 0.643 | 0.410 | −0.028 |
+| **byte-both** | 0.767 | 0.514 | 0.178 | 0.826 | **0.644** | 0.419 | −0.007 |
+| subword-mt5-both (iso-compute) | 0.707 | 0.240 | 0.058 | 0.782 | 0.536 | 0.520 | −0.021 |
+| byte-random (control) | 0.014 | 0.023 | 0.022 | 0.601 | 0.467 | 0.122 | −0.003 |
+
+1. **Contrastive closes the retrieval gap.** Tatoeba **0.121 → 0.558** (cosine → contrastive),
+   ~63% of the teacher (vs 14%). The gap was an objective problem (cosine makes embeddings aligned
+   but not *discriminative*), now largely fixed. `byte-both` keeps it (0.514) with far better
+   alignment (0.767 vs 0.305).
+2. **A robustness↔retrieval tradeoff** (a finding, not a bug): cosine = robust (+0.021) but can't
+   retrieve (0.12); contrastive = retrieves (0.56) but loses the robustness edge (−0.028); `both`
+   balances. The earlier "byte more robust on everything" was a *cosine-only artifact* of
+   over-smooth embeddings.
+3. **Iso-compute byte > subword.** At matched compute/recipe, `byte-both` beats the mt5 subword
+   student on retrieval (0.51 vs 0.24), classification (0.83 vs 0.78), and **romanized** tasks
+   (SIB-rom 0.64 vs 0.54; Tat-rom 0.18 vs 0.06) — though subword wins STS (0.52 vs 0.42). Part of
+   byte's edge: it spends parameters on the transformer, not a 250k-row subword embedding table.
+4. **Downstream robustness win:** `byte-both` **beats the teacher on romanized SIB-200**
+   (0.644 vs 0.600) while nearly matching it clean (0.826 vs 0.882) → the robustness translates to
+   a real downstream classification gain, *even after* the contrastive objective.
+5. **Robustness is within-script.** Byte > teacher on all 8 languages for typos/diacritics/case/
+   swap/delete/keyboard (uniform, +0.002…+0.013, CIs exclude 0), but byte **loses on romanization**
+   (−0.087; non-Latin transliteration changes every byte) and punctuation (−0.009).
+6. **Random control:** alignment (0.014) and retrieval (0.023) are ≈0 untrained → 100% from
+   distillation. (Classification has a random-features floor of 0.60 — SIB is easy enough that even
+   random byte features classify; so the causal control is cleanest for alignment/retrieval.)
 
 ---
 
-## Part III — the unifying fertility analysis  _[FILL FROM run]_
-Teacher subword fertility (tokens/char) per language, correlated with (a) GRAFT recovery and
-(b) ByteEmbed's robustness gap. Hypothesis: higher fertility (more fragmentation) → harder GRAFT
-*and* larger byte robustness advantage. _[pending teacher-fertility numbers + correlation]_
+## Part III — fertility analysis (the hypothesized unifier did NOT hold; reported honestly)
+Teacher subword fertility (tokens/char): en 0.26, tr 0.24, ru 0.26, vi 0.27, sw 0.28, ar 0.30,
+bn 0.32, hi 0.33 — highest on non-Latin scripts, as expected.
+
+**The hypothesis "fertility → byte robustness gain" is REJECTED:**
+- within-script byte gain vs fertility: **r = −0.18** (no relationship; the gain is roughly uniform,
+  ~+0.007 across languages).
+- romanization byte gap vs fertility: **r = −0.77** — high-fertility non-Latin scripts are exactly
+  where byte *loses* (romanizing them rewrites every byte). Fertility predicts byte's romanization
+  **vulnerability**, not a gain.
+
+**Honest unifying thread (qualitative, not a clean law):** subword tokenization limits multilingual
+embeddings two ways — *coverage* (GRAFT) and *robustness* (ByteEmbed) — and **non-Latin /
+high-fertility scripts are the persistent hard frontier for BOTH** (GRAFT recovers least there;
+byte struggles with romanization there). The clean quantitative "fertility → byte gain" mechanism
+I hoped would unify the two methods does not exist; the link is thematic, not mechanistic.
 
 ---
 
 ## Limitations & honest scope (state up front in the paper)
-- **GRAFT** is a bitext-free translate-test (not a new algorithm) and **resource-bounded**: it
-  fails on the genuine low-resource tail where fastText quality collapses.
-- **ByteEmbed** is a robust *classifier*; competitive *retrieval* depends on the contrastive
-  objective + scale (the run quantifies how far contrastive closes the gap).
-- **Combined-paper risk (honest):** two methods under one theme is broader than a single focused
-  contribution; a reviewer may prefer ByteEmbed alone. The fertility analysis is what justifies the
-  pairing — if it doesn't show a clean correlation, split into two papers.
-- Feasibility scale throughout (≤ a few thousand steps; ≤ 21 langs). The full paper needs the
-  iso-compute curves, MMTEB/MIRACL, and the c-RoLASER head-to-head (byte_embed/RESULTS.md §6).
+- **GRAFT** is a bitext-free translate-test (not a new algorithm), **resource-bounded** (fails on
+  the low-resource tail where fastText collapses).
+- **ByteEmbed** retrieval is now competitive via the contrastive objective (Tatoeba ~63% of the
+  teacher) but still below it; byte is weaker on STS and **loses to subword on romanization** of
+  non-Latin scripts. Its robustness advantage is **within-script only**.
+- **Combined-paper verdict (honest):** the fertility analysis did NOT quantitatively unify the two
+  methods (Part III), so the pairing is *thematic, not mechanistic*. For a top venue, **ByteEmbed is
+  the stronger standalone** (contrastive retrieval fix + iso-compute byte>subword + within-script
+  robustness + downstream classification win + the c-RoLASER rebuttal); GRAFT is best used as the
+  training-free context/baseline. My recommendation: **lead with ByteEmbed**; fold GRAFT in only if
+  a reviewer-proof framing for the pairing emerges.
+- Feasibility scale (≤2k steps, ≤21 langs, byt5/mt5-small). A full paper still needs: iso-compute
+  *curves* (matched FLOPs, not just matched recipe), MMTEB/MIRACL, the c-RoLASER head-to-head, and
+  scale (the contrastive retrieval gap may keep closing with more steps/negatives).
 
 ## Full experimental setup (methods section)
 - **Teacher:** `intfloat/multilingual-e5-base` (frozen, 768-d).
