@@ -10,19 +10,30 @@ Feasibility experiments for two embedding research ideas:
    distilled from a frozen subword teacher, to test whether removing the subword
    vocabulary helps the long tail. *Training-heavy — runs on Colab A100 / cloud GPU.*
 
-These are **feasibility smoke tests**, not the full proposals. The goal is to answer
-"is the core mechanism worth pursuing?" cheaply, before committing to a full study.
-Proposals live in the conversation that generated this repo; see `gate_graft/README.md`
-and `byte_embed/README.md` for what each test does and does not show.
+## Results (start here)
+- **`PAPER.md`** — the **curated, paper-ready** results for both threads + the combined narrative
+  and honest scope. This is what would go in a paper.
+- **`RESULTS.md`** (GRAFT) and **`byte_embed/RESULTS.md`** (ByteEmbed) — full/detailed **reference**
+  results, controls, ablations, and the experimental audit.
+- **`figures/`** — paper figures (PNG); regenerate with `python gen_figures.py`.
+- Raw run JSON lives under `results/` (gitignored; kept locally for reference).
+
+Headline: contrastive distillation closes ByteEmbed's retrieval gap (Tatoeba 0.12→0.56); at
+iso-compute the byte student beats a subword (mt5) student and beats the teacher on *romanized*
+classification; robustness is within-script (it loses on romanization). GRAFT recovers 43–85% of a
+trained multilingual model bitext-free but is resource-bounded. See `PAPER.md` for the honest scope.
 
 ## Layout
 ```
-common/        shared loaders (fastText, MUSE dicts) + eval (BLI, CSLS)
-gate_graft/    GW alignment + reliability gate + feasibility run   (LOCAL, no GPU training)
-byte_embed/    byte student + distillation + robustness + Colab notebook + cloud scripts
+PAPER.md       curated paper-ready results (both threads) — START HERE
+RESULTS.md     GRAFT detailed/reference results + audit
+figures/       paper figures (PNG); built by gen_figures.py
+common/        shared loaders (fastText, MUSE dicts) + eval (BLI, CSLS, SIB, STS)
+gate_graft/    GW/anchored alignment + reliability gate + graft + 21-lang study  (LOCAL, no training)
+byte_embed/    byte student + distillation (cosine/contrastive/both) + run_paper + benchmark + RESULTS.md
 scripts/       check_env.py, download_data.py
 data/          downloaded vectors/dictionaries (gitignored)
-results/       run outputs (gitignored)
+results/       raw run JSON (gitignored; kept locally for reference)
 ```
 
 ## Quick start
@@ -53,4 +64,8 @@ Inference + CPU optimal transport only. ~1 GB VRAM, a few GB RAM, minutes/langua
   `requirements-cloud.txt` documents the right install. Colab/cloud images handle this.
 
 ## Status
-Scaffolding + runnable scripts. **No experiments have been run yet.**
+Feasibility **and** paper-level experiments have been **run** — locally on the RTX 5070 Ti
+(byt5-small/base byte students, the mt5-small subword baseline, contrastive distillation, the
+21-language GRAFT study; everything fit on 12 GB). Curated results in `PAPER.md`. Reproduce with
+`python -m byte_embed.run_paper --steps 2000 --batch 16` (→ `python gen_figures.py`) and
+`python -m gate_graft.run_matrix`.
