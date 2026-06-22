@@ -14,7 +14,7 @@ from torch.optim import AdamW
 
 def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
             lr=2e-4, log_every=100, objective="cosine", temp=0.05,
-            augment=False, queue_size=0):
+            augment=False, queue_size=0, rel_weight=0.0):
     """augment=True feeds the student orthographically-noised input while the teacher targets
     CLEAN text — distilling orthographic INVARIANCE while contrastive keeps discriminativeness
     (the robustness↔retrieval tradeoff-breaker). queue_size>0 keeps a MoCo-style FIFO of past
@@ -60,6 +60,10 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
                     loss = loss + (1.0 - (s_emb * t_emb).sum(-1)).mean()
             else:                   # default: cosine distance to teacher
                 loss = (1.0 - (s_emb * t_emb).sum(-1)).mean()
+            if rel_weight:          # relational / similarity-preserving distillation: match the
+                # student's pairwise cosine matrix to the teacher's -> preserves the graded
+                # similarity GEOMETRY (targets the fine-grained STS weakness).
+                loss = loss + rel_weight * ((s_emb @ s_emb.t() - t_emb @ t_emb.t()) ** 2).mean()
         loss.backward()
         opt.step()
         opt.zero_grad(set_to_none=True)
