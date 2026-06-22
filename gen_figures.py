@@ -206,6 +206,40 @@ def fig_tradeoff():
     plt.close(fig)
 
 
+def fig_isocompute():
+    """Quality-vs-parameters curve: byte vs subword students, with strong baselines as stars.
+    (Sizes are not iso-param — byte spends params on the transformer, subword on a 250k vocab —
+    so this is a quality-per-parameter view, the honest framing.)"""
+    import json
+    p = Path("results/byte_scale.json")
+    if not p.exists():
+        return
+    M = json.loads(p.read_text(encoding="utf-8")).get("models", {})
+    if not M:
+        return
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.3))
+    for ax, metric, title in [(axes[0], "tatoeba_mean", "Tatoeba (bitext mining)"),
+                              (axes[1], "sib_mean", "SIB-200 (classification)")]:
+        for kind, color, marker in [("byte", "#2a7", "o"), ("subword", "#59f", "s")]:
+            xy = sorted((r["params"] / 1e6, r.get(metric)) for n, r in M.items()
+                        if r.get("kind") == kind and r.get(metric) is not None and r.get("params"))
+            if xy:
+                ax.plot([a for a, b in xy], [b for a, b in xy], marker=marker, c=color,
+                        label=f"{kind} student", lw=1.5, ms=8)
+        for n, r in M.items():
+            if r.get("kind") == "baseline" and r.get(metric) is not None:
+                ax.scatter(r["params"] / 1e6, r[metric], marker="*", s=170, c="#c33", zorder=3)
+                ax.annotate(n, (r["params"] / 1e6, r[metric]), fontsize=8,
+                            xytext=(4, 4), textcoords="offset points")
+        ax.set_xlabel("parameters (M)")
+        ax.set_ylabel(title)
+        ax.legend(fontsize=8.5)
+    fig.suptitle("Quality vs parameters: byte vs subword students (★ = strong baselines)")
+    fig.tight_layout()
+    fig.savefig(FIG / "fig7_isocompute.png")
+    plt.close(fig)
+
+
 def main():
     fig_graft_recovery()
     print("fig1 (GRAFT recovery) written")
@@ -224,6 +258,11 @@ def main():
         print("fig6 (tradeoff) written")
     except Exception as e:  # noqa: BLE001
         print(f"fig_tradeoff FAILED: {type(e).__name__}: {e}")
+    try:
+        fig_isocompute()
+        print("fig7 (iso-compute / quality-vs-params) written")
+    except Exception as e:  # noqa: BLE001
+        print(f"fig_isocompute FAILED: {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":
