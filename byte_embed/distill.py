@@ -14,7 +14,7 @@ from torch.optim import AdamW
 
 def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
             lr=2e-4, log_every=100, objective="cosine", temp=0.05,
-            augment=False, queue_size=0, rel_weight=0.0):
+            augment=False, queue_size=0, rel_weight=0.0, optimizer="adamw"):
     """augment=True feeds the student orthographically-noised input while the teacher targets
     CLEAN text — distilling orthographic INVARIANCE while contrastive keeps discriminativeness
     (the robustness↔retrieval tradeoff-breaker). queue_size>0 keeps a MoCo-style FIFO of past
@@ -22,7 +22,16 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
     retrieval within a 12 GB budget (the frozen teacher makes queued negatives non-stale)."""
     import collections
 
-    opt = AdamW(student.parameters(), lr=lr)
+    if optimizer == "adafactor":
+        # Adafactor (native T5/ByT5 optimizer) keeps FACTORED second moments -> ~50 MB of state vs
+        # AdamW's ~2x-params (3.2 GB for byt5-base) — lets byt5-base train in 12 GB with headroom.
+        # Native self-scheduling mode (relative_step + warmup_init, lr=None) = the original T5 setup;
+        # a fixed low lr under-trains here, so we let Adafactor schedule its own step size.
+        from transformers.optimization import Adafactor
+        opt = Adafactor(student.parameters(), scale_parameter=True,
+                        relative_step=True, warmup_init=True, lr=None)
+    else:
+        opt = AdamW(student.parameters(), lr=lr)
     student.train()
     n = len(sentences)
     bf16 = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
