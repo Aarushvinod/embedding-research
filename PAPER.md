@@ -159,12 +159,17 @@ I hoped would unify the two methods does not exist; the link is thematic, not me
 - **Combined-paper verdict (honest):** the fertility analysis did NOT quantitatively unify the two
   methods (Part III), so the pairing is *thematic, not mechanistic*. For a top venue, **ByteEmbed is
   the stronger standalone** (contrastive retrieval fix + iso-compute byte>subword + within-script
-  robustness + downstream classification win + the c-RoLASER rebuttal); GRAFT is best used as the
-  training-free context/baseline. My recommendation: **lead with ByteEmbed**; fold GRAFT in only if
-  a reviewer-proof framing for the pairing emerges.
+  robustness + the augmentation romanization fix + downstream classification win); GRAFT is best
+  used as the training-free context/baseline. My recommendation: **lead with ByteEmbed**; fold
+  GRAFT in only if a reviewer-proof framing for the pairing emerges.
+- **No single close prior; cite honestly, don't claim a "rebuttal."** The work is an intersection
+  of disjoint lines (multilingual distillation = Reimers & Gurevych 2020; byte-LM distillation =
+  Bolmo/ALM, generative; char/UGC robustness = c-RoLASER, *monolingual English, character-CNN,
+  UGC benchmarks — not ours*). RoLASER's noisy→clean-teacher recipe is the **method ancestor** of
+  `byte-robust`, so that experiment is *less* novel, not a rebuttal of a negative.
 - Feasibility scale (≤2k steps, ≤21 langs, byt5/mt5-small). A full paper still needs: iso-compute
-  *curves* (matched FLOPs, not just matched recipe), MMTEB/MIRACL, the c-RoLASER head-to-head, and
-  scale (the contrastive retrieval gap may keep closing with more steps/negatives).
+  *curves* (matched FLOPs, not just matched recipe), MMTEB/MIRACL, scale (the contrastive retrieval
+  gap may keep closing with more steps/negatives), and careful positioning vs RoLASER + Bolmo/ALM.
 
 ## Full experimental setup (methods section)
 - **Teacher:** `intfloat/multilingual-e5-base` (frozen, 768-d).

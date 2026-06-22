@@ -107,21 +107,31 @@ vs student 0.206→0.059 — student drops less in absolute terms but is near-fl
   AI2 Bolmo) — but those byte-distillation works target *generative* LMs, not embedders.
 - **Application novelty: MEDIUM–HIGH.** No raw-byte multilingual *retrieval embedder* exists;
   ByT5/CANINE are LMs, the T5 dual-encoder line (GTR) is subword. The intersection is open.
-- **Empirical-finding novelty: HIGH**, and *contrarian*. The single closest prior work,
-  **c-RoLASER (Nishimwe, Sagot & Bawden, LREC-COLING 2024, arXiv:2403.17220)** — a near-exact
-  twin (sentence embeddings × orthographic robustness × frozen-teacher distillation × char-vs-
-  subword student) — found the OPPOSITE: their character student "never outperforms" subword and
-  failed to align to the teacher (cosine dist 0.05–0.13). **Our result overturns it where it
-  counts:** at iso-compute the byte student beats the subword (mt5) student on retrieval and
-  classification (incl. romanized), and is more robust on within-script noise (6/8 perturbations,
-  §7), with the random-init control (0.01→0.92) answering their alignment failure mode. *Refined
-  by §7:* byte LOSES on romanization (script change), so the rebuttal is scoped to within-script
-  robustness + retrieval/classification, not a blanket "byte more robust everywhere."
-- **Reportable:** workshop/short (MRL, RepL4NLP, Findings) as-is; full main-conference needs an
-  explicit c-RoLASER head-to-head, standard benchmarks (MTEB/MIRACL/BEIR, not just P@1), more
-  languages, and a downstream task where the robustness gain matters.
-- Closest priors — overall: c-RoLASER (LREC-COLING 2024); method: 2026 Turkish tokenizer-surgery
-  + cosine distillation; retrieval-robustness: CharacterBERT-DR (SIGIR 2022, arXiv:2204.00716).
+- **Empirical-finding novelty: MEDIUM (corrected — was overstated).** There is NO single close
+  prior; the work sits at an intersection of disjoint lines: multilingual sentence-embedding
+  distillation (Reimers & Gurevych 2020, subword→subword), byte-level distillation (Bolmo / ALM,
+  *generative* LMs), and char-level robustness (c-RoLASER). No one occupies the multilingual ×
+  byte × retrieval intersection.
+- **On c-RoLASER specifically (correcting an earlier overstatement).** Nishimwe, Sagot & Bawden,
+  LREC-COLING 2024, arXiv:2403.17220, "Making Sentence Embeddings Robust to User-Generated Content"
+  is **monolingual English**, distills **LASER2**, and its c-RoLASER student is a **Character-CNN
+  (CharacterBERT-style), NOT byte-level**; it evaluates **UGC** robustness (MultiLexNorm, RoCS-MT,
+  FLORES†) + a few MTEB tasks — **none of our multilingual benchmarks (Tatoeba/SIB-200/STS22)**.
+  So it is NOT a "near-exact twin we overturn": there is no head-to-head (we never ran their UGC
+  eval; they never ran ours). It IS relevant in two narrower ways: (a) its recipe (distill noisy→
+  clean-teacher) is exactly our `byte-robust` augmentation objective → **prior art for that method**,
+  making byte-robust *less* novel, not a rebuttal; (b) their char-level negative is a data point our
+  byte-level multilingual result contrasts with, in a different setting. Do NOT frame the paper as
+  "overturning a published negative."
+- **Reportable:** workshop/short (MRL, RepL4NLP, Findings) as-is; full main-conference needs
+  standard benchmarks (MTEB/MIRACL/BEIR), more languages, an iso-compute *curve*, and a real
+  downstream task — plus careful positioning vs the distillation-for-robustness line (RoLASER) and
+  the byte-LM-distillation line (Bolmo/ALM), since the method is a recombination of known parts.
+- No single close prior (intersection of disjoint lines): multilingual sentence-embedding
+  distillation (Reimers & Gurevych 2020, subword→subword); byte-LM distillation (Bolmo/ALM,
+  generative); char/UGC robustness (c-RoLASER, English). RoLASER is the **method ancestor** of
+  `byte-robust` (noisy→clean-teacher distillation); CharacterBERT-DR (SIGIR 2022) is the closest
+  retrieval-robustness work.
 
 ## 7. FULL-PAPER RUN — objectives + iso-compute + nuanced robustness (supersedes §1–5 cosine-only)
 Single orchestrated run (`run_paper.py`): byt5-small {cosine, contrastive, both} + mt5-small
