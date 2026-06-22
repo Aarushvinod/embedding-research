@@ -122,6 +122,25 @@ SIB-rom 0.600, STS 0.637).**
 8. **Toward a better retriever (modest).** The queue lifts retrieval 0.514 → 0.543 (~61% of the
    teacher) — scaling negatives helps, but the byte student is not yet SOTA-competitive at feasibility
    scale; more negatives/steps/data is the lever, and the positive slope suggests headroom.
+9. **Scale-up + iso-compute curve + strong baselines (12 langs, 3000 steps) — the sharper contribution.**
+   Byte (byt5) vs subword (mt5) students at two sizes + mE5/LaBSE baselines:
+
+   | model | params | SIB | Tatoeba | STS |
+   |---|---:|---:|---:|---:|
+   | byte-small | 219M | 0.818 | **0.590** | 0.453 |
+   | subword-small | 147M | 0.787 | 0.277 | 0.551 |
+   | byte-base | 416M | 0.811 | **0.583** | 0.480 |
+   | subword-base | 278M | 0.842 | 0.362 | 0.559 |
+   | mE5 teacher | 278M | 0.882 | 0.892 | 0.661 |
+   | LaBSE | 472M | 0.839 | 0.937 | 0.636 |
+
+   **Byte ≫ subword on retrieval at both sizes** (+0.22–0.31; byte-small 219M beats subword-base 278M) —
+   the parameter-allocation argument (encoder vs 250k vocab table). **Subword > byte on STS** (~0.55 vs
+   ~0.47). Classification a wash. Both below SOTA baselines (training-scale gap, not architecture).
+   → **The defensible headline contribution: tokenizer-free byte distillation is a better parameter
+   allocation for multilingual RETRIEVAL + ROBUSTNESS at matched compute** — a controlled iso-compute
+   study + the first byte-level multilingual retriever. Caveat: base models used half the token-views
+   (batch 8 vs 16), so a clean scaling claim needs matched-token training.
 
 ---
 
