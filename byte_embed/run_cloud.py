@@ -67,7 +67,7 @@ def _eval(enc, langs, miracl_langs, miracl_q, miracl_extra):
 
 
 def run(phase="all", out="results/byte_cloud.json", smoke=False, device="cuda",
-        scaling_steps=15000, flagship_steps=40000, n_scaling=20000, n_flagship=45000,
+        scaling_steps=15000, flagship_steps=40000, n_scaling=10000, n_flagship=10000,
         miracl_q=250, miracl_extra=0, ckpt_dir="checkpoints"):
     import torch
     from sentence_transformers import SentenceTransformer
