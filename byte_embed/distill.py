@@ -4,6 +4,7 @@ fits a 24 GB 4090 and (tiny) even a 12 GB laptop. On an 80 GB A100 you can raise
 MAX_BYTES or switch to a contrastive objective."""
 from __future__ import annotations
 
+import os
 import random
 import time
 
@@ -14,7 +15,8 @@ from torch.optim import AdamW
 
 def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
             lr=2e-4, log_every=100, objective="cosine", temp=0.05,
-            augment=False, queue_size=0, rel_weight=0.0, optimizer="adamw"):
+            augment=False, queue_size=0, rel_weight=0.0, optimizer="adamw",
+            ckpt_path=None, ckpt_every=5000):
     """augment=True feeds the student orthographically-noised input while the teacher targets
     CLEAN text — distilling orthographic INVARIANCE while contrastive keeps discriminativeness
     (the robustness↔retrieval tradeoff-breaker). queue_size>0 keeps a MoCo-style FIFO of past
@@ -41,8 +43,15 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
         from byte_embed.robustness import random_augment
     queue = collections.deque(maxlen=max(1, queue_size // batch)) if queue_size else None
     history = []
+    start = 1
+    if ckpt_path and os.path.exists(ckpt_path):  # resume a disconnected cloud run (model + optimizer)
+        ck = torch.load(ckpt_path, map_location=device)
+        student.load_state_dict(ck["model"])
+        opt.load_state_dict(ck["opt"])
+        start = ck["step"] + 1
+        print(f"  [resume] loaded {ckpt_path} -> continuing from step {start}/{steps}")
     t0 = time.time()
-    for step in range(1, steps + 1):
+    for step in range(start, steps + 1):
         texts = [sentences[i] for i in random.sample(range(n), min(batch, n))]
         with torch.no_grad():
             # .clone() converts the teacher's inference-mode tensor into a normal tensor (an
@@ -81,5 +90,8 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
         if step == 1 or step % log_every == 0:
             history.append({"step": step, "loss": float(loss.item())})
             print(f"  step {step:>5}/{steps}  loss {loss.item():.4f}  "
-                  f"({(time.time()-t0)/step*1000:.0f} ms/step)")
+                  f"({(time.time() - t0) / (step - start + 1) * 1000:.0f} ms/step)")
+        if ckpt_path and (step % ckpt_every == 0 or step == steps):  # disconnect-safe checkpoint
+            torch.save({"step": step, "model": student.state_dict(), "opt": opt.state_dict()},
+                       ckpt_path)
     return history
