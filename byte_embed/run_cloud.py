@@ -58,17 +58,17 @@ def _save(results, out):
     Path(out).write_text(json.dumps(results, indent=2, ensure_ascii=False))
 
 
-def _eval(enc, langs, miracl_langs, miracl_q, miracl_extra):
+def _eval(enc, langs, miracl_langs, miracl_q, miracl_distractors, cache_dir):
     bm = _benchmark(enc, langs)
     if miracl_langs:
         bm["miracl"] = eval_miracl_langs(enc, miracl_langs, n_queries=miracl_q,
-                                         corpus_extra=miracl_extra)
+                                         distractors=(miracl_distractors or 20000), cache_dir=cache_dir)
     return bm
 
 
 def run(phase="all", out="results/byte_cloud.json", smoke=False, device="cuda",
         scaling_steps=15000, flagship_steps=40000, n_scaling=8000, n_flagship=8000,
-        miracl_q=250, miracl_extra=0, ckpt_dir="checkpoints", teacher_id=TEACHER_BASE):
+        miracl_q=250, miracl_extra=20000, ckpt_dir="checkpoints", teacher_id=TEACHER_BASE):
     import torch
     from sentence_transformers import SentenceTransformer
 
@@ -77,11 +77,11 @@ def run(phase="all", out="results/byte_cloud.json", smoke=False, device="cuda",
     from byte_embed.model import ByteStudent
 
     langs = ["en", "sw", "tr", "ar"] if smoke else LANGS
-    miracl_langs = ["sw", "en"] if smoke else MIRACL_EVAL
+    miracl_langs = ["sw"] if smoke else MIRACL_EVAL  # sw corpus is small (~130k) -> fast smoke
     if smoke:
         scaling_steps = flagship_steps = 80
         n_scaling = n_flagship = 1500
-        miracl_q = 30
+        miracl_q, miracl_extra = 30, 1500
 
     # plan rows: name, backbone, teacher, steps, batch, n_per_lang, checkpoint?
     # FAIR size test: EQUAL batch 64 at every size (the 80 GB A100 fits byt5-large at 64 — it used
@@ -139,7 +139,7 @@ def run(phase="all", out="results/byte_cloud.json", smoke=False, device="cuda",
             def s_enc(xs, _s=student):
                 return _s.encode(xs, device=device)
 
-            bm = _eval(s_enc, langs, miracl_langs, miracl_q, miracl_extra)
+            bm = _eval(s_enc, langs, miracl_langs, miracl_q, miracl_extra, ckpt_dir)
             bm.update(params=params, kind="byte", backbone=backbone, teacher=tname, steps=steps,
                       peak_vram_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2))
             results["models"][name] = bm
@@ -168,7 +168,7 @@ def run(phase="all", out="results/byte_cloud.json", smoke=False, device="cuda",
                 return _m.encode([_p + x for x in xs], normalize_embeddings=True,
                                  convert_to_numpy=True, show_progress_bar=False)
 
-            bm = _eval(b_enc, langs, miracl_langs, miracl_q, miracl_extra)
+            bm = _eval(b_enc, langs, miracl_langs, miracl_q, miracl_extra, ckpt_dir)
             bm.update(params=sum(p.numel() for p in m.parameters()), kind="baseline", backbone=mid)
             results["models"][name] = bm
             _save(results, out)

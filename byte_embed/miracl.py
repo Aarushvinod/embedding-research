@@ -1,66 +1,32 @@
-"""MIRACL passage-retrieval eval (subset) — a REAL multilingual retrieval benchmark.
+"""MIRACL passage-retrieval eval — a REAL multilingual retrieval benchmark (nDCG@10 / recall@100).
 
-Tatoeba (bitext mining) is only a *proxy* for retrieval; MIRACL is query->passage retrieval with
-graded relevance — the standard multilingual retriever benchmark. The full per-language corpora
-are millions of passages (too big for a Colab session), so we score over a SHARED CANDIDATE POOL
-built from the dev set's positive + hard-negative passages (optionally augmented with sampled
-corpus passages as extra distractors): for each query we rank the whole pool and compute
-nDCG@10 / recall@100 / MRR@10 against the gold positive docids. This is an honest, session-feasible
-retrieval eval (a rerank-over-hard-pool setting); the pool size is reported so the difficulty is
-explicit, and `corpus_extra` makes it as hard as the session budget allows.
+Loads from **mteb/MIRACLRetrieval**, the parquet-native MTEB reformat of MIRACL — it has NO loading
+script, so (unlike `miracl/miracl`, `jinaai/miracl`, `mteb/miracl-hard-negatives`) it works on
+`datasets>=4.0`, which dropped script-based datasets. No version pin, no gated-repo access needed.
 
-  python -m byte_embed.miracl --selftest        # synthetic nDCG math + (optional) tiny real load
+Format is the standard retrieval triple per language: `{lang}-queries` (_id, text), `{lang}-qrels`
+(query-id, corpus-id, score) and `{lang}-corpus` (_id, text, title; up to millions of passages).
+Encoding a whole corpus per language is too heavy on a Colab budget, so we score a RERANK POOL:
+for a sample of queries we rank ALL their relevant passages + a fixed sample of corpus passages as
+distractors. The corpus is streamed ONCE per language and the pool is CACHED to disk, so the six
+models in a run reuse it instead of re-streaming. Pool size is reported so difficulty is explicit.
+
+  python -m byte_embed.miracl --selftest          # synthetic nDCG sanity
+  python -m byte_embed.miracl --lang sw            # tiny real pool build (verifies mteb/MIRACLRetrieval)
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 
-# MIRACL's 16 "known" languages (it also has 2 surprise langs); we default to a script-diverse subset.
-MIRACL_LANGS = ["ar", "bn", "en", "es", "fa", "fi", "fr", "hi",
-                "id", "ja", "ko", "ru", "sw", "te", "th", "zh"]
-DEFAULT_EVAL = ["ar", "bn", "en", "fr", "hi", "ru", "sw", "zh"]  # diverse scripts, overlaps our langs
-
-
-def _load_miracl_dev(lang):
-    """miracl/miracl dev split (queries + positive/negative passages). Uses a loading script, so it
-    needs trust_remote_code on newer `datasets`; tries with then without. May be GATED -> prints a
-    clear hint to `huggingface-cli login` / set HF_TOKEN rather than failing silently."""
-    from datasets import load_dataset
-
-    last = None
-    for kw in ({"trust_remote_code": True}, {}):
-        try:
-            return load_dataset("miracl/miracl", lang, split="dev", **kw)
-        except TypeError:  # this datasets version rejects trust_remote_code
-            continue
-        except Exception as e:  # noqa: BLE001
-            last = e
-    print(f"  [miracl] dev unavailable for {lang}: {type(last).__name__}: {last}\n"
-          f"          (MIRACL is gated — on Colab run `huggingface-cli login` or set HF_TOKEN, "
-          f"and accept the dataset terms at https://huggingface.co/datasets/miracl/miracl)")
-    return None
-
-
-def _sample_corpus(lang, n, exclude, seed=0):
-    """Stream n extra distractor passages from miracl/miracl-corpus[lang] (skips `exclude` docids)."""
-    if n <= 0:
-        return []
-    from datasets import load_dataset
-
-    out = []
-    try:
-        ds = load_dataset("miracl/miracl-corpus", lang, split="train", streaming=True)
-        for ex in ds:
-            d = ex["docid"]
-            if d in exclude:
-                continue
-            out.append((d, (ex.get("title", "") + " " + ex.get("text", "")).strip()))
-            if len(out) >= n:
-                break
-    except Exception as e:  # noqa: BLE001
-        print(f"  [miracl] corpus sampling unavailable for {lang} ({type(e).__name__}); "
-              f"using pos+neg pool only")
-    return out
+_DS = "mteb/MIRACLRetrieval"
+MIRACL_LANGS = ["ar", "bn", "de", "en", "es", "fa", "fi", "fr", "hi", "id",
+                "ja", "ko", "ru", "sw", "te", "th", "yo", "zh"]
+# default eval = small/mid-corpus langs (a full streaming pass is fast), 6 scripts. Add big-corpus
+# langs (en/ru/de/fr/es/ja/zh) explicitly if you want them and can spend the streaming time.
+DEFAULT_EVAL = ["sw", "bn", "hi", "te", "th", "ko", "fi", "ar"]
 
 
 def _dcg(rels):
@@ -69,84 +35,100 @@ def _dcg(rels):
 
 
 def _ndcg_at_k(ranked_rel, k):
-    actual = _dcg(ranked_rel[:k])
     ideal = _dcg(sorted(ranked_rel, reverse=True)[:k])
-    return actual / ideal if ideal > 0 else 0.0
+    return _dcg(ranked_rel[:k]) / ideal if ideal > 0 else 0.0
 
 
-def eval_miracl(encode_fn, lang, n_queries=250, corpus_extra=0, seed=0):
-    """Rank a shared pos+neg(+sampled-corpus) pool per query; return nDCG@10 / recall@100 / MRR@10.
-    `encode_fn(list[str]) -> np.ndarray` (the model's sentence encoder). Returns None if unavailable."""
+def _build_pool(lang, n_queries, distractors, seed, cache_dir):
+    """Stream the corpus ONCE; return (queries{qid:text}, rel{qid:[docids-in-pool]}, pool_id, pool_text).
+    Cached to disk so every model in a run reuses it. Returns None if the language is unavailable."""
+    cache = Path(cache_dir) / f"miracl_{lang}_{n_queries}q_{distractors}d_{seed}.json"
+    if cache.exists():
+        d = json.loads(cache.read_text(encoding="utf-8"))
+        return d["queries"], {k: set(v) for k, v in d["rel"].items()}, d["pool_id"], d["pool_text"]
+
+    from datasets import load_dataset
+    try:
+        q = load_dataset(_DS, f"{lang}-queries", split="dev")
+        qr = load_dataset(_DS, f"{lang}-qrels", split="dev")
+    except Exception as e:  # noqa: BLE001
+        print(f"  [miracl] {lang} queries/qrels unavailable: {type(e).__name__}: {e}")
+        return None
+
+    qid2text = {str(r["_id"]): r["text"] for r in q}
+    rel = {}
+    for r in qr:
+        if r["score"] > 0:
+            rel.setdefault(str(r["query-id"]), set()).add(str(r["corpus-id"]))
+    rng = np.random.default_rng(seed)
+    qids = [qid for qid in qid2text if qid in rel]
+    rng.shuffle(qids)
+    qids = qids[:n_queries]
+    if not qids:
+        return None
+    needed = set().union(*(rel[qid] for qid in qids))
+
+    id2text, distract = {}, []
+    for d in load_dataset(_DS, f"{lang}-corpus", split="dev", streaming=True):
+        did = str(d["_id"])
+        if did in needed and did not in id2text:
+            id2text[did] = (str(d.get("title") or "") + " " + str(d.get("text") or "")).strip()
+        elif len(distract) < distractors:
+            distract.append((did, (str(d.get("title") or "") + " " + str(d.get("text") or "")).strip()))
+        if len(id2text) == len(needed) and len(distract) >= distractors:
+            break
+
+    found = set(id2text)
+    queries = {qid: qid2text[qid] for qid in qids if rel[qid] & found}
+    rel = {qid: sorted(rel[qid] & found) for qid in queries}
+    pool_id = list(id2text) + [i for i, _ in distract]
+    pool_text = list(id2text.values()) + [t for _, t in distract]
+
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"queries": queries, "rel": rel,
+                                 "pool_id": pool_id, "pool_text": pool_text}, ensure_ascii=False))
+    return queries, {k: set(v) for k, v in rel.items()}, pool_id, pool_text
+
+
+def eval_miracl(encode_fn, lang, n_queries=200, distractors=20000, seed=0, cache_dir="checkpoints"):
+    """Rank each query's relevant passages against a relevant+distractor pool; nDCG@10/recall@100/MRR@10."""
     from common.eval import l2norm
 
-    ds = _load_miracl_dev(lang)
-    if ds is None:
+    built = _build_pool(lang, n_queries, distractors, seed, cache_dir)
+    if not built:
         return None
-    rng = np.random.default_rng(seed)
-    order = rng.permutation(len(ds))[:min(n_queries, len(ds))]
-
-    queries, qrels = [], []
-    pool_text, pool_docid, seen = [], [], {}
-
-    def _add(p):
-        d = p["docid"]
-        if d not in seen:
-            seen[d] = len(pool_text)
-            pool_text.append((p.get("title", "") + " " + p.get("text", "")).strip())
-            pool_docid.append(d)
-
-    for i in order:
-        row = ds[int(i)]
-        pos = row.get("positive_passages") or []
-        neg = row.get("negative_passages") or []
-        rel = {p["docid"] for p in pos}
-        if not rel:
-            continue
-        for p in pos:
-            _add(p)
-        for p in neg:
-            _add(p)
-        queries.append(row["query"])
-        qrels.append(rel)
-
-    if not queries:
+    queries, rel, pool_id, pool_text = built
+    qids = list(queries)
+    if not qids:
         return None
-    if corpus_extra > 0:
-        for d, t in _sample_corpus(lang, corpus_extra, exclude=set(pool_docid), seed=seed):
-            seen[d] = len(pool_text)
-            pool_text.append(t)
-            pool_docid.append(d)
 
-    q_emb = l2norm(encode_fn(queries))
-    p_emb = l2norm(encode_fn(pool_text))
-    docid = np.array(pool_docid)
-
+    Q = l2norm(encode_fn([queries[qid] for qid in qids]))
+    P = l2norm(encode_fn(pool_text))
+    docid = np.array(pool_id)
     ndcgs, recalls, mrrs = [], [], []
-    for qi, rel in enumerate(qrels):
-        ranked = docid[np.argsort(-(q_emb[qi] @ p_emb.T))]
-        ranked_rel = np.fromiter((1.0 if d in rel else 0.0 for d in ranked), dtype=float,
-                                 count=len(ranked))
+    for k, qid in enumerate(qids):
+        r = rel[qid]
+        ranked = docid[np.argsort(-(Q[k] @ P.T))]
+        ranked_rel = np.fromiter((1.0 if d in r else 0.0 for d in ranked), float, len(ranked))
         ndcgs.append(_ndcg_at_k(ranked_rel, 10))
-        recalls.append(float(ranked_rel[:100].sum()) / len(rel))
+        recalls.append(float(ranked_rel[:100].sum()) / len(r))
         hit = np.flatnonzero(ranked_rel[:10])
         mrrs.append(1.0 / (hit[0] + 1) if len(hit) else 0.0)
-
-    return {"ndcg@10": round(float(np.mean(ndcgs)), 4),
-            "recall@100": round(float(np.mean(recalls)), 4),
-            "mrr@10": round(float(np.mean(mrrs)), 4),
-            "n_queries": len(queries), "pool": len(pool_text)}
+    return {"ndcg@10": round(float(np.mean(ndcgs)), 4), "recall@100": round(float(np.mean(recalls)), 4),
+            "mrr@10": round(float(np.mean(mrrs)), 4), "n_queries": len(qids), "pool": len(pool_text)}
 
 
-def eval_miracl_langs(encode_fn, langs=None, n_queries=250, corpus_extra=0, seed=0):
-    """{lang: metrics} + macro means across available langs."""
+def eval_miracl_langs(encode_fn, langs=None, n_queries=200, distractors=20000, seed=0,
+                      cache_dir="checkpoints"):
     langs = langs or DEFAULT_EVAL
     per = {}
     for lang in langs:
-        m = eval_miracl(encode_fn, lang, n_queries=n_queries, corpus_extra=corpus_extra, seed=seed)
+        m = eval_miracl(encode_fn, lang, n_queries=n_queries, distractors=distractors, seed=seed,
+                        cache_dir=cache_dir)
         per[lang] = m
         if m:
             print(f"  [miracl] {lang}: nDCG@10={m['ndcg@10']} recall@100={m['recall@100']} "
-                  f"mrr@10={m['mrr@10']} (pool {m['pool']}, {m['n_queries']} q)")
+                  f"mrr@10={m['mrr@10']} (pool {m['pool']}, {m['n_queries']}q)")
     vals = [m["ndcg@10"] for m in per.values() if m]
     rec = [m["recall@100"] for m in per.values() if m]
     return {"per_lang": per,
@@ -155,42 +137,35 @@ def eval_miracl_langs(encode_fn, langs=None, n_queries=250, corpus_extra=0, seed
 
 
 def _selftest():
-    # nDCG sanity: perfect ranking -> 1.0; worst -> < ideal
     assert abs(_ndcg_at_k([1, 1, 0, 0], 10) - 1.0) < 1e-9
     assert _ndcg_at_k([0, 0, 1, 1], 10) < 1.0
     assert _ndcg_at_k([0, 0, 0], 10) == 0.0
-    # synthetic retrieval: a "good" encoder (identity-ish) should beat random nDCG
     rng = np.random.default_rng(0)
-    dim, npool = 32, 200
+    dim, npool, good = 32, 200, []
     P = rng.standard_normal((npool, dim))
-    # query = noisy copy of a random pool row -> that row should rank top
-    good_ndcg = []
     for _ in range(50):
         j = rng.integers(npool)
-        q = P[j] + 0.01 * rng.standard_normal(dim)
-        ranked = np.argsort(-(q @ P.T))
-        rel = (ranked == j).astype(float)
-        good_ndcg.append(_ndcg_at_k(rel, 10))
-    assert np.mean(good_ndcg) > 0.9, np.mean(good_ndcg)
-    print(f"selftest OK: synthetic good-encoder nDCG@10={np.mean(good_ndcg):.3f} (>0.9)")
+        ranked = np.argsort(-((P[j] + 0.01 * rng.standard_normal(dim)) @ P.T))
+        good.append(_ndcg_at_k((ranked == j).astype(float), 10))
+    assert np.mean(good) > 0.9, np.mean(good)
+    print(f"selftest OK: synthetic good-encoder nDCG@10={np.mean(good):.3f} (>0.9)")
 
 
 def main():
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("--lang", default=None, help="if set, try a tiny real MIRACL dev load (CPU ok)")
+    ap.add_argument("--lang", default=None)
+    ap.add_argument("--distractors", type=int, default=2000)
     a = ap.parse_args()
     if a.selftest:
         _selftest()
     if a.lang:
-        ds = _load_miracl_dev(a.lang)
-        if ds is not None:
-            print(f"loaded miracl/{a.lang} dev: {len(ds)} queries; cols={ds.column_names}")
-            r = ds[0]
-            print(f"  q0='{r['query'][:60]}...' "
-                  f"#pos={len(r.get('positive_passages') or [])} "
-                  f"#neg={len(r.get('negative_passages') or [])}")
+        built = _build_pool(a.lang, 50, a.distractors, 0, "checkpoints")
+        if built:
+            queries, rel, pool_id, pool_text = built
+            print(f"built mteb/MIRACLRetrieval {a.lang}: {len(queries)} queries, pool {len(pool_text)} "
+                  f"(rel+{a.distractors} distractors); q0={list(queries.values())[0][:60]!r}")
 
 
 if __name__ == "__main__":
