@@ -67,8 +67,8 @@ def _eval(enc, langs, miracl_langs, miracl_q, miracl_extra):
 
 
 def run(phase="all", out="results/byte_cloud.json", smoke=False, device="cuda",
-        scaling_steps=15000, flagship_steps=40000, n_scaling=10000, n_flagship=10000,
-        miracl_q=250, miracl_extra=0, ckpt_dir="checkpoints"):
+        scaling_steps=15000, flagship_steps=40000, n_scaling=8000, n_flagship=8000,
+        miracl_q=250, miracl_extra=0, ckpt_dir="checkpoints", teacher_id=TEACHER_BASE):
     import torch
     from sentence_transformers import SentenceTransformer
 
@@ -84,9 +84,15 @@ def run(phase="all", out="results/byte_cloud.json", smoke=False, device="cuda",
         miracl_q = 30
 
     # plan rows: name, backbone, teacher, steps, batch, n_per_lang, checkpoint?
-    scaling = [("byte-small", "google/byt5-small", TEACHER_BASE, scaling_steps, 64, n_scaling, False),
-               ("byte-base", "google/byt5-base", TEACHER_BASE, scaling_steps, 32, n_scaling, False),
-               ("byte-large", "google/byt5-large", TEACHER_BASE, scaling_steps, 16, n_scaling, False)]
+    # FAIR size test: EQUAL batch 64 at every size (the 80 GB A100 fits byt5-large at 64 — it used
+    # only 20 GB at batch 16), so token-views scale ONLY with steps; and bigger models get MORE
+    # steps (compute-optimal lean), the opposite of the old 64/32/16 batch shrink that starved the
+    # big models. byte-large is checkpointed (disconnect-safe: re-run cell 5 resumes it). One teacher
+    # (mE5-base by default — pass teacher_id to override) keeps the size axis clean.
+    #   views: byte-small 640k | byte-base 832k | byte-large 960k  (4x byte-large's old 240k)
+    scaling = [("byte-small", "google/byt5-small", teacher_id, 10000, 64, n_scaling, False),
+               ("byte-base", "google/byt5-base", teacher_id, 13000, 64, n_scaling, False),
+               ("byte-large", "google/byt5-large", teacher_id, 15000, 64, n_scaling, True)]
     flagship = [("byte-large-flagship", "google/byt5-large", TEACHER_LARGE, flagship_steps, 16,
                  n_flagship, True)]
     if smoke:
