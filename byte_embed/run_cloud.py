@@ -84,15 +84,19 @@ def run(phase="all", out="results/byte_cloud.json", smoke=False, device="cuda",
         miracl_q, miracl_extra = 30, 1500
 
     # plan rows: name, backbone, teacher, steps, batch, n_per_lang, checkpoint?
-    # FAIR size test: EQUAL batch 64 at every size (the 80 GB A100 fits byt5-large at 64 — it used
-    # only 20 GB at batch 16), so token-views scale ONLY with steps; and bigger models get MORE
-    # steps (compute-optimal lean), the opposite of the old 64/32/16 batch shrink that starved the
-    # big models. byte-large is checkpointed (disconnect-safe: re-run cell 5 resumes it). One teacher
-    # (mE5-base by default — pass teacher_id to override) keeps the size axis clean.
-    #   views: byte-small 640k | byte-base 832k | byte-large 960k  (4x byte-large's old 240k)
-    scaling = [("byte-small", "google/byt5-small", teacher_id, 10000, 64, n_scaling, False),
-               ("byte-base", "google/byt5-base", teacher_id, 13000, 64, n_scaling, False),
-               ("byte-large", "google/byt5-large", teacher_id, 15000, 64, n_scaling, True)]
+    # FAIR size test + iso-compute byte-vs-subword AT SCALE. EQUAL batch 64 at every size (the 80 GB
+    # A100 fits byt5/mt5-large at 64 — byt5-large used only 20 GB at batch 16), so token-views scale
+    # ONLY with steps, and bigger models get MORE steps (the opposite of the old 64/32/16 shrink that
+    # starved the big models). byte (byt5) AND subword (mt5) at each size = the parameter-allocation
+    # claim at A100 scale, not just the 12 GB local run. *-large checkpointed (disconnect-safe: re-run
+    # cell 5 resumes). One teacher (mE5-base; pass teacher_id to override) keeps the axis clean.
+    #   views per size: small 640k | base 832k | large 960k.  byte runs FIRST so the byte size curve
+    #   is complete even if a long multi-session run is stopped early.
+    _sizes = [("small", 10000, False), ("base", 13000, False), ("large", 15000, True)]
+    scaling = ([(f"byte-{s}", f"google/byt5-{s}", teacher_id, st, 64, n_scaling, ck)
+                for s, st, ck in _sizes]
+               + [(f"subword-{s}", f"google/mt5-{s}", teacher_id, st, 64, n_scaling, ck)
+                  for s, st, ck in _sizes])
     flagship = [("byte-large-flagship", "google/byt5-large", TEACHER_LARGE, flagship_steps, 16,
                  n_flagship, True)]
     if smoke:
@@ -140,7 +144,8 @@ def run(phase="all", out="results/byte_cloud.json", smoke=False, device="cuda",
                 return _s.encode(xs, device=device)
 
             bm = _eval(s_enc, langs, miracl_langs, miracl_q, miracl_extra, ckpt_dir)
-            bm.update(params=params, kind="byte", backbone=backbone, teacher=tname, steps=steps,
+            bm.update(params=params, kind=("byte" if "byt5" in backbone else "subword"),
+                      backbone=backbone, teacher=tname, steps=steps,
                       peak_vram_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2))
             results["models"][name] = bm
             _save(results, out)
@@ -193,13 +198,17 @@ def _summary(results):
         print(f"{name:22}{(r.get('params', 0) / 1e6):>10.0f}{_f(r.get('sib_mean'), 7)}"
               f"{_f(r.get('tatoeba_mean'), 9)}{_f(r.get('sts_mean'), 7)}"
               f"{_f(mir.get('ndcg@10_mean'), 8)}{_f(mir.get('recall@100_mean'), 8)}")
-    curve = [n for n in ("byte-small", "byte-base", "byte-large") if n in M]
-    if len(curve) >= 2:
-        print("\nSCALING (byte small -> base -> large, mE5-base teacher):")
-        for n in curve:
-            r = M[n]
-            mir = r.get("miracl") or {}
-            print(f"  {n:12} Tatoeba {r.get('tatoeba_mean')}  MIRACL nDCG@10 {mir.get('ndcg@10_mean')}")
+    print("\nSCALING + ISO-COMPUTE (byte vs subword, mE5-base teacher; Tatoeba | MIRACL nDCG@10):")
+    for size in ("small", "base", "large"):
+        b, s = M.get(f"byte-{size}"), M.get(f"subword-{size}")
+        if not (b or s):
+            continue
+        bt = b.get("tatoeba_mean") if b else None
+        st = s.get("tatoeba_mean") if s else None
+        bmir = (b.get("miracl") or {}).get("ndcg@10_mean") if b else None
+        smir = (s.get("miracl") or {}).get("ndcg@10_mean") if s else None
+        d = f"{bt - st:+.3f}" if (bt is not None and st is not None) else "-"
+        print(f"  {size:5}  byte {bt}/{bmir}   subword {st}/{smir}   (byte−subword Tatoeba {d})")
     fl, te = M.get("byte-large-flagship"), M.get("mE5-large")
     if fl and te:
         fm, tm = (fl.get("miracl") or {}), (te.get("miracl") or {})
