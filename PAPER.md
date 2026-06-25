@@ -1,200 +1,137 @@
 # Beyond the Subword Bottleneck: Tokenizer-Flexible Multilingual Sentence Embeddings
 
-**This file is the CURATED, paper-ready subset of results.** Full/supplementary results and the
-experimental audit live in `RESULTS.md` (GRAFT) and `byte_embed/RESULTS.md` (ByteEmbed), and the
-raw run JSON under `results/` (gitignored). Anything not here is reference-only.
+**This file is the curated, paper-ready narrative.** Detailed/reference results and the experimental
+audit live in `RESULTS.md` (GRAFT) and `byte_embed/RESULTS.md` (ByteEmbed); raw run JSON is under
+`results/` (gitignored). The **ByteEmbed thread has been re-scoped** to a clean SONAR-teacher
+low-resource study — its model numbers are **pending the A100 run**, so that part is stated as design +
+hypotheses + the (already-measured) tokenization analysis, with prior feasibility results marked
+preliminary.
 
 ---
 
 ## Thesis
 Multilingual sentence embedders are bottlenecked by their **subword tokenizer** in two ways:
 1. **Coverage** — a fixed, English-centric vocabulary cannot represent words in unseen languages.
-2. **Robustness** — subword segmentation fragments under orthographic variation (romanization,
-   diacritic loss, typos), and fragmentation is worst on low-resource / non-Latin scripts.
+2. **Fragmentation** — subword segmentation fragments low-resource / non-Latin scripts much more than
+   English (a per-language "tokenization tax").
 
-We study two *tokenizer-flexible* remedies at opposite ends of the design space, unified by a
-single mechanism (tokenizer fertility):
-- **GRAFT** — *extend* the vocabulary: training-free, bitext-free grafting of word-aligned
-  embedding rows into a frozen English encoder, giving it new languages with **no training**.
-- **ByteEmbed** — *eliminate* the vocabulary: distill a multilingual subword teacher into a
-  **byte-level** (ByT5) student, removing tokenization entirely.
-
-**Unifying claim:** subword **fertility** (tokens/char) predicts *both* GRAFT's difficulty *and*
-ByteEmbed's robustness gain — the same fragmentation problem, attacked from two directions.
+We study two *tokenizer-flexible* remedies at opposite ends of the design space:
+- **GRAFT** — *extend* the vocabulary: training-free, bitext-free grafting of word-aligned embedding
+  rows into a frozen English encoder.
+- **ByteEmbed** — *eliminate* the vocabulary: distill a multilingual teacher into a **byte-level**
+  (ByT5) student, removing tokenization entirely.
 
 ## Narrative arc
-1. The subword bottleneck (coverage + robustness), quantified by fertility.
-2. **GRAFT** — a training-free remedy that works for mid/high-resource languages but is
-   fundamentally **resource-bounded**; this motivates removing the tokenizer rather than patching it.
-3. **ByteEmbed** — a trained, tokenizer-free remedy: matches the teacher on clean classification,
-   **exceeds it under orthographic noise**; a contrastive objective closes the retrieval gap; an
-   iso-compute byte-vs-subword comparison isolates the byte effect.
-4. **Honest scope** stated up front: GRAFT is *not algorithmically novel* (a bitext-free
-   translate-test) and resource-bounded; ByteEmbed is a *robust classifier* whose retrieval
-   quality depends on the contrastive objective and scale.
+1. The subword bottleneck (coverage + fragmentation), quantified by fertility / the tokenization tax.
+2. **GRAFT** — a training-free remedy that works for mid/high-resource languages but is fundamentally
+   **resource-bounded**; this motivates *removing* the tokenizer rather than patching it.
+3. **ByteEmbed** — a trained, tokenizer-free remedy, studied as a **clean iso-compute, low-resource,
+   parameter-allocation** question: at matched teacher/recipe/budget, does byte beat an identically-
+   trained subword student on low-resource retrieval?
+4. **Honest scope** up front: GRAFT is a bitext-free translate-test, resource-bounded; ByteEmbed's case
+   is *parameter allocation*, **not** that byte is cheaper (it is not — see Part III).
 
 ---
 
 ## Part I — GRAFT (training-free vocabulary extension)
 
-**Setup.** Frozen `e5-base-v2` (English). Bitext-free alignment of target fastText → English
-fastText (anchored Procrustes + CSLS self-learning), a learned lift into e5's input-embedding
-space, grafted as new tokenizer rows; the frozen body composes. Eval: OPUS-100 target→en
-retrieval P@1; `multilingual-e5-base` topline; recovery = graft/topline. 21 languages / 6 scripts.
-Bootstrap 95% CIs, random-init control, leakage audit (§ RESULTS.md 10).
+**Setup.** Frozen `e5-base-v2` (English). Bitext-free alignment of target fastText → English fastText
+(anchored Procrustes + CSLS self-learning), a learned lift into e5's input-embedding space, grafted as
+new tokenizer rows; the frozen body composes. Eval: OPUS-100 target→en retrieval P@1; `multilingual-e5-
+base` topline; recovery = graft/topline. 21 languages / 6 scripts. Bootstrap 95% CIs, random-init
+control, leakage audit.
 
 **Paper-worthy results.**
-- **Cross-lingual retrieval recovery 43–85%** (mid/high-resource): ca 78%, de/id 69%, ru 52%,
-  tr 55%, bn 46%, ar 44%, hi 43%. Absolute graft P@1 is strikingly flat (0.37–0.61) across scripts.
-- **Resource-bounded, not script-bounded:** in *every* script the high-resource language works and
-  the low-resource one craters (Amharic/Georgian ≈ 0). Performance tracks fastText quality.
-- **Monolingual target quality:** SIB-200 classification recovers **85–95%** of a trained
-  multilingual model (flat across scripts); STS **63–76%** → *real-but-coarse* in-language structure.
-- **Controls:** random-init ≈ floor (graft CIs non-overlapping → significant); the LaBSE-bridge
-  variant rescues weak languages (uk +77%, fa +74%) → the *bridge/representation* is the limiter,
-  the graft mechanism is sound.
-- **Honest framing:** GRAFT ≈ a bitext-free, embedding-space *translate-test* (closest prior:
-  GiBERT-style input injection). Not algorithmically novel; the value is the training-free,
-  bitext-free recipe and the resource-bound characterization.
-
-| script | high-resource (recovery) | low-resource (recovery) |
-|--------|--------------------------|--------------------------|
-| Latin | de/id ~0.6 (69%) · ca (78%) | vi 0.31 (39%) |
-| Cyrillic | bg/ru ~0.5 (53–61%) | uk 0.23 (26%) |
-| Arabic | ar 0.44 (49%) | ur 0.11 (13%) |
-| Devanagari | hi 0.39 (43%) | ne 0.11 (16%) |
-| low-resource tier | — | am/ka ≈ 0 |
+- **Cross-lingual retrieval recovery 43–85%** (mid/high-resource): ca 78%, de/id 69%, ru 52%, tr 55%,
+  bn 46%, ar 44%, hi 43%.
+- **Resource-bounded, not script-bounded:** in *every* script the high-resource language works and the
+  low-resource one craters (Amharic/Georgian ≈ 0). Performance tracks fastText quality.
+- **Monolingual target quality:** SIB-200 recovers **85–95%** of a trained multilingual model; STS
+  **63–76%** → real-but-coarse in-language structure.
+- **Controls:** random-init ≈ floor (CIs non-overlapping); a LaBSE-bridge variant rescues weak languages
+  (uk +77%, fa +74%) → the *bridge/representation* is the limiter, the graft mechanism is sound.
+- **Honest framing:** GRAFT ≈ a bitext-free, embedding-space *translate-test* (closest prior: GiBERT-
+  style input injection). Not algorithmically novel; the value is the training-free recipe and the
+  resource-bound characterization.
 
 ---
 
-## Part II — ByteEmbed (tokenizer-free distillation)
+## Part II — ByteEmbed (tokenizer-free distillation), re-scoped
 
-**Setup.** ByT5-small byte student distilled from frozen `multilingual-e5-base` (768-d).
-Objectives: **cosine** (alignment), **contrastive** (in-batch InfoNCE → discriminative), **both**.
-**Iso-compute subword baseline:** `mt5-small`, identical recipe (isolates byte vs subword at
-matched compute). 8 languages / 5 scripts (en/tr/sw/bn/ar/ru/hi/vi). Eval battery: teacher
-alignment; **Tatoeba** bitext mining (standard retrieval, clean + romanized); **SIB-200**
-classification (standard, clean + romanized); **STS22**; **8-perturbation** robustness with
-bootstrap 95% CIs; random-init control; tokenizer-fertility analysis.
+**The clean question.** Hold the teacher, recipe, data, and budget fixed and vary **only the student's
+tokenizer**: byte (`byt5`) vs subword (`mt5`). ByT5 *is* mT5 with the 250k vocab table reallocated into
+transformer layers, so this is the cleanest possible single-variable A/B for "is the subword vocabulary
+worth its parameters for low-resource multilingual retrieval?"
 
-**Paper-worthy results (run `results/byte_paper.json`; teacher = m-e5: Tatoeba 0.892, SIB 0.882,
-SIB-rom 0.600, STS 0.637).**
+**Setup (`run_lowresource.py`).**
+- **Teacher:** SONAR (NLLB-200, 1024-d) — covers all 200 FLORES languages → **no teacher-ceiling** on any
+  chosen language (the constraint that previously forced language choices). LaBSE fallback.
+- **Students:** `byt5` / `mt5` × {small, base, large} (6) — a **quality-per-parameter curve**, distilled
+  from cached SONAR targets (one teacher pass; identical supervision for both).
+- **Languages (9, uniform coverage):** Telugu, Tamil, Marathi, Amharic, Hausa, Kinyarwanda (low-resource;
+  5 families, 5 scripts) + English / Mandarin / Arabic anchors. **Every language is scored on every task.**
+- **Eval:** SIB-200 (classification) · Belebele (retrieval) · FLORES-1012 (parallel bitext) · STS
+  (SemRel / Indic / C-MTEB) · MIRACL deep retrieval (en/zh/ar/te). Bootstrap 95% CIs; mE5/LaBSE baselines.
 
-| config | align | Tatoeba | Tat-rom | SIB | SIB-rom | STS | mean rob-gap |
-|--------|------:|--------:|--------:|----:|--------:|----:|-------------:|
-| byte-cosine | 0.917 | 0.121 | 0.041 | 0.791 | 0.600 | 0.387 | **+0.021** |
-| byte-contrastive | 0.305 | **0.558** | 0.202 | 0.836 | 0.643 | 0.410 | −0.028 |
-| **byte-both** | 0.767 | 0.514 | 0.178 | 0.826 | **0.644** | 0.419 | −0.007 |
-| subword-mt5-both (iso-compute) | 0.707 | 0.240 | 0.058 | 0.782 | 0.536 | 0.520 | −0.021 |
-| byte-random (control) | 0.014 | 0.023 | 0.022 | 0.601 | 0.467 | 0.122 | −0.003 |
-| **byte-robust** (augmentation) | 0.747 | 0.383 | 0.159 | 0.818 | 0.626 | **0.424** | **+0.008** |
-| byte-robust-queue (augment + MoCo) | 0.460 | **0.543** | **0.252** | 0.798 | 0.613 | 0.418 | −0.003 |
+**Hypotheses.**
+- **H1 — parameter allocation:** at matched compute, **byte ≥ subword on multilingual retrieval**, with
+  the gap *largest on high-fertility low-resource languages*. The cross-size control is sharp: byte-small
+  (219M) vs subword-base (278M) — byte winning with *fewer* total params would refute "byte wins because
+  it's bigger."
+- **H2 — efficiency, honest:** byte is more *parameter*-efficient (no 128–256M vocab table) but **costs
+  more compute** (longer sequences). The claim rests on quality-per-parameter, not cost.
 
-1. **Contrastive closes the retrieval gap.** Tatoeba **0.121 → 0.558** (cosine → contrastive),
-   ~63% of the teacher (vs 14%). The gap was an objective problem (cosine makes embeddings aligned
-   but not *discriminative*), now largely fixed. `byte-both` keeps it (0.514) with far better
-   alignment (0.767 vs 0.305).
-2. **A robustness↔retrieval tradeoff** (a finding, not a bug): cosine = robust (+0.021) but can't
-   retrieve (0.12); contrastive = retrieves (0.56) but loses the robustness edge (−0.028); `both`
-   balances. The earlier "byte more robust on everything" was a *cosine-only artifact* of
-   over-smooth embeddings.
-3. **Iso-compute byte > subword.** At matched compute/recipe, `byte-both` beats the mt5 subword
-   student on retrieval (0.51 vs 0.24), classification (0.83 vs 0.78), and **romanized** tasks
-   (SIB-rom 0.64 vs 0.54; Tat-rom 0.18 vs 0.06) — though subword wins STS (0.52 vs 0.42). Part of
-   byte's edge: it spends parameters on the transformer, not a 250k-row subword embedding table.
-4. **Downstream robustness win:** `byte-both` **beats the teacher on romanized SIB-200**
-   (0.644 vs 0.600) while nearly matching it clean (0.826 vs 0.882) → the robustness translates to
-   a real downstream classification gain, *even after* the contrastive objective.
-5. **Robustness is within-script.** Byte > teacher on all 8 languages for typos/diacritics/case/
-   swap/delete/keyboard (uniform, +0.002…+0.013, CIs exclude 0), but byte **loses on romanization**
-   (−0.087; non-Latin transliteration changes every byte) and punctuation (−0.009).
-6. **Random control:** alignment (0.014) and retrieval (0.023) are ≈0 untrained → 100% from
-   distillation. (Classification has a random-features floor of 0.60 — SIB is easy enough that even
-   random byte features classify; so the causal control is cleanest for alignment/retrieval.)
-7. **Breaking the tradeoff (partial, honest).** Augmentation-consistency (`byte-robust`) is the only
-   contrastive-trained config with **positive** robustness (+0.008): it pushes the robustness↔retrieval
-   frontier outward and **fixes the romanization failure** (romanize −0.087 → **+0.017**), giving
-   positive gaps on **7/8** perturbations incl. *held-out* ones (diacritics/swap/delete — generalization,
-   not memorization). It's the **best-balanced** config (uniform robustness + best STS 0.424 + strong
-   classification), at a retrieval cost (0.383 vs both's 0.514). The MoCo queue (`byte-robust-queue`)
-   instead **scales retrieval to 0.543** (best byte config) but trades the robustness back. → the
-   tradeoff is a **frontier you can push and re-balance, not a free lunch you escape.**
-8. **Toward a better retriever (modest).** The queue lifts retrieval 0.514 → 0.543 (~61% of the
-   teacher) — scaling negatives helps, but the byte student is not yet SOTA-competitive at feasibility
-   scale; more negatives/steps/data is the lever, and the positive slope suggests headroom.
-9. **Scale-up + iso-compute curve + strong baselines (12 langs, 3000 steps) — the sharper contribution.**
-   Byte (byt5) vs subword (mt5) students at two sizes + mE5/LaBSE baselines:
-
-   | model | params | SIB | Tatoeba | STS |
-   |---|---:|---:|---:|---:|
-   | byte-small | 219M | 0.818 | **0.590** | 0.453 |
-   | subword-small | 147M | 0.787 | 0.277 | 0.551 |
-   | byte-base | 416M | 0.811 | **0.583** | 0.480 |
-   | subword-base | 278M | 0.842 | 0.362 | 0.559 |
-   | mE5 teacher | 278M | 0.882 | 0.892 | 0.661 |
-   | LaBSE | 472M | 0.839 | 0.937 | 0.636 |
-
-   **Byte ≫ subword on retrieval at both sizes** (+0.22–0.31; byte-small 219M beats subword-base 278M) —
-   the parameter-allocation argument (encoder vs 250k vocab table). **Subword > byte on STS** (~0.55 vs
-   ~0.47). Classification a wash. Both below SOTA baselines (training-scale gap, not architecture).
-   → **The defensible headline contribution: tokenizer-free byte distillation is a better parameter
-   allocation for multilingual RETRIEVAL + ROBUSTNESS at matched compute** — a controlled iso-compute
-   study + the first byte-level multilingual retriever. Caveat: base models used half the token-views
-   (batch 8 vs 16), so a clean scaling claim needs matched-token training.
+**Status:** model results pending the A100 run. Prior feasibility (mE5 teacher, ≤24 mid/high-resource
+langs; superseded) gave the motivating signal: contrastive distillation closes the retrieval gap
+(Tatoeba 0.12→0.56), iso-recipe byte > subword on retrieval (subword wins STS), and — at equal batch —
+byte scales cleanly small→base including MIRACL. The current study removes that work's confounds (mE5
+teacher-ceiling, batch-shrink, mid-resource skew).
 
 ---
 
-## Part III — fertility analysis (the hypothesized unifier did NOT hold; reported honestly)
-Teacher subword fertility (tokens/char): en 0.26, tr 0.24, ru 0.26, vi 0.27, sw 0.28, ar 0.30,
-bn 0.32, hi 0.33 — highest on non-Latin scripts, as expected.
+## Part III — the tokenization tax (measured; the motivation, reported honestly)
 
-**The hypothesis "fertility → byte robustness gain" is REJECTED:**
-- within-script byte gain vs fertility: **r = −0.18** (no relationship; the gain is roughly uniform,
-  ~+0.007 across languages).
-- romanization byte gap vs fertility: **r = −0.77** — high-fertility non-Latin scripts are exactly
-  where byte *loses* (romanizing them rewrites every byte). Fertility predicts byte's romanization
-  **vulnerability**, not a gain.
+On the parallel FLORES-1012, tax = tokens(lang)/tokens(English) for the **same content**:
 
-**Honest unifying thread (qualitative, not a clean law):** subword tokenization limits multilingual
-embeddings two ways — *coverage* (GRAFT) and *robustness* (ByteEmbed) — and **non-Latin /
-high-fertility scripts are the persistent hard frontier for BOTH** (GRAFT recovers least there;
-byte struggles with romanization there). The clean quantitative "fertility → byte gain" mechanism
-I hoped would unify the two methods does not exist; the link is thematic, not mechanistic.
+| | Telugu | Tamil | Marathi | Amharic | Hausa | Kinyarwanda | Arabic | Chinese |
+|---|---|---|---|---|---|---|---|---|
+| **subword token tax** | 1.41 | 1.26 | 1.52 | 1.71 | 1.36 | 1.50 | 1.34 | 0.91 |
+| **byte UTF-8 tax** | 2.68 | 3.19 | 2.69 | 1.71 | 1.07 | 1.13 | 1.60 | 0.92 |
+| **byte seq vs subword** | 7.4× | 9.9× | 6.9× | 3.9× | 3.1× | 2.9× | 4.7× | 4.0× |
+
+**The honest finding — "byte removes the tokenization tax" is FALSE for non-Latin scripts.** UTF-8
+multibyte encoding makes byte *more* expensive there (Tamil byte-tax 3.19 vs subword 1.26; byte sequences
+7–10× longer for Indic). Byte wins the cost axis only on Latin low-resource (Hausa, Kinyarwanda). The
+defensible motivation is therefore **parameter allocation**: a subword model spends ≈87% of a small
+encoder on a 250k vocab table that low-resource languages barely use; byte spends it on the transformer.
+Whether that buys quality is the empirical question Part II answers.
 
 ---
 
-## Limitations & honest scope (state up front in the paper)
-- **GRAFT** is a bitext-free translate-test (not a new algorithm), **resource-bounded** (fails on
-  the low-resource tail where fastText collapses).
-- **ByteEmbed** retrieval is competitive via contrastive (Tatoeba 0.51–0.54, ~58–61% of the teacher)
-  but below it. Cosine-only robustness is within-script and *loses* on romanization; **augmentation
-  (byte-robust) fixes the romanization loss** (−0.087 → +0.017) and makes robustness uniform across
-  all 8 perturbations — but at a retrieval cost (0.51 → 0.38), so it re-balances the frontier rather
-  than escaping it. byte is still below the teacher on STS and absolute retrieval.
-- **Novelty is still empirical, not methodological.** The new objectives (augmentation-consistency,
-  MoCo queue) are standard techniques; they make the robustness story more *complete* (it now covers
-  the script-change case) and map the frontier, but they are not a new mechanism. The contribution
-  remains "a rigorous study," now stronger — not a methods paper.
-- **Combined-paper verdict (honest):** the fertility analysis did NOT quantitatively unify the two
-  methods (Part III), so the pairing is *thematic, not mechanistic*. For a top venue, **ByteEmbed is
-  the stronger standalone** (contrastive retrieval fix + iso-compute byte>subword + within-script
-  robustness + the augmentation romanization fix + downstream classification win); GRAFT is best
-  used as the training-free context/baseline. My recommendation: **lead with ByteEmbed**; fold
-  GRAFT in only if a reviewer-proof framing for the pairing emerges.
-- **No single close prior; cite honestly, don't claim a "rebuttal."** The work is an intersection
-  of disjoint lines (multilingual distillation = Reimers & Gurevych 2020; byte-LM distillation =
-  Bolmo/ALM, generative; char/UGC robustness = c-RoLASER, *monolingual English, character-CNN,
-  UGC benchmarks — not ours*). RoLASER's noisy→clean-teacher recipe is the **method ancestor** of
-  `byte-robust`, so that experiment is *less* novel, not a rebuttal of a negative.
-- Feasibility scale (≤2k steps, ≤21 langs, byt5/mt5-small). A full paper still needs: iso-compute
-  *curves* (matched FLOPs, not just matched recipe), MMTEB/MIRACL, scale (the contrastive retrieval
-  gap may keep closing with more steps/negatives), and careful positioning vs RoLASER + Bolmo/ALM.
+## Limitations & honest scope (state up front)
+- **GRAFT** is a bitext-free translate-test (not a new algorithm), resource-bounded (fails on the
+  low-resource tail where fastText collapses).
+- **ByteEmbed novelty is empirical, not methodological** — distillation (Reimers & Gurevych 2020),
+  byte-level encoders (ByT5, CANINE), and noisy→clean robustness distillation (RoLASER) are all prior;
+  the contribution is a *rigorous, uniform-coverage, low-resource, parameter-controlled* study and the
+  first byte-level multilingual retriever evaluated this way.
+- **Byte is not cheaper** — Part III shows a higher sequence/compute cost, worst for the non-Latin
+  low-resource scripts we target. A fully rigorous comparison also needs a **matched-FLOPs** curve, not
+  just matched recipe/token-views.
+- **STS is byte's weak task and the rarest data** (Tamil 256 / Arabic 627 pairs) — reported with CIs and
+  treated as secondary; retrieval (Belebele / FLORES / MIRACL) is the primary, uniformly-covered axis.
+- The teacher is a **subword** model (SONAR), so this measures *byte-imitating-subword* at matched
+  recipe, not intrinsic byte superiority; a from-scratch (no-teacher) arm would be needed for that claim
+  and is deferred.
 
-## Full experimental setup (methods section)
-- **Teacher:** `intfloat/multilingual-e5-base` (frozen, 768-d).
-- **GRAFT student:** frozen `intfloat/e5-base-v2`; fastText-157 reps; anchored Procrustes+CSLS.
-- **ByteEmbed student:** `google/byt5-small` (byte) / `google/mt5-small` (subword baseline);
-  mean-pool + linear projection to 768-d; cosine / InfoNCE(τ=0.05) / both objectives.
-- **Data:** Wikipedia (distillation), OPUS-100 / Tatoeba / FLORES (retrieval), SIB-200
-  (classification), STS22 (STS) — all public.
-- **Stats:** bootstrap 95% CIs on all headline gaps; random-init controls on both methods.
+## Full experimental setup (methods)
+- **Teacher:** `facebook/SONAR` text encoder (frozen, 1024-d; `source_lang` per FLORES code) — LaBSE
+  (768-d) fallback.
+- **Students:** `google/byt5-{small,base,large}` (byte) / `google/mt5-{small,base,large}` (subword);
+  encoder-only mean-pool + linear projection to the teacher dim + L2; `max_bytes=256`.
+- **Objective:** in-batch InfoNCE (τ=0.05) + alignment + MoCo queue 8192 + relational STS term; AdamW
+  (lr 2e-4); batch 64 (equal at all sizes); steps small 10k / base 13k / large 15k; bf16 + grad-checkpoint.
+- **Data:** equal max-min balanced Wikipedia (~42k/lang; floor = Kinyarwanda 42,621), distilled against
+  cached teacher targets. **Eval:** SIB-200, Belebele, FLORES-1012, SemRel24STS / IndicCrosslingualSTS /
+  C-MTEB STS, MIRACL — all public; bootstrap 95% CIs on headline gaps; iso-recipe subword control +
+  mE5/LaBSE baselines.

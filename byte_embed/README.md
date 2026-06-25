@@ -1,34 +1,59 @@
-# ByteEmbed — feasibility
+# ByteEmbed — tokenizer-free byte-level multilingual embeddings
 
-**Question this answers:** is a tokenizer-free **byte-level** dense retriever worth
-pursuing? Specifically: can a byte student *reproduce* a strong multilingual subword
-teacher via distillation, and is it **more robust to messy orthography** (the long-tail
-reality) than the subword teacher?
+Distill a frozen multilingual **SONAR** teacher into a **byte-level** (ByT5) student and ask: at
+matched compute, is removing the subword vocabulary a better **parameter allocation** for
+**low-resource multilingual retrieval**? The control is an identically-trained **subword** (mT5)
+student — same teacher, recipe, data, and budget; only the tokenizer differs. That single-variable
+A/B is the whole point (ByT5 *is* mT5 with the 250k vocab table reallocated to transformer layers).
 
-**What it does:**
-1. Freeze a multilingual subword teacher (`multilingual-e5-base`).
-2. Train a byte-level student (`byt5-small` encoder + pooling + projection) to match the
-   teacher's sentence embeddings (cosine distillation — no contrastive negatives, so it's
-   memory-light).
-3. Evaluate: (1) teacher-alignment cosine, (2) cross-lingual retrieval P@1 on FLORES
-   (student vs teacher), (3) **orthographic-robustness stability** under romanization /
-   diacritic loss / spelling noise (student vs teacher).
+## The study — `run_lowresource.py`
+- **Teacher:** SONAR (NLLB-200 encoder, 1024-d) — covers all 200 FLORES languages, so there is **no
+  teacher-ceiling** on any chosen language. Falls back to **LaBSE** (768-d) if `fairseq2` won't install.
+- **Students (6):** `byt5` / `mt5` × {small, base, large}, encoder-only → mean-pool → linear → L2.
+  Training all three sizes is what licenses the parameter-allocation claim (a quality-per-parameter
+  frontier, not a single point).
+- **Languages (9):** 6 low-resource — Telugu, Tamil, Marathi, Amharic, Hausa, Kinyarwanda (5 families,
+  5 scripts) — + English / Mandarin / Arabic anchors. **Every language is scored on every task.**
+- **Training:** equal **max-min balanced** Wikipedia (~42k/lang; Kinyarwanda is the floor), distilled
+  against **cached teacher targets** — SONAR embeds the corpus once and both students reuse the
+  identical vectors.
+- **Objective:** in-batch InfoNCE + alignment (`both`) + MoCo queue 8192 + a relational STS term, AdamW,
+  batch 64 (equal at all sizes), `max_bytes=256`, bf16 + grad-checkpoint; `*-large` is checkpointed.
 
-**Where to run:**
-- **Colab A100 (primary):** open `colab_feasibility.ipynb`, set runtime = A100, Run All.
-- **Cloud (fallback / reproducibility):** `cloud/setup.sh` on a RunPod/Vast.ai 4090 or
-  A100 — see `cloud/README.md`. Full feasibility pass ≈ **$12** on a rented 4090.
-- **Laptop smoke (12 GB, proof-of-life only):**
-  `python -m byte_embed.run_feasibility --smoke` (tiny model budget; just checks it learns).
+## Eval battery — uniform (every language, every task)
+| task | dataset | metric | langs |
+|---|---|---|---|
+| classification | SIB-200 | accuracy | all 9 |
+| retrieval | Belebele | nDCG@10 | all 9 |
+| bitext (parallel) | FLORES-1012 | P@1 (→English) | all 9 |
+| STS | SemRel24STS · IndicCrosslingualSTS (ta) · C-MTEB (zh) | Spearman | all 9 |
+| deep retrieval | MIRACL | nDCG@10 / recall@100 | en, zh, ar, te |
 
-**Reading the result.** Encouraging = distillation loss drops + teacher-alignment cosine
-high (student reproduces the teacher), cross-lingual P@1 in the teacher's ballpark, and
-**student robustness > teacher robustness** under perturbation (especially `romanize` /
-`spelling`). That justifies the full ByteEmbed study (iso-compute + fertility curves vs
-subword retrievers). Discouraging = student can't match the teacher even on English, or it
-is no more robust than the subword teacher.
+Plus a **tokenization-efficiency** table (subword token tax vs byte UTF-8 cost) and a **compute
+profile** (FLOPs / throughput / latency / VRAM).
 
-**What this does NOT show.** It does not run the *iso-compute* comparison or the
-fertility-vs-quality curve (the headline claims) — those need the larger multilingual
-training + matched-FLOPs baselines described in the proposal. This is the cheap "is the
-core mechanism alive?" test first.
+## Run it
+- **Colab A100:** open `notebooks/byteembed_lowresource_a100.ipynb`, set runtime = A100, run
+  top-to-bottom (do the smoke cell first). Resumable across sessions.
+- **CLI:** `python -m byte_embed.run_lowresource --smoke` then `python -m byte_embed.run_lowresource`.
+
+## Modules
+- `run_lowresource.py` — orchestrator: teacher cache → 6 students → eval + efficiency, incremental + resumable.
+- `teachers.py` — `SonarTeacher` (+ LaBSE fallback) and cached `precompute_targets`.
+- `eval_mteb.py` — Belebele / FLORES-bitext / STS-dispatch uniform battery.
+- `efficiency.py` — subword-tax vs byte-UTF8-tax table + FLOPs/throughput/latency profiler.
+- `distill.py` — distillation loop (with cached-targets mode); `model.py` — `ByteStudent`;
+  `data.py` — `load_balanced_sentences`; `miracl.py` — MIRACL; `config.py` — the 9-language code maps;
+  `robustness.py` — orthographic perturbations (deferred from v1, kept for a follow-up robustness run).
+
+## Honest framing
+Byte is **not** cheaper. Its UTF-8 cost is *higher* than subword for non-Latin scripts — Indic byte
+sequences run **7–10× longer** than subword, and the byte "tax" vs English exceeds the subword token
+tax for Telugu/Tamil/Marathi. The claim is strictly **parameter allocation**: byt5 spends parameters
+on the transformer, mt5 on a 250k vocab table (≈87% of mt5-small's encoder), and we measure
+quality-per-parameter while reporting the compute cost openly.
+
+## Status
+**Implemented and locally validated** (all eval loaders, exact dataset sizes, the eval→summary→figures
+contract). The 6-model A100 run is **pending**. See `RESULTS.md` for the design, the validated dataset
+sizes, the measured tokenization-tax numbers, and the prior mE5-teacher feasibility work (superseded).
