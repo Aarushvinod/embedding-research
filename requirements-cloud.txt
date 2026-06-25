@@ -19,11 +19,10 @@ matplotlib>=3.8
 # contrastive route; the default distillation route does not require it).
 # grad-cache>=0.1.0
 
-# SONAR teacher (run_lowresource.py) — NOT pinned here on purpose. fairseq2 wheels are
-# torch/CUDA-specific and can break the whole `pip install` if mismatched, so the notebook
-# installs it in a SEPARATE, fault-tolerant cell:
-#     pip install sonar-space fairseq2
-# byte_embed.teachers.load_teacher() falls back to LaBSE (already above) if SONAR won't load,
-# and the cached-targets interface makes the rest of the pipeline teacher-agnostic.
+# SONAR teacher (run_lowresource.py): loaded by default via the fairseq2-FREE HF port
+# `cointegrated/SONAR_200_text_encoder` (uses `transformers` above — no extra install, no torch
+# change, 1024-d, validated to match official SONAR). The official `sonar-space`/fairseq2 stack is
+# OPTIONAL (notebook cell 3) and needs torch pinned to a fairseq2 wheel; `load_teacher()` prefers it
+# if present, else the HF port, else LaBSE.
 # Optional: FLOPs counting in efficiency.profile_model (degrades to None if absent).
 # fvcore>=0.1.5

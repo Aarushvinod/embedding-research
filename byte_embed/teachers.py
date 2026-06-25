@@ -5,11 +5,12 @@ so every study language has a real target geometry (no teacher-ceiling — the c
 previously forced language choices). SONAR's encoder needs a `source_lang` (FLORES code) per
 sentence, so we embed language-by-language.
 
-**Robustness:** if the `sonar` package fails to import/load (`fairseq2` can be finicky on Colab),
-we fall back to **LaBSE** (sentence-transformers, 768-d). The whole pipeline is teacher-agnostic
-because the students train against CACHED target vectors (`precompute_targets`), not the live
-teacher — so a one-time teacher pass is all that's needed and the student head just adapts to
-`teacher.dim`.
+**Three-tier loading** (`load_teacher`): the official `sonar-space`/fairseq2 stack (source of truth)
+if installed → else the **fairseq2-free HF port** `cointegrated/SONAR_200_text_encoder` (1024-d,
+validated to match official SONAR; the reliable default on Colab, where fairseq2 has no wheel for the
+newest torch) → else LaBSE (768-d) as a last resort. The whole pipeline is teacher-agnostic because
+the students train against CACHED target vectors (`precompute_targets`), not the live teacher — so a
+one-time teacher pass is all that's needed and the student head just adapts to `teacher.dim`.
 """
 from __future__ import annotations
 
@@ -51,6 +52,47 @@ class SonarTeacher:
         return _l2(np.concatenate(out, 0))
 
 
+class SonarHFTeacher:
+    """SONAR text encoder (1024-d) via the **fairseq2-free** HuggingFace port
+    `cointegrated/SONAR_200_text_encoder` — an off-the-shelf transformers model (M2M100 encoder +
+    the model card's documented masked mean-pool, which IS SONAR's pooling: SONAR has no learned
+    pooling head). The port's author validates that its embeddings equal the official SONAR's; we
+    additionally checked cross-lingual alignment (parallel en↔te ≈ 0.73–0.82 cos, non-parallel ≈ 0.15).
+
+    This is the reliable default on Colab, where the official `sonar-space` stack needs a `fairseq2`
+    wheel pinned to the exact torch build (none exists for Colab's newest torch). Same 202 NLLB
+    languages; `encode(texts, source_lang=<FLORES code>)`."""
+
+    name = "sonar"        # same name as the official path → the targets cache is interchangeable
+    dim = 1024
+    MODEL = "cointegrated/SONAR_200_text_encoder"
+
+    def __init__(self, device="cuda"):
+        from transformers import AutoTokenizer
+        from transformers.models.m2m_100.modeling_m2m_100 import M2M100Encoder
+
+        self.device = device
+        self.tok = AutoTokenizer.from_pretrained(self.MODEL)
+        self.enc = M2M100Encoder.from_pretrained(self.MODEL).to(device).eval()
+
+    def encode(self, texts, source_lang, batch_size=64):
+        import torch
+
+        if not texts:
+            return np.zeros((0, self.dim), np.float32)
+        self.tok.src_lang = source_lang                      # NLLB/FLORES code, e.g. "tel_Telu"
+        out = []
+        for i in range(0, len(texts), batch_size):
+            b = self.tok(texts[i:i + batch_size], return_tensors="pt", padding=True,
+                         truncation=True, max_length=512).to(self.device)
+            with torch.inference_mode():
+                h = self.enc(**b).last_hidden_state
+                m = b["attention_mask"].unsqueeze(-1)
+                emb = (h * m).sum(1) / m.sum(1).clamp(min=1)   # masked mean-pool = SONAR pooling
+            out.append(emb.float().cpu().numpy())
+        return _l2(np.concatenate(out, 0))
+
+
 class LabseTeacher:
     """Fallback teacher: LaBSE (768-d) via sentence-transformers. `source_lang` ignored."""
 
@@ -71,14 +113,23 @@ class LabseTeacher:
 
 
 def load_teacher(name="sonar", device="cuda"):
-    """Load the requested teacher; fall back to LaBSE if SONAR can't be imported/loaded."""
+    """Load the teacher. For SONAR, prefer the official `sonar-space`/fairseq2 stack (source of
+    truth) if it's installed; otherwise use the fairseq2-free HF port (faithful, validated to
+    match); LaBSE is only a last resort. All three expose the same `encode(texts, source_lang)`."""
     if name == "sonar":
         try:
             t = SonarTeacher(device=device)
-            print("  [teacher] SONAR text encoder loaded (1024-d)")
+            print("  [teacher] official SONAR (sonar-space / fairseq2) loaded — 1024-d")
             return t
-        except Exception as e:  # noqa: BLE001 — fairseq2/sonar install issues on some runtimes
-            print(f"  [teacher] SONAR unavailable ({type(e).__name__}: {str(e)[:90]}); "
+        except Exception as e:  # noqa: BLE001 — fairseq2 absent or torch/ABI mismatch (common on Colab)
+            print(f"  [teacher] official sonar-space unavailable ({type(e).__name__}); "
+                  f"using the fairseq2-free HF SONAR port instead")
+        try:
+            t = SonarHFTeacher(device=device)
+            print("  [teacher] SONAR via HF port 'cointegrated/SONAR_200_text_encoder' loaded — 1024-d")
+            return t
+        except Exception as e:  # noqa: BLE001
+            print(f"  [teacher] HF SONAR port unavailable ({type(e).__name__}: {str(e)[:80]}); "
                   f"falling back to LaBSE")
     t = LabseTeacher(device=device)
     print(f"  [teacher] LaBSE loaded ({t.dim}-d)")
