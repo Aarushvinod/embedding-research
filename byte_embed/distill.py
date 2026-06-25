@@ -16,12 +16,17 @@ from torch.optim import AdamW
 def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
             lr=2e-4, log_every=100, objective="cosine", temp=0.05,
             augment=False, queue_size=0, rel_weight=0.0, optimizer="adamw",
-            ckpt_path=None, ckpt_every=5000):
+            ckpt_path=None, ckpt_every=5000, targets=None):
     """augment=True feeds the student orthographically-noised input while the teacher targets
     CLEAN text — distilling orthographic INVARIANCE while contrastive keeps discriminativeness
     (the robustness↔retrieval tradeoff-breaker). queue_size>0 keeps a MoCo-style FIFO of past
     (frozen-)teacher embeddings as extra contrastive negatives — more negatives => sharper
-    retrieval within a 12 GB budget (the frozen teacher makes queued negatives non-stale)."""
+    retrieval within a 12 GB budget (the frozen teacher makes queued negatives non-stale).
+
+    targets: optional precomputed teacher embeddings (np.ndarray [len(sentences), d], L2-normalized
+    and index-aligned with `sentences`). When given, the live `teacher` is NOT called — both the byte
+    and subword students train against the SAME cached vectors (one teacher pass, identical
+    supervision). `teacher` may be None in that case."""
     import collections
 
     if optimizer == "adafactor":
@@ -50,13 +55,18 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
         opt.load_state_dict(ck["opt"])
         start = ck["step"] + 1
         print(f"  [resume] loaded {ckpt_path} -> continuing from step {start}/{steps}")
+    targets_t = torch.as_tensor(targets, dtype=torch.float32) if targets is not None else None
     t0 = time.time()
     for step in range(start, steps + 1):
-        texts = [sentences[i] for i in random.sample(range(n), min(batch, n))]
-        with torch.no_grad():
-            # .clone() converts the teacher's inference-mode tensor into a normal tensor (an
-            # inference tensor cannot be saved for backward). Teacher always sees CLEAN text.
-            t_emb = teacher.encode(texts, as_tensor=True, device=device).clone()
+        idx = random.sample(range(n), min(batch, n))
+        texts = [sentences[i] for i in idx]
+        if targets_t is not None:                    # precomputed (cached) teacher targets
+            t_emb = targets_t[idx].to(device)
+        else:
+            with torch.no_grad():
+                # .clone() converts the teacher's inference-mode tensor into a normal tensor (an
+                # inference tensor cannot be saved for backward). Teacher always sees CLEAN text.
+                t_emb = teacher.encode(texts, as_tensor=True, device=device).clone()
         if augment:  # student sees noised input ~half the time; the clean teacher is the target
             texts = [random_augment(x, aug_rng) if aug_rng.random() < 0.5 else x for x in texts]
         with torch.autocast(device_type="cuda", dtype=amp_dtype):

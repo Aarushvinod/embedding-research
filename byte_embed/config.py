@@ -13,10 +13,21 @@ STUDENT_BACKBONE = "google/byt5-small"   # byte-level encoder = the tokenizer-fr
 EVAL_LANGS = ["en", "tr", "sw", "bn", "ar", "ru", "hi", "vi"]
 TRAIN_LANGS = EVAL_LANGS  # kept for back-compat; the orchestrator trains on EVAL_LANGS
 
-# flores-200 codes (used by data._flores for cross-lingual P@1 + monolingual fallback)
+# flores-200 codes (used by data._flores for cross-lingual P@1 + monolingual fallback,
+# AND as the SONAR `source_lang` + the SIB-200/Belebele/FLORES config code for each language)
 FLORES_CODE = {"en": "eng_Latn", "tr": "tur_Latn", "sw": "swh_Latn", "bn": "ben_Beng",
                "ar": "arb_Arab", "ru": "rus_Cyrl", "hi": "hin_Deva", "vi": "vie_Latn",
-               "ca": "cat_Latn", "fi": "fin_Latn"}
+               "ca": "cat_Latn", "fi": "fin_Latn",
+               # low-resource-study languages (run_lowresource.py)
+               "te": "tel_Telu", "ta": "tam_Taml", "mr": "mar_Deva", "am": "amh_Ethi",
+               "ha": "hau_Latn", "rw": "kin_Latn", "zh": "zho_Hans"}
+
+# The low-resource byte-vs-subword study (run_lowresource.py): 6 low-resource + 3 high-resource
+# anchors, all with full uniform eval coverage (STS + retrieval + classification + bitext) and all
+# covered by the SONAR teacher. Wikipedia training floor = 42,621 sentences (Kinyarwanda).
+LOWRES_LANGS = ["te", "ta", "mr", "am", "ha", "rw"]          # Dravidian/Indo-Aryan/Semitic/Chadic/Bantu
+HIGHRES_LANGS = ["en", "zh", "ar"]                            # control anchors (low subword fertility)
+STUDY_LANGS = LOWRES_LANGS + HIGHRES_LANGS                    # the canonical 9
 
 N_PER_LANG = 15000   # training sentences per language (× 8 langs)
 MAX_BYTES = 256      # truncation length in BYTES (byte-level => longer than subword)

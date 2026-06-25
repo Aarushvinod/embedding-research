@@ -38,6 +38,62 @@ def load_sentences(langs, n_per_lang=20000, min_len=20, max_len=300):
     return out
 
 
+def load_balanced_sentences(langs, n_per_lang=42000, min_len=20, max_len=300, seed=0,
+                            cache_dir=None):
+    """EQUAL (max-min balanced) monolingual training sentences per language, so no language
+    dominates the distillation mix (high-resource en/zh/ar would otherwise swamp Kinyarwanda).
+
+    Streams Wikipedia per language collecting up to `n_per_lang` usable paragraphs in
+    [min_len, max_len]; if any language falls short, ALL languages are truncated to the realized
+    floor (true max-min). Returns `{lang: [sentences]}` with EQUAL counts and logs realized counts.
+    Measured floor for the study-9 is ~42,621 (Kinyarwanda), so the default 42k clears every language.
+    Grouping by language is required so the SONAR teacher can pass the right `source_lang`."""
+    import json
+    import os
+
+    cp = None
+    if cache_dir:
+        cp = os.path.join(cache_dir, f"wiki_balanced_{'-'.join(langs)}_{n_per_lang}.json")
+        if os.path.exists(cp):
+            print(f"  [data] reusing balanced cache {cp}")
+            return json.loads(open(cp, encoding="utf-8").read())
+
+    from datasets import load_dataset
+
+    rng = random.Random(seed)
+    per = {}
+    for lang in langs:
+        got = []
+        try:
+            ds = load_dataset("wikimedia/wikipedia", f"20231101.{lang}",
+                              split="train", streaming=True)
+            for ex in ds:
+                for para in ex.get("text", "").split("\n"):
+                    p = para.strip()
+                    if min_len <= len(p) <= max_len:
+                        got.append(p)
+                        if len(got) >= n_per_lang:
+                            break
+                if len(got) >= n_per_lang:
+                    break
+        except Exception as e:  # noqa: BLE001
+            print(f"  [data] wikipedia unavailable for {lang} ({e})")
+        per[lang] = got
+        print(f"  [data] {lang}: collected {len(got)}")
+
+    floor = min(min(len(v) for v in per.values()), n_per_lang)
+    out = {}
+    for lang, sents in per.items():
+        rng.shuffle(sents)
+        out[lang] = sents[:floor]
+    print(f"  [data] balanced floor = {floor}/lang -> {floor * len(langs)} total sentences")
+
+    if cp:
+        os.makedirs(cache_dir, exist_ok=True)
+        open(cp, "w", encoding="utf-8").write(json.dumps(out, ensure_ascii=False))
+    return out
+
+
 def _flores(lang, split="dev"):
     """Robust FLORES-200 load via the PUBLIC Muennighoff/flores200 mirror (same eng_Latn
     codes; the canonical openlanguagedata/flores_plus is GATED -> 401). Retries, and tries

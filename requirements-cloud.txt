@@ -18,3 +18,12 @@ matplotlib>=3.8
 # Optional: decouples contrastive batch size from VRAM (only needed for the
 # contrastive route; the default distillation route does not require it).
 # grad-cache>=0.1.0
+
+# SONAR teacher (run_lowresource.py) — NOT pinned here on purpose. fairseq2 wheels are
+# torch/CUDA-specific and can break the whole `pip install` if mismatched, so the notebook
+# installs it in a SEPARATE, fault-tolerant cell:
+#     pip install sonar-space fairseq2
+# byte_embed.teachers.load_teacher() falls back to LaBSE (already above) if SONAR won't load,
+# and the cached-targets interface makes the rest of the pipeline teacher-agnostic.
+# Optional: FLOPs counting in efficiency.profile_model (degrades to None if absent).
+# fvcore>=0.1.5

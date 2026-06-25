@@ -22,6 +22,8 @@ SIB_CODE = {
     "hi": "hin_Deva", "mr": "mar_Deva", "ne": "npi_Deva", "bn": "ben_Beng",
     "el": "ell_Grek", "he": "heb_Hebr", "tr": "tur_Latn", "fi": "fin_Latn",
     "am": "amh_Ethi", "km": "khm_Khmr", "si": "sin_Sinh", "ka": "kat_Geor",
+    # low-resource-study languages (run_lowresource.py)
+    "te": "tel_Telu", "ta": "tam_Taml", "ha": "hau_Latn", "rw": "kin_Latn", "zh": "zho_Hans",
 }
 
 

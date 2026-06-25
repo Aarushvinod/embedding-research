@@ -1,6 +1,7 @@
 # data + outputs
 data/
 results/
+checkpoints/
 *.vec
 *.vec.gz
 *.bin

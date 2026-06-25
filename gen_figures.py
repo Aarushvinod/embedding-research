@@ -240,6 +240,104 @@ def fig_isocompute():
     plt.close(fig)
 
 
+# ============================ low-resource study (run_lowresource.py) ============================
+def _load_lowres():
+    p = Path("results/byte_lowresource.json")
+    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+
+
+def fig_lowres_tax(res):
+    """HONEST tokenization-cost figure: subword TOKEN tax vs byte UTF-8 tax (both vs English, on the
+    parallel FLORES-1012). Byte does NOT uniformly win — it costs MORE for non-Latin scripts."""
+    eff = res.get("efficiency") or {}
+    items = [(l, e) for l, e in eff.items() if e]
+    if not items:
+        return
+    items.sort(key=lambda kv: -kv[1]["subword_tax"])
+    import numpy as np
+    x = np.arange(len(items)); w = 0.38
+    fig, ax = plt.subplots(figsize=(8.5, 3.6))
+    ax.bar(x - w / 2, [e["subword_tax"] for _, e in items], w, label="subword token tax (mt5)", color="#59f")
+    ax.bar(x + w / 2, [e["byte_tax"] for _, e in items], w, label="byte UTF-8 tax", color="#2a7")
+    ax.axhline(1.0, c="#bbb", lw=0.8, ls="--")
+    ax.set_xticks(x); ax.set_xticklabels([l for l, _ in items])
+    ax.set_ylabel("cost vs English (same content)")
+    ax.set_title("Tokenization cost: subword token tax vs byte UTF-8 tax (lower = fairer)")
+    ax.legend(fontsize=9)
+    fig.savefig(FIG / "fig_lowres_tax.png")
+    plt.close(fig)
+
+
+def fig_lowres_quality_params(res):
+    """Quality-vs-parameters Pareto: byte vs subword students + baselines, on the uniform battery."""
+    M = res.get("models", {})
+    if not M:
+        return
+    panels = [("belebele_ndcg@10", "Belebele nDCG@10"), ("flores_p@1", "FLORES P@1"),
+              ("sts_spearman", "STS Spearman")]
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.2))
+    for ax, (key, title) in zip(axes, panels):
+        for kind, color, marker in [("byte", "#2a7", "o"), ("subword", "#59f", "s")]:
+            xy = sorted((r["params"] / 1e6, (r.get("means") or {}).get(key))
+                        for r in M.values()
+                        if r.get("kind") == kind and (r.get("means") or {}).get(key) is not None)
+            if xy:
+                ax.plot([a for a, b in xy], [b for a, b in xy], marker=marker, c=color,
+                        label=f"{kind} student", lw=1.5, ms=8)
+        for n, r in M.items():
+            if r.get("kind") == "baseline" and (r.get("means") or {}).get(key) is not None:
+                ax.scatter(r["params"] / 1e6, r["means"][key], marker="*", s=150, c="#c33", zorder=3)
+                ax.annotate(n, (r["params"] / 1e6, r["means"][key]), fontsize=7.5,
+                            xytext=(4, 4), textcoords="offset points")
+        ax.set_xlabel("parameters (M)"); ax.set_ylabel(title); ax.legend(fontsize=8.5)
+    fig.suptitle("Quality vs parameters — low-resource study (★ = baselines)")
+    fig.tight_layout()
+    fig.savefig(FIG / "fig_lowres_quality_params.png")
+    plt.close(fig)
+
+
+def fig_lowres_delta_fertility(res, metric="belebele", size="base"):
+    """Mechanism check: per-language byte−subword quality gap vs subword fertility. Tests whether
+    byte wins MORE where the subword tokenizer fragments more (the hypothesized link)."""
+    import numpy as np
+    M = res.get("models", {}); eff = res.get("efficiency") or {}
+    b, s = M.get(f"byte-{size}"), M.get(f"subword-{size}")
+    if not (b and s and eff):
+        return
+    key = "ndcg@10" if metric == "belebele" else "p@1"
+    xs, ys, labels = [], [], []
+    for lang, e in eff.items():
+        bl = (b.get(metric) or {}).get(lang); sl = (s.get(metric) or {}).get(lang)
+        if e and bl and sl and bl.get(key) is not None and sl.get(key) is not None:
+            xs.append(e["mt5_tok_per_char"]); ys.append(bl[key] - sl[key]); labels.append(lang)
+    if len(xs) < 3:
+        return
+    r = float(np.corrcoef(xs, ys)[0, 1])
+    fig, ax = plt.subplots(figsize=(7, 4.4))
+    ax.axhline(0, c="#bbb", lw=0.8)
+    ax.scatter(xs, ys, s=70, c="#2a7", zorder=3)
+    for x, y, l in zip(xs, ys, labels):
+        ax.annotate(l, (x, y), fontsize=9, xytext=(4, 3), textcoords="offset points")
+    ax.set_xlabel("subword fertility (mt5 tokens/char)")
+    ax.set_ylabel(f"byte − subword  ({metric} {key})")
+    ax.set_title(f"Does byte win where subword fragments?  (r = {r:.2f}, {size} models)")
+    fig.savefig(FIG / "fig_lowres_delta_fertility.png")
+    plt.close(fig)
+
+
+def main_lowres():
+    R = _load_lowres()
+    if R is None:
+        print("results/byte_lowresource.json not found — low-resource figures skipped")
+        return
+    for fn in (fig_lowres_tax, fig_lowres_quality_params, fig_lowres_delta_fertility):
+        try:
+            fn(R)
+            print(f"{fn.__name__} written")
+        except Exception as e:  # noqa: BLE001
+            print(f"{fn.__name__} FAILED: {type(e).__name__}: {e}")
+
+
 def main():
     fig_graft_recovery()
     print("fig1 (GRAFT recovery) written")
@@ -267,3 +365,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    main_lowres()
