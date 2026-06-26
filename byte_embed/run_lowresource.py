@@ -112,7 +112,7 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
             params = sum(p.numel() for p in student.parameters())
             vocab_params = student.enc.get_input_embeddings().weight.numel()
             torch.cuda.reset_peak_memory_stats()
-            cpath = str(Path(ckpt_dir) / f"{name}.pt") if ckpt else None
+            cpath = str(Path(ckpt_dir) / f"{name}_{pooling}.pt") if ckpt else None  # tag by config
             distill(student, None, sentences, device=device, steps=steps, batch=batch,
                     log_every=max(200, steps // 10), ckpt_path=cpath, targets=targets, **OBJ)
 
