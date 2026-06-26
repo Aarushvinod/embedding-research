@@ -167,3 +167,22 @@ def precompute_targets(teacher, balanced, langs, cache_dir="checkpoints", tag=""
          "n": len(sentences), "dim": int(targets.shape[1])}, ensure_ascii=False))
     print(f"  [teacher] cached targets {targets.shape} -> {npy}")
     return sentences, sent_langs, targets
+
+
+def _targets_base(cache_dir, teacher_name, tag):
+    return os.path.join(cache_dir, f"teachertargets_{teacher_name}_{tag}")
+
+
+def targets_exist(cache_dir, teacher_name, tag):
+    """True if precomputed targets for (teacher_name, tag) are cached → callers can SKIP loading the
+    teacher entirely (crucial for parallel workers: no 6× SONAR loads)."""
+    b = _targets_base(cache_dir, teacher_name, tag)
+    return os.path.exists(b + ".npy") and os.path.exists(b + ".json")
+
+
+def load_cached_targets(cache_dir, teacher_name, tag):
+    """Load cached (sentences, sent_langs, targets) without touching the teacher."""
+    b = _targets_base(cache_dir, teacher_name, tag)
+    meta = json.loads(open(b + ".json", encoding="utf-8").read())
+    print(f"  [teacher] reusing cached targets {b}.npy ({meta['n']} x {meta['dim']}) — no teacher load")
+    return meta["sentences"], meta["sent_langs"], np.load(b + ".npy")

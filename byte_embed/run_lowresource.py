@@ -23,8 +23,11 @@ from pathlib import Path
 # balanced objective + big negative queue + relational (STS) term; AdamW on the A100.
 OBJ = dict(objective="both", queue_size=8192, rel_weight=1.0, optimizer="adamw")
 
-# plan rows: name, backbone, steps, batch, checkpoint?  Equal batch 64; bigger models get more steps.
-_SIZES = [("small", 10000, False), ("base", 13000, False), ("large", 15000, True)]
+# plan rows: name, backbone, steps, batch, checkpoint?  EQUAL batch 64 AND equal steps across all
+# sizes (iso-compute scaling — the size curve isolates parameters, not training amount). All models
+# are checkpointed (50k is a long run; resume-safe + lets the parallel workers be killed/restarted).
+STEPS = 50000
+_SIZES = [("small", STEPS, True), ("base", STEPS, True), ("large", STEPS, True)]
 
 
 def _grid():
@@ -42,7 +45,11 @@ def _save(results, out):
 
 
 def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_lang=42000,
-        ckpt_dir="checkpoints", teacher_name="sonar", miracl_q=250, miracl_extra=20000):
+        ckpt_dir="checkpoints", teacher_name="sonar", miracl_q=250, miracl_extra=20000,
+        only=None, with_baselines=True, with_efficiency=True):
+    """Train (a subset of) the 6 students. `only` = list of model names to train (None = all,
+    [] = precompute-only). `with_baselines`/`with_efficiency` are turned OFF for parallel workers
+    (the orchestrator does those once). Workers SKIP loading the teacher when targets are cached."""
     import torch
 
     from byte_embed.config import STUDY_LANGS
@@ -52,34 +59,40 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
     from byte_embed.eval_mteb import eval_battery
     from byte_embed.miracl import eval_miracl_langs
     from byte_embed.model import ByteStudent
-    from byte_embed.teachers import load_teacher, precompute_targets
+    from byte_embed.teachers import (load_cached_targets, load_teacher, precompute_targets,
+                                     targets_exist)
 
     langs = ["am", "rw", "en"] if smoke else STUDY_LANGS
     miracl_langs = (["te"] if smoke else ["en", "zh", "ar", "te"])   # the 4 of our 9 in MIRACL
     grid = _grid()
     if smoke:
         n_per_lang = 1200
-        grid = [("byte-small", "google/byt5-small", 80, 16, False),
-                ("subword-small", "google/mt5-small", 80, 16, False)]
+        grid = [("byte-small", "google/byt5-small", 80, 16, True),
+                ("subword-small", "google/mt5-small", 80, 16, True)]
+    if only is not None:
+        grid = [g for g in grid if g[0] in only]
 
     results = (json.loads(Path(out).read_text(encoding="utf-8"))
                if Path(out).exists() else {"langs": langs, "teacher": teacher_name})
     results.setdefault("models", {})
 
-    # 1) balanced training data + 2) teacher targets (cached: one pass, both students reuse) -------
+    # 1) balanced training data + 2) teacher targets (cached: one pass, all students reuse) --------
     balanced = load_balanced_sentences(langs, n_per_lang=n_per_lang, cache_dir=ckpt_dir)
     floor = min(len(v) for v in balanced.values())
-    teacher = load_teacher(teacher_name, device=device)
-    sentences, sent_langs, targets = precompute_targets(
-        teacher, balanced, langs, ckpt_dir, tag=f"{len(langs)}langs_{floor}")
+    tag = f"{len(langs)}langs_{floor}"
+    if targets_exist(ckpt_dir, teacher_name, tag):            # parallel workers hit this -> no teacher
+        sentences, sent_langs, targets = load_cached_targets(ckpt_dir, teacher_name, tag)
+    else:
+        teacher = load_teacher(teacher_name, device=device)
+        sentences, sent_langs, targets = precompute_targets(teacher, balanced, langs, ckpt_dir, tag)
+        del teacher
+        torch.cuda.empty_cache()
     teacher_dim = int(targets.shape[1])
     results["teacher_dim"] = teacher_dim
     results["n_train"] = len(sentences)
-    del teacher
-    torch.cuda.empty_cache()
 
     # 3) efficiency / tokenization table (once; no training) --------------------------------------
-    if "efficiency" not in results:
+    if with_efficiency and "efficiency" not in results:
         print("\n=== tokenization-efficiency table (FLORES-1012) ===")
         results["efficiency"] = fertility_table(langs)
         _save(results, out)
@@ -128,7 +141,7 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
     from sentence_transformers import SentenceTransformer
     baselines = [("mE5-base", "intfloat/multilingual-e5-base", "query: "),
                  ("LaBSE", "sentence-transformers/LaBSE", "")]
-    if smoke:
+    if smoke or not with_baselines:        # parallel workers skip baselines; orchestrator runs them once
         baselines = []
     for bname, mid, prefix in baselines:
         if bname in results["models"]:
@@ -197,9 +210,16 @@ def main():
     ap.add_argument("--out", default="results/byte_lowresource.json")
     ap.add_argument("--n-per-lang", type=int, dest="n_per_lang", default=42000)
     ap.add_argument("--teacher", dest="teacher_name", default="sonar")
+    ap.add_argument("--only", default=None,
+                    help="comma-separated model names to train (e.g. 'byte-small,subword-large'); "
+                         "empty string = precompute only")
+    ap.add_argument("--no-baselines", dest="with_baselines", action="store_false")
+    ap.add_argument("--no-efficiency", dest="with_efficiency", action="store_false")
     a = ap.parse_args()
+    only = None if a.only is None else [x for x in a.only.split(",") if x]
     run(out=a.out, smoke=a.smoke, device=a.device, n_per_lang=a.n_per_lang,
-        teacher_name=a.teacher_name)
+        teacher_name=a.teacher_name, only=only, with_baselines=a.with_baselines,
+        with_efficiency=a.with_efficiency)
 
 
 if __name__ == "__main__":
