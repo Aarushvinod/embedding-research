@@ -46,7 +46,7 @@ def _save(results, out):
 
 def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_lang=42000,
         ckpt_dir="checkpoints", teacher_name="sonar", miracl_q=250, miracl_extra=20000,
-        only=None, with_baselines=True, with_efficiency=True):
+        only=None, with_baselines=True, with_efficiency=True, pooling="mean"):
     """Train (a subset of) the 6 students. `only` = list of model names to train (None = all,
     [] = precompute-only). `with_baselines`/`with_efficiency` are turned OFF for parallel workers
     (the orchestrator does those once). Workers SKIP loading the teacher when targets are cached."""
@@ -104,7 +104,7 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
             continue
         print(f"\n=== {name}  ({backbone}, {steps}x{batch}, teacher={teacher_name}) ===")
         try:
-            student = ByteStudent(backbone, out_dim=teacher_dim).to(device)
+            student = ByteStudent(backbone, out_dim=teacher_dim, pooling=pooling).to(device)
             params = sum(p.numel() for p in student.parameters())
             vocab_params = student.enc.get_input_embeddings().weight.numel()
             torch.cuda.reset_peak_memory_stats()
@@ -215,11 +215,13 @@ def main():
                          "empty string = precompute only")
     ap.add_argument("--no-baselines", dest="with_baselines", action="store_false")
     ap.add_argument("--no-efficiency", dest="with_efficiency", action="store_false")
+    ap.add_argument("--pooling", default="mean", choices=["mean", "max", "attn"],
+                    help="student sentence pooling ('attn' = lightweight multi-head attentive pool)")
     a = ap.parse_args()
     only = None if a.only is None else [x for x in a.only.split(",") if x]
     run(out=a.out, smoke=a.smoke, device=a.device, n_per_lang=a.n_per_lang,
         teacher_name=a.teacher_name, only=only, with_baselines=a.with_baselines,
-        with_efficiency=a.with_efficiency)
+        with_efficiency=a.with_efficiency, pooling=a.pooling)
 
 
 if __name__ == "__main__":

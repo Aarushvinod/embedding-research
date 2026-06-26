@@ -43,7 +43,7 @@ def _merge(out, names):
 
 
 def parallel(out="results/byte_lowresource.json", device="cuda", max_concurrent=3,
-             n_per_lang=42000, teacher_name="sonar"):
+             n_per_lang=42000, teacher_name="sonar", pooling="mean"):
     names = [g[0] for g in _grid()]
 
     # 1) precompute ONCE: balanced data + SONAR targets (cached) + efficiency — no models/baselines
@@ -62,7 +62,7 @@ def parallel(out="results/byte_lowresource.json", device="cuda", max_concurrent=
             logf = open(logdir / f"_log_{n}.txt", "w", encoding="utf-8")
             cmd = [sys.executable, "-m", "byte_embed.run_lowresource", "--only", n,
                    "--out", _part(out, n), "--device", device, "--no-baselines", "--no-efficiency",
-                   "--n-per-lang", str(n_per_lang), "--teacher", teacher_name]
+                   "--n-per-lang", str(n_per_lang), "--teacher", teacher_name, "--pooling", pooling]
             procs[n] = (subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT), logf)
             print(f"  launched {n}  (log -> {logf.name})")
         for n, (p, logf) in list(procs.items()):
@@ -87,9 +87,10 @@ def main():
     ap.add_argument("--max-concurrent", type=int, dest="max_concurrent", default=3)
     ap.add_argument("--n-per-lang", type=int, dest="n_per_lang", default=42000)
     ap.add_argument("--teacher", dest="teacher_name", default="sonar")
+    ap.add_argument("--pooling", default="mean", choices=["mean", "max", "attn"])
     a = ap.parse_args()
     parallel(out=a.out, device=a.device, max_concurrent=a.max_concurrent,
-             n_per_lang=a.n_per_lang, teacher_name=a.teacher_name)
+             n_per_lang=a.n_per_lang, teacher_name=a.teacher_name, pooling=a.pooling)
 
 
 if __name__ == "__main__":

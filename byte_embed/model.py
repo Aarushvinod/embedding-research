@@ -33,7 +33,7 @@ class ByteStudent(nn.Module):
     """Tokenizer-free student: ByT5 byte encoder -> mean pool -> projection to teacher dim."""
 
     def __init__(self, backbone: str, out_dim: int, max_bytes: int = 256,
-                 grad_checkpoint: bool = True, pooling: str = "mean"):
+                 grad_checkpoint: bool = True, pooling: str = "mean", attn_heads: int = 8):
         super().__init__()
         from transformers import AutoConfig, AutoTokenizer
 
@@ -56,7 +56,16 @@ class ByteStudent(nn.Module):
         d = getattr(self.enc.config, "d_model", None) or self.enc.config.hidden_size
         self.proj = nn.Linear(d, out_dim)
         self.max_bytes = max_bytes
-        self.pooling = pooling  # "mean" | "max"
+        self.pooling = pooling  # "mean" | "max" | "attn"
+        if pooling == "attn":
+            # Lightweight MULTI-HEAD attentive pooling: one learned query per head; each head
+            # attends within its own d/H subspace (no Q/K/V projections), so it adds only `d`
+            # parameters total — negligible, which keeps the iso-compute param-allocation story
+            # intact. (A full nn.MultiheadAttention pooler would add ~4*d^2.)
+            assert d % attn_heads == 0, f"d_model {d} must be divisible by attn_heads {attn_heads}"
+            self.attn_heads = attn_heads
+            self.attn_q = nn.Parameter(torch.randn(attn_heads, d // attn_heads)
+                                       * (d // attn_heads) ** -0.5)
 
     def forward(self, texts, device="cuda"):
         b = self.tok(texts, padding=True, truncation=True, max_length=self.max_bytes,
@@ -65,6 +74,13 @@ class ByteStudent(nn.Module):
         m = b["attention_mask"].unsqueeze(-1).float()
         if self.pooling == "max":
             pooled = h.masked_fill(m == 0, -1e9).max(dim=1).values
+        elif self.pooling == "attn":                              # lightweight multi-head attentive pool
+            H = self.attn_heads
+            hs = h.unflatten(-1, (H, h.size(-1) // H))            # [B, L, H, d/H]
+            scores = (hs * self.attn_q).sum(-1) / (h.size(-1) // H) ** 0.5   # [B, L, H]
+            scores = scores.masked_fill(m == 0, -1e9)             # mask padding (m: [B, L, 1])
+            alpha = scores.softmax(dim=1).unsqueeze(-1)           # softmax over L -> [B, L, H, 1]
+            pooled = (hs * alpha).sum(1).flatten(1)               # [B, d]
         else:
             pooled = (h * m).sum(1) / m.sum(1).clamp(min=1.0)
         return F.normalize(self.proj(pooled), dim=-1)
