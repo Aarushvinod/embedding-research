@@ -62,7 +62,7 @@ def parallel(out="results/byte_lowresource.json", device="cuda", max_concurrent=
         while pending and len(procs) < max_concurrent:
             n = pending.pop(0)
             logf = open(logdir / f"_log_{n}.txt", "w", encoding="utf-8")
-            cmd = [sys.executable, "-m", "byte_embed.run_lowresource", "--only", n,
+            cmd = [sys.executable, "-u", "-m", "byte_embed.run_lowresource", "--only", n,  # -u: unbuffered
                    "--out", _part(out, n), "--device", device, "--no-baselines", "--no-efficiency",
                    "--n-per-lang", str(n_per_lang), "--teacher", teacher_name, "--pooling", pooling,
                    "--steps", str(model_steps[n])]
