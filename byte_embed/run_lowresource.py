@@ -23,16 +23,20 @@ from pathlib import Path
 # balanced objective + big negative queue + relational (STS) term; AdamW on the A100.
 OBJ = dict(objective="both", queue_size=8192, rel_weight=1.0, optimizer="adamw")
 
-# plan rows: name, backbone, steps, batch, checkpoint?  EQUAL batch 64 AND equal steps across all
-# sizes (iso-compute scaling — the size curve isolates parameters, not training amount). All models
-# are checkpointed (50k is a long run; resume-safe + lets the parallel workers be killed/restarted).
-STEPS = 50000
-_SIZES = [("small", STEPS, True), ("base", STEPS, True), ("large", STEPS, True)]
+# EQUAL batch 64. Per-size step schedule — bigger models train MORE: small 50k / base 75k / large 100k.
+# byte and subword are matched WITHIN each size (the primary byte-vs-subword comparison stays iso-step);
+# across sizes this is "bigger trained more" (addresses the large-model undertraining seen earlier). All
+# models checkpointed. Override via run(steps=...) / parallel(steps=...) with a {size: steps} dict or an int.
+_DEFAULT_STEPS = {"small": 50000, "base": 75000, "large": 100000}
 
 
-def _grid():
-    return ([(f"byte-{s}", f"google/byt5-{s}", st, 64, ck) for s, st, ck in _SIZES]
-            + [(f"subword-{s}", f"google/mt5-{s}", st, 64, ck) for s, st, ck in _SIZES])
+def _grid(steps=None):
+    sch = (_DEFAULT_STEPS if steps is None
+           else steps if isinstance(steps, dict)
+           else {s: int(steps) for s in _DEFAULT_STEPS})
+    sizes = [(s, sch[s], True) for s in ("small", "base", "large")]
+    return ([(f"byte-{s}", f"google/byt5-{s}", st, 64, ck) for s, st, ck in sizes]
+            + [(f"subword-{s}", f"google/mt5-{s}", st, 64, ck) for s, st, ck in sizes])
 
 
 def _f(x, w=8):
@@ -46,7 +50,7 @@ def _save(results, out):
 
 def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_lang=42000,
         ckpt_dir="checkpoints", teacher_name="sonar", miracl_q=250, miracl_extra=20000,
-        only=None, with_baselines=True, with_efficiency=True, pooling="mean"):
+        only=None, with_baselines=True, with_efficiency=True, pooling="mean", steps=None):
     """Train (a subset of) the 6 students. `only` = list of model names to train (None = all,
     [] = precompute-only). `with_baselines`/`with_efficiency` are turned OFF for parallel workers
     (the orchestrator does those once). Workers SKIP loading the teacher when targets are cached."""
@@ -64,7 +68,7 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
 
     langs = ["am", "rw", "en"] if smoke else STUDY_LANGS
     miracl_langs = (["te"] if smoke else ["en", "zh", "ar", "te"])   # the 4 of our 9 in MIRACL
-    grid = _grid()
+    grid = _grid(steps)
     if smoke:
         n_per_lang = 1200
         grid = [("byte-small", "google/byt5-small", 80, 16, True),
@@ -217,11 +221,13 @@ def main():
     ap.add_argument("--no-efficiency", dest="with_efficiency", action="store_false")
     ap.add_argument("--pooling", default="mean", choices=["mean", "max", "attn"],
                     help="student sentence pooling ('attn' = lightweight multi-head attentive pool)")
+    ap.add_argument("--steps", type=int, default=None,
+                    help="override steps for the model(s) trained in this call (int = same for all)")
     a = ap.parse_args()
     only = None if a.only is None else [x for x in a.only.split(",") if x]
     run(out=a.out, smoke=a.smoke, device=a.device, n_per_lang=a.n_per_lang,
         teacher_name=a.teacher_name, only=only, with_baselines=a.with_baselines,
-        with_efficiency=a.with_efficiency, pooling=a.pooling)
+        with_efficiency=a.with_efficiency, pooling=a.pooling, steps=a.steps)
 
 
 if __name__ == "__main__":

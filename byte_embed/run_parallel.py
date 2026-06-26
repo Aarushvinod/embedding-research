@@ -43,8 +43,10 @@ def _merge(out, names):
 
 
 def parallel(out="results/byte_lowresource.json", device="cuda", max_concurrent=3,
-             n_per_lang=42000, teacher_name="sonar", pooling="mean"):
-    names = [g[0] for g in _grid()]
+             n_per_lang=42000, teacher_name="sonar", pooling="mean", steps=None):
+    rows = _grid(steps)                              # [(name, backbone, steps, batch, ckpt), ...]
+    names = [r[0] for r in rows]
+    model_steps = {r[0]: r[2] for r in rows}         # per-model step count (size schedule)
 
     # 1) precompute ONCE: balanced data + SONAR targets (cached) + efficiency — no models/baselines
     print("=== [parallel] precompute: balanced data + teacher targets + efficiency table ===")
@@ -62,7 +64,8 @@ def parallel(out="results/byte_lowresource.json", device="cuda", max_concurrent=
             logf = open(logdir / f"_log_{n}.txt", "w", encoding="utf-8")
             cmd = [sys.executable, "-m", "byte_embed.run_lowresource", "--only", n,
                    "--out", _part(out, n), "--device", device, "--no-baselines", "--no-efficiency",
-                   "--n-per-lang", str(n_per_lang), "--teacher", teacher_name, "--pooling", pooling]
+                   "--n-per-lang", str(n_per_lang), "--teacher", teacher_name, "--pooling", pooling,
+                   "--steps", str(model_steps[n])]
             procs[n] = (subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT), logf)
             print(f"  launched {n}  (log -> {logf.name})")
         for n, (p, logf) in list(procs.items()):
@@ -88,9 +91,11 @@ def main():
     ap.add_argument("--n-per-lang", type=int, dest="n_per_lang", default=42000)
     ap.add_argument("--teacher", dest="teacher_name", default="sonar")
     ap.add_argument("--pooling", default="mean", choices=["mean", "max", "attn"])
+    ap.add_argument("--steps", type=int, default=None, help="int = same steps for all sizes "
+                    "(default = the per-size schedule small 50k / base 75k / large 100k)")
     a = ap.parse_args()
     parallel(out=a.out, device=a.device, max_concurrent=a.max_concurrent,
-             n_per_lang=a.n_per_lang, teacher_name=a.teacher_name, pooling=a.pooling)
+             n_per_lang=a.n_per_lang, teacher_name=a.teacher_name, pooling=a.pooling, steps=a.steps)
 
 
 if __name__ == "__main__":
