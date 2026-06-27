@@ -136,7 +136,7 @@ def run(out="results/ucd_lowresource.json", smoke=False, device="cuda", n_per_la
             torch.cuda.reset_peak_memory_stats()
             cpath = str(Path(ckpt_dir) / f"{name}_{pooling}.pt") if ckpt else None
             distill(student, None, sentences, device=device, steps=nsteps, batch=batch,
-                    log_every=max(200, nsteps // 10), ckpt_path=cpath, targets=targets, **OBJ)
+                    log_every=max(200, nsteps // 100), ckpt_path=cpath, targets=targets, **OBJ)
 
             def enc(xs, _s=student):
                 return _s.encode(xs, device=device)
