@@ -1,0 +1,158 @@
+\documentclass[11pt]{article}
+
+% --- Encoding & fonts ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+% --- Layout ---
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{setspace}
+\onehalfspacing
+\usepackage{booktabs}
+\usepackage{enumitem}
+
+% --- Citations & links (natbib + bibtex; compiles on vanilla Overleaf with pdfLaTeX) ---
+\usepackage[dvipsnames]{xcolor}
+\usepackage[round]{natbib}
+\bibliographystyle{plainnat}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=NavyBlue,urlcolor=NavyBlue]{hyperref}
+
+\title{\textbf{Tokenizer-Free Embeddings for Low-Resource Question Answering:\\[2pt]
+Byte-Level versus Subword Multilingual Retrieval}}
+\author{Aarush Vinod\\ \small Sorva Health \\ \small \texttt{avinod@sorvahealth.com}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+% =====================================================================
+\begin{abstract}
+\noindent
+Answering questions in low-resource languages increasingly relies on retrieval-augmented
+generation (RAG), where a retriever finds the passage containing the answer. Yet the multilingual
+embeddings these retrievers use rely on English-centric subword tokenizers. These tokenizers segment
+low-resource languages into far more tokens than they do for high-resource languages. We ask whether
+tokenizer-free, byte-level embeddings yield better retrieval. To test this, we distill SONAR
+embeddings into byte-level (ByT5) and subword (mT5) students across 3 model sizes, with fixed training
+objectives and parameters. We evaluate both embeddings on passage retrieval (Belebele) and deep QA
+tasks (MIRACL, AfriQA, IndicQA), for six low-resource languages (Telugu, Tamil, Marathi, Amharic,
+Kinyarwanda, Hausa). Preliminary results show that byte embeddings perform better on passage
+retrieval, although the advantage diminishes as parameter count increases. For deep retrieval, byte
+embeddings perform significantly better, with the smallest byte-level model surpassing the largest
+subword model. This project aims to show that byte-level embeddings yield fairer multilingual
+embeddings well-suited for low-resource languages.
+\end{abstract}
+
+% =====================================================================
+\section{Introduction}
+\label{sec:intro}
+
+Large language models are increasingly the interface through which people seek information, and for
+the many languages with little training data this is made workable by retrieval-augmented generation
+(RAG): rather than answer from parametric memory alone, the system first \emph{retrieves} a passage
+likely to contain the answer and then conditions its response on that passage \citep{lewis2020rag}.
+The quality of the final answer is therefore bounded by the quality of the retriever. For
+low-resource languages, however, the multilingual sentence embeddings that power retrieval are built
+on subword tokenizers trained on English-dominated corpora, which fragment low-resource and
+non-Latin-script languages into far more tokens than high-resource ones \citep{petrov2023, ahia2023}.
+This ``tokenization tax'' degrades representation quality for exactly the languages that are least
+served today and that stand to benefit most from better retrieval.
+
+This proposal asks whether removing the tokenizer helps. We compare \emph{byte-level} (ByT5) and
+\emph{subword} (mT5) multilingual sentence embeddings, distilled from a shared frozen SONAR teacher
+under a fixed recipe so that only the input representation varies, and evaluate them as retrievers
+for six low-resource languages spanning four scripts and five language families. Concretely, we
+investigate four research questions:
+
+\begin{description}[leftmargin=2.2em,style=nextline,itemsep=2pt]
+  \item[\textbf{RQ1.}] Do byte-level embeddings retrieve better than subword embeddings for
+  low-resource languages, on both shallow passage retrieval and deep open-domain (QA) retrieval?
+  \item[\textbf{RQ2.}] How does any advantage depend on model size --- in particular, can the
+  smallest byte-level model match or surpass the largest subword model?
+  \item[\textbf{RQ3.}] Is a byte advantage attributable to the \emph{representation} rather than to
+  raw parameter count, when transformer capacity is held equal across the two tokenizers?
+  \item[\textbf{RQ4.}] Can an intrinsic, downstream-free measure of tokenization (such as
+  cross-lingual \emph{parity}) characterize the inequity that motivates the approach, and how do byte
+  and subword tokenizers compare on it?
+\end{description}
+
+\noindent
+Preliminary results suggest the answer to RQ1 is yes, and most strongly for deep retrieval, where the
+smallest byte model already surpasses the largest subword model. Section~\ref{sec:related} situates
+the work in prior literature on the tokenization tax and tokenizer-free modeling, and
+Section~\ref{sec:proposed} sketches the planned study.
+
+% =====================================================================
+\section{Related Work}
+\label{sec:related}
+
+Modern NLP serves the world's languages unequally, and a growing body of work locates one root of
+that inequality in the tokenizer. \citet{joshi2020} document a steep resource hierarchy in which most
+languages, including the majority spoken across the Global South, receive little data, tooling, or
+evaluation. Subword tokenizers, trained on corpora dominated by high-resource languages, inherit and
+amplify this imbalance. \citet{petrov2023} show that identical content translated across languages is
+segmented into very different numbers of tokens, with disparities reaching $15\times$ and non-Latin
+scripts among the worst affected. \citet{ahia2023} quantify the effect on parallel FLORES-200 text,
+where mid-resourced languages with their own scripts such as Telugu and Georgian require up to
+$5\times$ more tokens than English. Because commercial models bill per token, this tokenization tax is
+also economic: speakers of those languages pay several times more for equivalent content.
+
+The penalty is structural rather than incidental. \citet{somide2026} finds that every African
+language studied carries a per-language premium over English, and that even the best available subword
+tokenizer narrows but never closes the gap. \citet{lundin2025tokentax} report that higher subword
+fertility, the number of tokens per word, is associated with lower downstream accuracy on
+African-language QA, though the relationship is correlational and partly confounded with
+pretraining-data volume. Both are recent preprints, and their exact multipliers should be read with
+that caveat, and with the tokenizer version on which they were measured, since newer vocabularies have
+reduced the worst cases.
+
+The natural response is to remove the tokenizer. \citet{clark2022canine} argue that fixed subword
+vocabularies are not equally suited to all languages and operate directly on characters, discarding
+the vocabulary at inference; CANINE outperforms a larger subword mBERT by $2.8$ F1 on multilingual
+TyDi QA while using $28\%$ fewer parameters. ByT5 \citep{xue2022byt5}, the byte-level model we build
+on, matches or beats the equally sized subword mT5 \citep{xue2021mt5} at small scale, attributed to
+reallocating the parameters that subword models lock in a large vocabulary-embedding matrix into the
+transformer itself. Once viewed as a small-model curiosity, byte-level modeling now scales: the Byte
+Latent Transformer \citep{pagnoni2024blt} matches a FLOP-controlled Llama~3 up to 8B parameters.
+Together these establish both feasibility and a precedent for a smaller tokenizer-free model
+outperforming a larger subword one.
+
+The application that most exposes the tokenizer's cost is question answering, which for low-resource
+languages increasingly depends on retrieving an answer-bearing passage before generation. Yet existing
+evidence for tokenizer-free gains concentrates on classification and extractive QA, with no prior
+study isolating a byte advantage for dense retrieval in low-resource languages. This is the gap our
+work targets.
+
+Finally, the tokenizer literature offers an intrinsic, downstream-free way to characterize
+multilingual fairness. Tokenization parity, the token-length ratio of a language to English on
+parallel text \citep{petrov2023, ahia2023}, is computable for any tokenizer, including byte-level ones
+where it reduces to average bytes per sentence, making it the one number that compares byte and
+subword on equal terms; complements include the Gini coefficient of per-language cost
+\citep{lee2026equity} and the information-theoretic R\'enyi efficiency \citep{zouhar2023}. Two cautions
+apply. First, byte-level input reduces but does not eliminate cross-lingual disparity, which still
+exceeds $4\times$ for some pairs because UTF-8 length varies by script \citep{petrov2023}. Second,
+these intrinsic measures do not reliably predict downstream quality, which is task-dependent
+\citep{lee2026equity, ali2023tokenizer}. Parity is therefore best reported as a descriptive measure of
+multilingual equity, not a forecaster of task performance.
+
+% =====================================================================
+\section{Proposed Work}
+\label{sec:proposed}
+
+We distill SONAR \citep{duquenne2023sonar} sentence embeddings into byte-level (ByT5) and subword
+(mT5) students at three model sizes, holding the training data, supervision, and objective fixed so
+that only the input representation differs (addressing RQ1--RQ2). We evaluate retrieval on Belebele
+\citep{bandarkar2023belebele} across all languages, and deep open-domain QA retrieval --- MIRACL
+\citep{zhang2023miracl}, AfriQA \citep{ogundepo2023afriqa}, and IndicQA \citep{doddapaneni2023indicxtreme}
+--- for the six low-resource languages. To separate representation from capacity (RQ3) we add a
+parameter-matched ablation in which byte and subword students share an identical transformer and differ
+only in the input embedding and tokenizer. To characterize the underlying inequity (RQ4) we report
+tokenization parity as an intrinsic, downstream-free fairness measure alongside the retrieval results.
+\emph{[Expand with the detailed training protocol, baselines, statistical treatment, and timeline.]}
+
+% =====================================================================
+\bibliography{references}
+
+\end{document}
