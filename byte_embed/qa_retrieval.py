@@ -2,15 +2,25 @@
 passage against a relevant+distractor pool (the same rerank-pool proxy as `miracl.py`). This is the
 retrieval step that bottlenecks multilingual RAG, and where byte-level embeddings win on deep retrieval.
 
-Applied to the mteb QA-retrieval benchmarks that cover our low-resource languages:
-  IndicQA (mteb/IndicQARetrieval): Marathi, Tamil, Telugu  — small corpora; the valuable NEW coverage
-  Mr.TyDi (mteb/mrtidy):           Telugu                  — corroborates MIRACL te on a different corpus
+Two dataset shapes are supported, both reduced to one scoring path (`_score_pool`):
 
-All share MIRACL's `{lang}-corpus/-queries/-qrels` parquet layout, so one loader serves them. The
-corpus *split* differs per dataset (IndicQA 'test', Mr.TyDi 'train', MIRACL 'dev'), so we try
-candidates; a max-stream cap bounds very large corpora. AfriQA/CIRAL (Hausa) can be added here later.
+* mteb `{cfg}-corpus/-queries/-qrels` layout (`QA_BENCH`, built by `_build_pool`):
+    IndicQA (mteb/IndicQARetrieval): Marathi, Tamil, Telugu  — small corpora; the valuable NEW coverage
+    Mr.TyDi (mteb/mrtidy):           Telugu                  — corroborates MIRACL te on a different corpus
+  The corpus *split* differs per dataset (IndicQA 'test', Mr.TyDi 'train', MIRACL 'dev'), so we try
+  candidates; a max-stream cap bounds very large corpora.
 
-  python -m byte_embed.qa_retrieval --selftest      # tiny pool build for indicqa/mr
+* flat (query, positive-passage) tables (`QA_FLAT`, built by `_build_pool_flat`):
+    Amharic-Passage-Retrieval (rasyosef/...-V2): Amharic — monolingual, the only usable public deep
+    retrieval set for an African language in our set. The corpus is the passages themselves
+    (relevant + distractors), so no separate corpus/qrels is needed.
+
+This gives every low-resource language a retrieval signal: Belebele (shallow, all 9, in eval_battery)
+plus deep retrieval for te/ta/mr (Indic) and am (Amharic) here, en/zh/ar/te via MIRACL. Hausa and
+Kinyarwanda have no public deep-retrieval corpus yet (AfriQA ships no passages); they rest on Belebele
+until a formal African IR collection (e.g. AfriCLIRMatrix) is wired in.
+
+  python -m byte_embed.qa_retrieval --selftest      # tiny pool build for indicqa + amharicpr
 """
 from __future__ import annotations
 
@@ -21,10 +31,18 @@ import numpy as np
 
 from byte_embed.miracl import _ndcg_at_k
 
-# benchmark -> (hf path, queries/qrels split, {our_lang: dataset_lang_config})
+# mteb-layout benchmarks: name -> (hf path, queries/qrels split, {our_lang: dataset_lang_config})
 QA_BENCH = {
     "indicqa": ("mteb/IndicQARetrieval", "test", {"mr": "mr", "ta": "ta", "te": "te"}),
     "mrtydi":  ("mteb/mrtidy",           "test", {"te": "telugu"}),
+}
+# flat (query,passage) benchmarks: name -> spec (corpus is the passages themselves)
+QA_FLAT = {
+    "amharicpr": {
+        "path": "rasyosef/Amharic-Passage-Retrieval-Dataset-V2", "split": "test",
+        "langs": ("am",), "qid": "query_id", "pid": "passage_id",
+        "qcol": "query", "pcol": "passage", "extra_split": "train",
+    },
 }
 _CORPUS_SPLITS = ("test", "train", "dev", "corpus")     # the corpus split varies by dataset
 
@@ -98,12 +116,68 @@ def _build_pool(path, cfg, split, key, n_queries, distractors, seed, cache_dir, 
     return queries, {k: set(v) for k, v in rel.items()}, pool_id, pool_text
 
 
-def _eval_one(encode_fn, path, cfg, split, key, n_queries, distractors, seed, cache_dir):
+def _build_pool_flat(spec, key, n_queries, distractors, seed, cache_dir, max_corpus=400000):
+    """Flat (query, positive-passage) table -> (queries, rel, pool_id, pool_text); cached (same schema
+    as `_build_pool`). The corpus is the passages themselves: every sampled query's relevant passage
+    plus distractor passages, topped up by streaming `extra_split` when the eval split is small."""
+    cache = Path(cache_dir) / f"qa_{key}_{n_queries}q_{distractors}d_{seed}.json"
+    if cache.exists():
+        d = json.loads(cache.read_text(encoding="utf-8"))
+        return d["queries"], {k: set(v) for k, v in d["rel"].items()}, d["pool_id"], d["pool_text"]
+
+    from datasets import load_dataset
+    qid, pid, qcol, pcol = spec["qid"], spec["pid"], spec["qcol"], spec["pcol"]
+    try:
+        ds = load_dataset(spec["path"], split=spec["split"])
+    except Exception as e:  # noqa: BLE001
+        print(f"  [qa] {spec['path']} unavailable: {type(e).__name__}")
+        return None
+
+    queries, rel, id2text = {}, {}, {}
+    for r in ds:
+        q, p = str(r[qid]), str(r[pid])
+        queries.setdefault(q, str(r[qcol]))
+        rel.setdefault(q, set()).add(p)
+        id2text.setdefault(p, str(r[pcol]))
+
+    rng = np.random.default_rng(seed)
+    qids = list(queries)
+    rng.shuffle(qids)
+    qids = qids[:n_queries]
+    if not qids:
+        return None
+    queries = {q: queries[q] for q in qids}
+    rel = {q: rel[q] for q in qids}
+    needed = set().union(*rel.values())
+
+    pool_id = list(needed)
+    distract = [p for p in id2text if p not in needed]
+    rng.shuffle(distract)
+    pool_id += distract[:distractors]
+    if spec.get("extra_split") and len(pool_id) - len(needed) < distractors:   # top up from other split
+        try:
+            for r in load_dataset(spec["path"], split=spec["extra_split"], streaming=True):
+                p = str(r[pid])
+                if p not in id2text:
+                    id2text[p] = str(r[pcol])
+                    pool_id.append(p)
+                if len(pool_id) - len(needed) >= distractors or len(id2text) >= max_corpus:
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+
+    pool_text = [id2text[i] for i in pool_id]
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"queries": queries, "rel": {k: sorted(v) for k, v in rel.items()},
+                                 "pool_id": pool_id, "pool_text": pool_text}, ensure_ascii=False),
+                     encoding="utf-8")
+    return queries, {k: set(v) for k, v in rel.items()}, pool_id, pool_text
+
+
+def _score_pool(encode_fn, built):
+    """Encode queries + pool, return nDCG@10 / recall@100 over the (queries, rel, pool) tuple."""
     from common.eval import l2norm
 
-    built = _build_pool(path, cfg, split, key, n_queries, distractors, seed, cache_dir)
-    if not built:
-        return None
     queries, rel, pool_id, pool_text = built
     qids = list(queries)
     Q = l2norm(encode_fn([queries[qid] for qid in qids]))
@@ -120,17 +194,29 @@ def _eval_one(encode_fn, path, cfg, split, key, n_queries, distractors, seed, ca
             "n_queries": len(qids), "pool": len(pool_text)}
 
 
-def eval_qa_retrieval(encode_fn, benchmarks=("indicqa", "mrtydi"), n_queries=250, distractors=20000,
-                      seed=0, cache_dir="checkpoints"):
-    """Per-benchmark, per-language nDCG@10 / recall@100 (+ benchmark means). The RAG-retrieval axis."""
+def eval_qa_retrieval(encode_fn, benchmarks=("indicqa", "mrtydi", "amharicpr"), n_queries=250,
+                      distractors=20000, seed=0, cache_dir="checkpoints"):
+    """Per-benchmark, per-language nDCG@10 / recall@100 (+ benchmark means). The RAG-retrieval axis.
+    Handles both the mteb-layout benchmarks (`QA_BENCH`) and the flat query->passage ones (`QA_FLAT`)."""
     out = {}
     for bench in benchmarks:
-        path, split, langmap = QA_BENCH[bench]
         per = {}
-        for our_lang, cfg in langmap.items():
-            m = _eval_one(encode_fn, path, cfg, split, f"{bench}_{our_lang}", n_queries, distractors,
-                          seed, cache_dir)
-            per[our_lang] = m
+        if bench in QA_BENCH:
+            path, split, langmap = QA_BENCH[bench]
+            for our_lang, cfg in langmap.items():
+                built = _build_pool(path, cfg, split, f"{bench}_{our_lang}", n_queries, distractors,
+                                    seed, cache_dir)
+                per[our_lang] = _score_pool(encode_fn, built) if built else None
+        elif bench in QA_FLAT:
+            spec = QA_FLAT[bench]
+            for our_lang in spec["langs"]:
+                built = _build_pool_flat(spec, f"{bench}_{our_lang}", n_queries, distractors, seed,
+                                         cache_dir)
+                per[our_lang] = _score_pool(encode_fn, built) if built else None
+        else:
+            print(f"  [qa] unknown benchmark {bench!r} -> skip")
+            continue
+        for our_lang, m in per.items():
             if m:
                 print(f"  [qa:{bench}] {our_lang}: nDCG@10={m['ndcg@10']} recall@100={m['recall@100']} "
                       f"(pool {m['pool']}, {m['n_queries']}q)")
@@ -143,7 +229,7 @@ def eval_qa_retrieval(encode_fn, benchmarks=("indicqa", "mrtydi"), n_queries=250
 def _selftest():
     rng = np.random.default_rng(0)
     enc = lambda xs: rng.standard_normal((len(xs), 64)).astype(np.float32)  # noqa: E731
-    print(eval_qa_retrieval(enc, benchmarks=("indicqa",), n_queries=20, distractors=500))
+    print(eval_qa_retrieval(enc, benchmarks=("indicqa", "amharicpr"), n_queries=20, distractors=500))
 
 
 if __name__ == "__main__":

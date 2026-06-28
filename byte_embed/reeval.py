@@ -102,7 +102,8 @@ def reeval(results_path, pooling, ckpt_dir="checkpoints", device="cuda", langs=N
         qa = bm["qa_retrieval"]
         iq = (qa.get("indicqa") or {}).get("ndcg@10_mean")
         mt = (qa.get("mrtydi") or {}).get("ndcg@10_mean")
-        print(f"  [reeval] {name}: saved | IndicQA={iq} Mr.TyDi={mt}")
+        am = (qa.get("amharicpr") or {}).get("ndcg@10_mean")
+        print(f"  [reeval] {name}: saved | IndicQA={iq} Mr.TyDi={mt} AmharicPR={am}")
         if "cuda" in str(device):
             torch.cuda.empty_cache()
 

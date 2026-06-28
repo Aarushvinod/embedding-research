@@ -205,13 +205,14 @@ def _summary(results):
             return f"{x - y:+.3f}" if (x is not None and y is not None) else "-"
         print(f"  {size:6} Belebele {d('belebele_ndcg@10')}  FLORES {d('flores_p@1')}  STS {d('sts_spearman')}")
     if any(r.get("qa_retrieval") for r in M.values()):
-        print("\nRAG-RETRIEVAL — QA open-retrieval nDCG@10 (IndicQA mr/ta/te · Mr.TyDi te):")
+        print("\nRAG-RETRIEVAL — QA open-retrieval nDCG@10 (IndicQA mr/ta/te · Mr.TyDi te · Amharic-PR am):")
         for name, r in M.items():
             qa = r.get("qa_retrieval")
             if qa:
                 iq = (qa.get("indicqa") or {}).get("ndcg@10_mean")
                 mt = (qa.get("mrtydi") or {}).get("ndcg@10_mean")
-                print(f"  {name:20} IndicQA {_f(iq, 7)}  Mr.TyDi {_f(mt, 7)}")
+                am = (qa.get("amharicpr") or {}).get("ndcg@10_mean")
+                print(f"  {name:20} IndicQA {_f(iq, 7)}  Mr.TyDi {_f(mt, 7)}  Amharic-PR {_f(am, 7)}")
     eff = results.get("efficiency")
     if eff:
         print("\nTOKENIZATION (subword tax vs byte UTF-8 tax, vs English, on FLORES-1012):")
