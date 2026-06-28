@@ -139,6 +139,22 @@ def _summary(results):
         print(f"\n{size}: byte transformer {bx:.0f}M vs subword {sx:.0f}M (matched) | "
               f"byte-subword: SIB {d('sib')} Belebele {d('belebele_ndcg@10')} "
               f"FLORES {d('flores_p@1')} STS {d('sts_spearman')} MIRACL {dmir}")
+    if any(r.get("qa_retrieval") for r in M.values()):
+        g = lambda x, w=7: (f"{x:>{w}.3f}" if isinstance(x, (int, float)) else f"{'-':>{w}}")  # noqa: E731
+        print("\nRAG-RETRIEVAL — QA open-retrieval nDCG@10 (IndicQA mr/ta/te · Mr.TyDi te · "
+              "Amharic-PR am · 2AIRTC am · AfriCLIR am/ha [cross-lingual]):")
+        for name, r in M.items():
+            qa = r.get("qa_retrieval")
+            if qa:
+                iq = (qa.get("indicqa") or {}).get("ndcg@10_mean")
+                mt = (qa.get("mrtydi") or {}).get("ndcg@10_mean")
+                am = (qa.get("amharicpr") or {}).get("ndcg@10_mean")
+                a2 = (qa.get("2airtc") or {}).get("ndcg@10_mean")
+                acl = (qa.get("africlir") or {}).get("per_lang") or {}
+                ac_am = (acl.get("am") or {}).get("ndcg@10")
+                ac_ha = (acl.get("ha") or {}).get("ndcg@10")
+                print(f"  {name:16} IndicQA {g(iq)}  Mr.TyDi {g(mt)}  Amharic-PR {g(am)}  "
+                      f"2AIRTC {g(a2)}  AfriCLIR {g(ac_am)}/{g(ac_ha)}")
 
 
 def main():

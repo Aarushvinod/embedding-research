@@ -233,6 +233,21 @@ def _summary(results):
         if rows:
             print(f"\nUCD - {ref} at matched size (Belebele | FLORES | STS):")
             print("\n".join(rows))
+    if any(r.get("qa_retrieval") for r in M.values()):
+        print("\nRAG-RETRIEVAL — QA open-retrieval nDCG@10 (IndicQA mr/ta/te · Mr.TyDi te · "
+              "Amharic-PR am · 2AIRTC am · AfriCLIR am/ha [cross-lingual]):")
+        for name, r in M.items():
+            qa = r.get("qa_retrieval")
+            if qa:
+                iq = (qa.get("indicqa") or {}).get("ndcg@10_mean")
+                mt = (qa.get("mrtydi") or {}).get("ndcg@10_mean")
+                am = (qa.get("amharicpr") or {}).get("ndcg@10_mean")
+                a2 = (qa.get("2airtc") or {}).get("ndcg@10_mean")
+                acl = (qa.get("africlir") or {}).get("per_lang") or {}
+                ac_am = (acl.get("am") or {}).get("ndcg@10")
+                ac_ha = (acl.get("ha") or {}).get("ndcg@10")
+                print(f"  {name:20} IndicQA {_f(iq, 7)}  Mr.TyDi {_f(mt, 7)}  Amharic-PR {_f(am, 7)}  "
+                      f"2AIRTC {_f(a2, 7)}  AfriCLIR {_f(ac_am, 7)}/{_f(ac_ha, 7)}")
     eff = results.get("efficiency")
     if eff:
         print("\nTOKENIZATION (subword tax vs byte UTF-8 tax, vs English, on FLORES-1012):")
