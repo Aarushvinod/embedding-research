@@ -86,7 +86,8 @@ def _build_pool(lang, n_queries, distractors, seed, cache_dir):
 
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
     cache.write_text(json.dumps({"queries": queries, "rel": rel,
-                                 "pool_id": pool_id, "pool_text": pool_text}, ensure_ascii=False))
+                                 "pool_id": pool_id, "pool_text": pool_text}, ensure_ascii=False),
+                     encoding="utf-8")
     return queries, {k: set(v) for k, v in rel.items()}, pool_id, pool_text
 
 
