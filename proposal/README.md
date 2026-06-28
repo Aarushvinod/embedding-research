@@ -3,8 +3,11 @@
 Byte-level vs. subword multilingual embeddings for low-resource question answering.
 
 ## Files
-- `main.tex` — the proposal (abstract, introduction + research questions, related work, proposed work).
+- `main.tex` — the proposal: Title & Abstract, Introduction & Motivation (with research questions),
+  Literature Review (with an explicit research gap), and Proposed Methodology (theoretical framework,
+  distillation system, parameter-allocation table, evaluation matrix, statistical treatment).
 - `references.bib` — bibliography (natbib + bibtex).
+- `proposal.md` — the same content as raw editable text (no LaTeX), for quick drafting.
 
 ## Compile
 **Overleaf (recommended):** import this folder, then either

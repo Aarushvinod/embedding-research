@@ -11,6 +11,7 @@
 \usepackage{setspace}
 \onehalfspacing
 \usepackage{booktabs}
+\usepackage{array}
 \usepackage{enumitem}
 
 % --- Citations & links (natbib + bibtex; compiles on vanilla Overleaf with pdfLaTeX) ---
@@ -35,18 +36,21 @@ generation (RAG), where a retriever finds the passage containing the answer. Yet
 embeddings these retrievers use rely on English-centric subword tokenizers. These tokenizers segment
 low-resource languages into far more tokens than they do for high-resource languages. We ask whether
 tokenizer-free, byte-level embeddings yield better retrieval. To test this, we distill SONAR
-embeddings into byte-level (ByT5) and subword (mT5) students across 3 model sizes, with fixed training
-objectives and parameters. We evaluate both embeddings on passage retrieval (Belebele) and deep QA
-tasks (MIRACL, AfriQA, IndicQA), for six low-resource languages (Telugu, Tamil, Marathi, Amharic,
-Kinyarwanda, Hausa). Preliminary results show that byte embeddings perform better on passage
-retrieval, although the advantage diminishes as parameter count increases. For deep retrieval, byte
-embeddings perform significantly better, with the smallest byte-level model surpassing the largest
-subword model. This project aims to show that byte-level embeddings yield fairer multilingual
-embeddings well-suited for low-resource languages.
+embeddings into byte-level (ByT5) and subword (mT5) students across three model sizes, with fixed
+training objectives and parameters. We evaluate both embeddings on passage retrieval (Belebele) and
+deep retrieval tasks (MIRACL, IndicQA, 2AIRTC, and AfriCLIRMatrix), for six low-resource languages
+(Telugu, Tamil, Marathi, Amharic, Kinyarwanda, Hausa). Preliminary results show that byte embeddings
+perform better on passage retrieval, although the advantage diminishes as parameter count increases.
+For deep retrieval, byte embeddings perform significantly better, with the smallest byte-level model
+surpassing the largest subword model. To check that this is a property of the representation rather
+than of raw parameter count, we add a control in which byte and subword students share an identical
+transformer and differ only in the input tokenizer. This project aims to show that byte-level
+embeddings yield fairer multilingual embeddings well-suited for low-resource languages, and that a
+smaller tokenizer-free retriever can serve those languages better than a larger subword one.
 \end{abstract}
 
 % =====================================================================
-\section{Introduction}
+\section{Introduction and Motivation}
 \label{sec:intro}
 
 Large language models are increasingly the interface through which people seek information, and for
@@ -58,34 +62,37 @@ low-resource languages, however, the multilingual sentence embeddings that power
 on subword tokenizers trained on English-dominated corpora, which fragment low-resource and
 non-Latin-script languages into far more tokens than high-resource ones \citep{petrov2023, ahia2023}.
 This ``tokenization tax'' degrades representation quality for exactly the languages that are least
-served today and that stand to benefit most from better retrieval.
+served today and that stand to benefit most from better retrieval, and it raises a concrete
+research question: is the subword tokenizer itself a bottleneck for low-resource retrieval, and would
+removing it help?
 
-This proposal asks whether removing the tokenizer helps. We compare \emph{byte-level} (ByT5) and
+This proposal investigates that question directly. We compare \emph{byte-level} (ByT5) and
 \emph{subword} (mT5) multilingual sentence embeddings, distilled from a shared frozen SONAR teacher
 under a fixed recipe so that only the input representation varies, and evaluate them as retrievers
-for six low-resource languages spanning four scripts and five language families. Concretely, we
-investigate four research questions:
+for six low-resource languages spanning four scripts and five language families, with three
+high-resource anchors. We organize the work around four research questions:
 
 \begin{description}[leftmargin=2.2em,style=nextline,itemsep=2pt]
   \item[\textbf{RQ1.}] Do byte-level embeddings retrieve better than subword embeddings for
-  low-resource languages, on both shallow passage retrieval and deep open-domain (QA) retrieval?
+  low-resource languages, on both shallow passage retrieval and deep open-domain (QA / ad-hoc)
+  retrieval?
   \item[\textbf{RQ2.}] How does any advantage depend on model size --- in particular, can the
   smallest byte-level model match or surpass the largest subword model?
   \item[\textbf{RQ3.}] Is a byte advantage attributable to the \emph{representation} rather than to
   raw parameter count, when transformer capacity is held equal across the two tokenizers?
   \item[\textbf{RQ4.}] Can an intrinsic, downstream-free measure of tokenization (such as
-  cross-lingual \emph{parity}) characterize the inequity that motivates the approach, and how do byte
-  and subword tokenizers compare on it?
+  cross-lingual \emph{parity}) characterize the inequity that motivates the approach, and does it
+  predict the per-language retrieval gap between byte and subword?
 \end{description}
 
 \noindent
 Preliminary results suggest the answer to RQ1 is yes, and most strongly for deep retrieval, where the
 smallest byte model already surpasses the largest subword model. Section~\ref{sec:related} situates
-the work in prior literature on the tokenization tax and tokenizer-free modeling, and
-Section~\ref{sec:proposed} sketches the planned study.
+the work in the literature and makes the research gap explicit; Section~\ref{sec:method} details the
+proposed methodology and evaluation.
 
 % =====================================================================
-\section{Related Work}
+\section{Literature Review}
 \label{sec:related}
 
 Modern NLP serves the world's languages unequally, and a growing body of work locates one root of
@@ -119,38 +126,163 @@ Latent Transformer \citep{pagnoni2024blt} matches a FLOP-controlled Llama~3 up t
 Together these establish both feasibility and a precedent for a smaller tokenizer-free model
 outperforming a larger subword one.
 
-The application that most exposes the tokenizer's cost is question answering, which for low-resource
-languages increasingly depends on retrieving an answer-bearing passage before generation. Yet existing
-evidence for tokenizer-free gains concentrates on classification and extractive QA, with no prior
-study isolating a byte advantage for dense retrieval in low-resource languages. This is the gap our
-work targets.
-
-Finally, the tokenizer literature offers an intrinsic, downstream-free way to characterize
-multilingual fairness. Tokenization parity, the token-length ratio of a language to English on
-parallel text \citep{petrov2023, ahia2023}, is computable for any tokenizer, including byte-level ones
-where it reduces to average bytes per sentence, making it the one number that compares byte and
-subword on equal terms; complements include the Gini coefficient of per-language cost
-\citep{lee2026equity} and the information-theoretic R\'enyi efficiency \citep{zouhar2023}. Two cautions
-apply. First, byte-level input reduces but does not eliminate cross-lingual disparity, which still
+The tokenizer literature also offers an intrinsic, downstream-free way to characterize multilingual
+fairness. Tokenization parity, the token-length ratio of a language to English on parallel text
+\citep{petrov2023, ahia2023}, is computable for any tokenizer, including byte-level ones where it
+reduces to average bytes per sentence, making it the one number that compares byte and subword on
+equal terms; complements include the Gini coefficient of per-language cost \citep{lee2026equity} and
+the information-theoretic R\'enyi efficiency \citep{zouhar2023}. Two cautions apply, and both shape our
+claims. First, byte-level input reduces but does not eliminate cross-lingual disparity, which still
 exceeds $4\times$ for some pairs because UTF-8 length varies by script \citep{petrov2023}. Second,
 these intrinsic measures do not reliably predict downstream quality, which is task-dependent
 \citep{lee2026equity, ali2023tokenizer}. Parity is therefore best reported as a descriptive measure of
-multilingual equity, not a forecaster of task performance.
+multilingual equity, not a validated forecaster of task performance.
+
+\paragraph{Research gap.}
+Three gaps remain, and this proposal targets all three. (i) The verified evidence for tokenizer-free
+gains concentrates on classification and extractive QA; \emph{no prior study isolates a byte advantage
+for dense retrieval} --- the step that actually bottlenecks multilingual RAG --- in low-resource
+languages. (ii) Existing comparisons confound the input representation with parameter count, because
+byte and subword models of the ``same size'' allocate parameters very differently; a control that
+holds transformer capacity fixed is missing. (iii) Although intrinsic tokenization metrics are widely
+reported, \emph{whether parity predicts the per-language byte-versus-subword retrieval gap has not been
+tested}. Filling these gaps requires a controlled distillation study with a retrieval-centric, broad
+low-resource evaluation, which we now describe.
 
 % =====================================================================
-\section{Proposed Work}
-\label{sec:proposed}
+\section{Proposed Methodology}
+\label{sec:method}
 
-We distill SONAR \citep{duquenne2023sonar} sentence embeddings into byte-level (ByT5) and subword
-(mT5) students at three model sizes, holding the training data, supervision, and objective fixed so
-that only the input representation differs (addressing RQ1--RQ2). We evaluate retrieval on Belebele
-\citep{bandarkar2023belebele} across all languages, and deep open-domain QA retrieval --- MIRACL
-\citep{zhang2023miracl}, AfriQA \citep{ogundepo2023afriqa}, and IndicQA \citep{doddapaneni2023indicxtreme}
---- for the six low-resource languages. To separate representation from capacity (RQ3) we add a
-parameter-matched ablation in which byte and subword students share an identical transformer and differ
-only in the input embedding and tokenizer. To characterize the underlying inequity (RQ4) we report
-tokenization parity as an intrinsic, downstream-free fairness measure alongside the retrieval results.
-\emph{[Expand with the detailed training protocol, baselines, statistical treatment, and timeline.]}
+\subsection{Theoretical framework}
+Our central hypothesis is one of \emph{parameter allocation}. A subword model spends a large fraction
+of its parameters on a vocabulary embedding table (Table~\ref{tab:params}): roughly $87\%$ for the
+smallest mT5 and still $45\%$ at large scale. A byte-level model needs only a $\sim$256-entry input
+table, so almost all of its parameters sit in the transformer that actually contextualizes the input.
+At matched \emph{total} parameters, then, byte models devote more capacity to computation, and a
+tokenizer-free model can plausibly serve a low-resource language better than a larger subword one that
+has spent its budget memorizing a vocabulary skewed toward high-resource languages. We test the
+hypothesis through controlled distillation: rather than pretrain from scratch, we distill a single
+strong frozen multilingual teacher into byte and subword students under an identical recipe, so the
+\emph{only} variable is the input representation. A matched-transformer ablation
+(Section~\ref{sec:matched}) then separates the representation effect from raw capacity.
+
+\subsection{Teacher and cached targets}
+The teacher is the SONAR text encoder \citep{duquenne2023sonar}, a 1024-dimensional sentence-embedding
+space covering 200 languages, used frozen. Because SONAR spans every study language, it imposes no
+``teacher ceiling'' on the low-resource targets. We embed each training sentence once with SONAR and
+cache the target vectors to disk; both students then train against identical cached targets, which
+guarantees identical supervision and removes the per-step teacher cost.
+
+\subsection{Student architectures}
+Students are encoder-only ByT5 \citep{xue2022byt5} (byte) and mT5 \citep{xue2021mt5} (subword) at
+three sizes (small, base, large). Each applies pooling over the encoder outputs (mean or multi-head
+attentive, fixed within a comparison), a linear projection to the teacher's 1024 dimensions, and
+$L_2$ normalization. We report both total and transformer-only parameter counts
+(Table~\ref{tab:params}), since the latter is the fair axis for the byte-versus-subword comparison.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{l rrr r rr}
+\toprule
+& \multicolumn{3}{c}{\textbf{Subword (mT5)}} & & \multicolumn{2}{c}{\textbf{Byte (ByT5)}}\\
+\cmidrule(lr){2-4}\cmidrule(lr){6-7}
+Size & Total & Transformer & Vocab share & & Total & Transformer\\
+\midrule
+Small & 147M & 19M  & 87\% & & 219M & $\approx$219M\\
+Base  & 278M & 86M  & 69\% & & 416M & $\approx$416M\\
+Large & 565M & 309M & 45\% & & 866M & $\approx$866M\\
+\bottomrule
+\end{tabular}
+\caption{Parameter allocation. Subword models lock 45--87\% of their parameters in the vocabulary
+embedding table; byte models put nearly all parameters in the transformer (the byte input table is
+$<1$M). This motivates reporting transformer-only parameters and the matched-transformer control.}
+\label{tab:params}
+\end{table}
+
+\subsection{Distillation objective}
+Training combines three terms against the cached SONAR targets, identical for byte and subword and
+across sizes: (i) a contrastive InfoNCE loss (temperature $0.05$) with a MoCo-style negative queue of
+$8{,}192$ to sharpen retrieval geometry; (ii) an alignment loss pulling each student embedding toward
+its teacher target; and (iii) a relational loss that preserves the teacher's pairwise similarity
+structure within a batch. We optimize with AdamW (learning rate $2\times10^{-4}$, batch size $64$),
+holding all hyperparameters fixed across the byte/subword arms so that the tokenizer is the only
+manipulated variable.
+
+\subsection{Training data}
+We train on nine languages: six low-resource targets (Telugu, Tamil, Marathi, Amharic, Hausa,
+Kinyarwanda) and three high-resource anchors (English, Mandarin, Arabic). Sentences are drawn from
+Wikipedia with a balanced max--min sampler that caps every language at the size of the smallest
+($\approx$42k sentences each, $\approx$378k total), so no language dominates the distillation signal.
+
+\subsection{Controlling for capacity: the matched-transformer ablation}
+\label{sec:matched}
+To answer RQ3, we add a control in which byte and subword students at each size share an
+\emph{identical} transformer configuration (the mT5-$\{$size$\}$ dimensions, randomly initialized) and
+differ \emph{only} in the input embedding and tokenizer (a $\sim$256-entry byte table versus the full
+subword vocabulary). Here the transformer parameter counts are equal by construction
+($19.4$M / $85.7$M / $309.4$M at small/base/large), so any remaining byte advantage is attributable to
+the representation, not to capacity. Because these models are trained from scratch, we read them as an
+isolating ablation rather than as headline numbers, and pair it with a cross-size comparison (RQ2):
+whether the smallest byte model outperforms the largest subword model.
+
+\subsection{Evaluation protocol}
+The primary axis is retrieval, scored as a rerank pool in which each query's gold passage competes
+against a large distractor set; we report nDCG@10 and recall@100. We complement retrieval with
+semantic textual similarity (STS), classification, and bitext mining for a rounded picture, and with
+an intrinsic tokenization metric (Section~\ref{sec:intrinsic}). Table~\ref{tab:eval} lists the
+benchmarks and their language coverage. Belebele provides uniform shallow passage retrieval for all
+nine languages; deep retrieval is covered by MIRACL (monolingual), IndicQA and Mr.\,TyDi (QA), the
+peer-reviewed Amharic ad-hoc collection 2AIRTC \citep{yeshambel2020twoairtc}, and the cross-lingual
+AfriCLIRMatrix \citep{ogundepo2022africlirmatrix}, which supplies the only public deep-retrieval signal
+for Hausa.
+
+\begin{table}[t]
+\centering
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{l l l l}
+\toprule
+Task & Benchmark & Metric & Languages\\
+\midrule
+Retrieval --- shallow        & Belebele \citep{bandarkar2023belebele}      & nDCG@10           & all 9\\
+Retrieval --- deep, mono     & MIRACL \citep{zhang2023miracl}              & nDCG@10, R@100    & en, zh, ar, te\\
+Retrieval --- deep, QA       & IndicQA \citep{doddapaneni2023indicxtreme}  & nDCG@10, R@100    & mr, ta, te\\
+                             & Mr.\,TyDi \citep{zhang2021mrtydi}           & nDCG@10, R@100    & te\\
+                             & 2AIRTC \citep{yeshambel2020twoairtc}        & nDCG@10, R@100    & am\\
+Retrieval --- deep, x-ling   & AfriCLIRMatrix \citep{ogundepo2022africlirmatrix} & nDCG@10, R@100 & am, ha\\
+Semantic similarity          & SemRel-2024 \citep{ousidhoum2024semrel} (+ Indic/C-MTEB) & Spearman & all 9\\
+Classification               & SIB-200                                      & accuracy          & all 9\\
+Bitext mining                & FLORES-200                                   & P@1 ($\to$ en)    & all 9\\
+Intrinsic (no model)         & Tokenization parity / fertility              & ratio vs.\ English & all 9\\
+\bottomrule
+\end{tabular}
+\caption{Evaluation matrix. Retrieval is the primary axis; every language has at least shallow
+retrieval (Belebele), and five of six low-resource languages have a deep-retrieval benchmark.
+Kinyarwanda currently has only shallow coverage (Section~\ref{sec:scope}).}
+\label{tab:eval}
+\end{table}
+
+\subsection{Intrinsic tokenization metric}
+\label{sec:intrinsic}
+To answer RQ4 we compute tokenization parity --- the ratio of a language's token count to English's on
+parallel FLORES-200 text --- for the subword tokenizer, and its byte-level analogue (bytes per
+sentence) for the byte model, alongside fertility and a Gini coefficient of per-language cost. These
+are downstream-free descriptors of multilingual equity. We then test, per language, whether parity
+correlates with the measured byte-minus-subword retrieval gap. We report parity as a descriptive
+fairness number and treat any correlation as exploratory, consistent with evidence that intrinsic
+metrics do not cleanly predict downstream quality \citep{lee2026equity, ali2023tokenizer}.
+
+\subsection{Statistical treatment, reproducibility, and scope}
+\label{sec:scope}
+We report bootstrap 95\% confidence intervals on all benchmark means and, budget permitting, at least
+two random seeds for the small and base models; comparisons are made at matched optimizer steps. All
+teacher targets, retrieval pools, and checkpoints are cached so runs are resumable and results are
+reproducible. Two scope limitations are stated up front. First, AfriCLIRMatrix is cross-lingual
+(English query to African passage), a different axis from the monolingual sets, and is labeled as such.
+Second, \emph{Kinyarwanda has no public deep-retrieval corpus} --- AfriQA \citep{ogundepo2023afriqa}, the obvious candidate, ships
+no passage collection --- so it is evaluated on shallow retrieval (Belebele) only; extending deep
+coverage to Kinyarwanda is an explicit goal of ongoing data work.
 
 % =====================================================================
 \bibliography{references}
