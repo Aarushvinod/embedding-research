@@ -11,14 +11,20 @@ Two dataset shapes are supported, both reduced to one scoring path (`_score_pool
   candidates; a max-stream cap bounds very large corpora.
 
 * flat (query, positive-passage) tables (`QA_FLAT`, built by `_build_pool_flat`):
-    Amharic-Passage-Retrieval (rasyosef/...-V2): Amharic — monolingual, the only usable public deep
-    retrieval set for an African language in our set. The corpus is the passages themselves
-    (relevant + distractors), so no separate corpus/qrels is needed.
+    Amharic-Passage-Retrieval (rasyosef/...-V2): Amharic — monolingual, community-built from news.
+    The corpus is the passages themselves (relevant + distractors), no separate corpus/qrels needed.
+
+* inverted-relevance collections (`QA_INV`, built by `_build_pool_inv`):
+    2AIRTC (rasyosef/2AIRTC-...): Amharic — the peer-reviewed Amharic ad-hoc IR test collection
+    (240 topics, 12,587 docs). The HF dump stores relevance inverted (each doc lists the topics it is
+    relevant to), so topics=queries + qrels + corpus are reconstructed from one split. This is the
+    FORMAL Amharic benchmark; Amharic-PR corroborates it on a second (community) corpus.
 
 This gives every low-resource language a retrieval signal: Belebele (shallow, all 9, in eval_battery)
-plus deep retrieval for te/ta/mr (Indic) and am (Amharic) here, en/zh/ar/te via MIRACL. Hausa and
-Kinyarwanda have no public deep-retrieval corpus yet (AfriQA ships no passages); they rest on Belebele
-until a formal African IR collection (e.g. AfriCLIRMatrix) is wired in.
+plus deep retrieval for te/ta/mr (Indic) and am (Amharic, two corpora) here, en/zh/ar/te via MIRACL.
+Hausa and Kinyarwanda have no public monolingual deep-retrieval corpus yet (AfriQA ships no passages);
+they rest on Belebele until the cross-lingual AfriCLIRMatrix (English queries -> African docs, covers
+Hausa) is wired in from its GitHub topics/qrels.
 
   python -m byte_embed.qa_retrieval --selftest      # tiny pool build for indicqa + amharicpr
 """
@@ -42,6 +48,16 @@ QA_FLAT = {
         "path": "rasyosef/Amharic-Passage-Retrieval-Dataset-V2", "split": "test",
         "langs": ("am",), "qid": "query_id", "pid": "passage_id",
         "qcol": "query", "pcol": "passage", "extra_split": "train",
+    },
+}
+# inverted-relevance benchmarks: name -> spec (each document lists the topics it is relevant to;
+# reconstruct topics=queries + qrels + corpus from one split). 2AIRTC = the peer-reviewed Amharic
+# ad-hoc IR test collection (Yeshambel et al. 2020) — the FORMAL Amharic benchmark.
+QA_INV = {
+    "2airtc": {
+        "path": "rasyosef/2AIRTC-Amharic-Adhoc-Information-Retrieval-Test-Collection",
+        "split": "documents", "langs": ("am",), "did": "doc_no", "dtext": "doc_text",
+        "tno": "relevant_topic_nos", "ttitle": "relevant_topic_titles",
     },
 }
 _CORPUS_SPLITS = ("test", "train", "dev", "corpus")     # the corpus split varies by dataset
@@ -174,6 +190,55 @@ def _build_pool_flat(spec, key, n_queries, distractors, seed, cache_dir, max_cor
     return queries, {k: set(v) for k, v in rel.items()}, pool_id, pool_text
 
 
+def _build_pool_inv(spec, key, n_queries, distractors, seed, cache_dir):
+    """Inverted-relevance collection (each document lists the topics it is relevant to) -> reconstruct
+    topics=queries + qrels + corpus, then pool = relevant docs + distractor docs (same schema as the
+    other builders). The whole collection is the corpus, so distractors >= |collection| ranks every doc
+    (true ad-hoc IR over the full collection)."""
+    cache = Path(cache_dir) / f"qa_{key}_{n_queries}q_{distractors}d_{seed}.json"
+    if cache.exists():
+        d = json.loads(cache.read_text(encoding="utf-8"))
+        return d["queries"], {k: set(v) for k, v in d["rel"].items()}, d["pool_id"], d["pool_text"]
+
+    from datasets import load_dataset
+    did, dtext, tno_k, tt_k = spec["did"], spec["dtext"], spec["tno"], spec["ttitle"]
+    try:
+        ds = load_dataset(spec["path"], split=spec["split"])
+    except Exception as e:  # noqa: BLE001
+        print(f"  [qa] {spec['path']} unavailable: {type(e).__name__}")
+        return None
+
+    corpus, topics, qrels = {}, {}, {}
+    for r in ds:
+        dno = str(r[did])
+        corpus[dno] = str(r[dtext])
+        for tno, tt in zip(r.get(tno_k) or [], r.get(tt_k) or []):
+            t = str(int(tno))
+            topics.setdefault(t, str(tt))
+            qrels.setdefault(t, set()).add(dno)
+
+    rng = np.random.default_rng(seed)
+    tids = [t for t in topics if qrels.get(t)]
+    rng.shuffle(tids)
+    tids = tids[:n_queries]
+    if not tids:
+        return None
+    queries = {t: topics[t] for t in tids}
+    rel = {t: qrels[t] for t in tids}
+    needed = set().union(*rel.values())
+
+    pool_id = list(needed)
+    distract = [d for d in corpus if d not in needed]
+    rng.shuffle(distract)
+    pool_id += distract[:distractors]
+    pool_text = [corpus[d] for d in pool_id]
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"queries": queries, "rel": {k: sorted(v) for k, v in rel.items()},
+                                 "pool_id": pool_id, "pool_text": pool_text}, ensure_ascii=False),
+                     encoding="utf-8")
+    return queries, {k: set(v) for k, v in rel.items()}, pool_id, pool_text
+
+
 def _score_pool(encode_fn, built):
     """Encode queries + pool, return nDCG@10 / recall@100 over the (queries, rel, pool) tuple."""
     from common.eval import l2norm
@@ -194,10 +259,11 @@ def _score_pool(encode_fn, built):
             "n_queries": len(qids), "pool": len(pool_text)}
 
 
-def eval_qa_retrieval(encode_fn, benchmarks=("indicqa", "mrtydi", "amharicpr"), n_queries=250,
+def eval_qa_retrieval(encode_fn, benchmarks=("indicqa", "mrtydi", "amharicpr", "2airtc"), n_queries=250,
                       distractors=20000, seed=0, cache_dir="checkpoints"):
     """Per-benchmark, per-language nDCG@10 / recall@100 (+ benchmark means). The RAG-retrieval axis.
-    Handles both the mteb-layout benchmarks (`QA_BENCH`) and the flat query->passage ones (`QA_FLAT`)."""
+    Handles the mteb-layout benchmarks (`QA_BENCH`), flat query->passage ones (`QA_FLAT`), and
+    inverted-relevance collections (`QA_INV`, e.g. the formal Amharic 2AIRTC)."""
     out = {}
     for bench in benchmarks:
         per = {}
@@ -212,6 +278,12 @@ def eval_qa_retrieval(encode_fn, benchmarks=("indicqa", "mrtydi", "amharicpr"), 
             for our_lang in spec["langs"]:
                 built = _build_pool_flat(spec, f"{bench}_{our_lang}", n_queries, distractors, seed,
                                          cache_dir)
+                per[our_lang] = _score_pool(encode_fn, built) if built else None
+        elif bench in QA_INV:
+            spec = QA_INV[bench]
+            for our_lang in spec["langs"]:
+                built = _build_pool_inv(spec, f"{bench}_{our_lang}", n_queries, distractors, seed,
+                                        cache_dir)
                 per[our_lang] = _score_pool(encode_fn, built) if built else None
         else:
             print(f"  [qa] unknown benchmark {bench!r} -> skip")
