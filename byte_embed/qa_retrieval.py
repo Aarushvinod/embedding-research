@@ -20,11 +20,11 @@ Two dataset shapes are supported, both reduced to one scoring path (`_score_pool
     relevant to), so topics=queries + qrels + corpus are reconstructed from one split. This is the
     FORMAL Amharic benchmark; Amharic-PR corroborates it on a second (community) corpus.
 
-This gives every low-resource language a retrieval signal: Belebele (shallow, all 9, in eval_battery)
-plus deep retrieval for te/ta/mr (Indic) and am (Amharic, two corpora) here, en/zh/ar/te via MIRACL.
-Hausa and Kinyarwanda have no public monolingual deep-retrieval corpus yet (AfriQA ships no passages);
-they rest on Belebele until the cross-lingual AfriCLIRMatrix (English queries -> African docs, covers
-Hausa) is wired in from its GitHub topics/qrels.
+This gives every low-resource language a deep-retrieval signal on top of Belebele (shallow, all 9, in
+eval_battery): te/ta/mr via Indic QA; am via two monolingual Amharic corpora (formal 2AIRTC + community
+Amharic-PR); am/ha cross-lingually via AfriCLIRMatrix (English query -> African passage) — the only
+public deep-retrieval signal for Hausa; en/zh/ar/te also via MIRACL. Only Kinyarwanda still lacks a
+public deep corpus (AfriQA ships no passages), so it rests on Belebele.
 
   python -m byte_embed.qa_retrieval --selftest      # tiny pool build for indicqa + amharicpr
 """
@@ -58,6 +58,20 @@ QA_INV = {
         "path": "rasyosef/2AIRTC-Amharic-Adhoc-Information-Retrieval-Test-Collection",
         "split": "documents", "langs": ("am",), "did": "doc_no", "dtext": "doc_text",
         "tno": "relevant_topic_nos", "ttitle": "relevant_topic_titles",
+    },
+}
+# cross-lingual IR benchmarks (`QA_CLIR`, built by `_build_pool_clir`): English topics (TSV) + TREC
+# qrels fetched from GitHub, scored over an HF document corpus streamed as JSONL. AfriCLIRMatrix
+# (Ogundepo et al. 2022) is the FORMAL African IR collection and the only public deep-retrieval signal
+# for Hausa. Cross-lingual: English query -> African passage (a different axis from the monolingual sets).
+_AFRICLIR_GH = "https://raw.githubusercontent.com/castorini/africlirmatrix/main/test"
+QA_CLIR = {
+    "africlir": {
+        "topics_url": _AFRICLIR_GH + "/queries/topics.africlirmatrix-v1.0.en.{code}.tsv",
+        "qrels_url":  _AFRICLIR_GH + "/qrels/qrels.africlirmatrix-v1.0.en.{code}.txt",
+        "corpus_url": "https://huggingface.co/datasets/castorini/africlirmatrix/resolve/main/"
+                      "africlirmatrix-v1.0-{name}/corpus.jsonl",
+        "langs": {"am": ("amharic", "amh"), "ha": ("hausa", "hau")},   # our_lang -> (corpus_name, code)
     },
 }
 _CORPUS_SPLITS = ("test", "train", "dev", "corpus")     # the corpus split varies by dataset
@@ -239,6 +253,90 @@ def _build_pool_inv(spec, key, n_queries, distractors, seed, cache_dir):
     return queries, {k: set(v) for k, v in rel.items()}, pool_id, pool_text
 
 
+def _fetch_lines(url, timeout=60):
+    import urllib.request
+    return urllib.request.urlopen(url, timeout=timeout).read().decode("utf-8", "replace").splitlines()
+
+
+def _stream_jsonl(url, timeout=180):
+    """Stream a (possibly large) JSONL over HTTP line-by-line without loading it all into memory."""
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if line:
+                try:
+                    yield json.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue
+
+
+def _build_pool_clir(spec, our_lang, key, n_queries, distractors, seed, cache_dir, max_stream=400000):
+    """Cross-lingual IR: English topics (TSV) + TREC qrels from GitHub, scored over the HF document
+    corpus streamed as JSONL (relevant docs + distractors). Same return schema as the other builders;
+    returns None (graceful) if any source is unreachable or no relevant docs surface within max_stream."""
+    cache = Path(cache_dir) / f"qa_{key}_{n_queries}q_{distractors}d_{seed}.json"
+    if cache.exists():
+        d = json.loads(cache.read_text(encoding="utf-8"))
+        return d["queries"], {k: set(v) for k, v in d["rel"].items()}, d["pool_id"], d["pool_text"]
+
+    name, code = spec["langs"][our_lang]
+    try:
+        topics = _fetch_lines(spec["topics_url"].format(code=code))
+        qrels = _fetch_lines(spec["qrels_url"].format(code=code))
+    except Exception as e:  # noqa: BLE001
+        print(f"  [qa] africlir/{our_lang} topics/qrels fetch failed: {type(e).__name__}")
+        return None
+
+    qid2text = {}
+    for ln in topics:
+        if "\t" in ln:
+            qid, txt = ln.split("\t", 1)
+            qid2text[qid.strip()] = txt.strip()
+    rel = {}
+    for ln in qrels:                                          # TREC: qid Q0 docid rel (space-separated)
+        p = ln.split()
+        if len(p) >= 4 and p[3].lstrip("-").isdigit() and int(p[3]) > 0:
+            rel.setdefault(p[0], set()).add(p[2])
+
+    rng = np.random.default_rng(seed)
+    qids = [q for q in qid2text if q in rel]
+    rng.shuffle(qids)
+    qids = qids[:n_queries]
+    if not qids:
+        return None
+    needed = set().union(*(rel[q] for q in qids))
+
+    id2text, distract, seen = {}, [], 0
+    try:
+        for d in _stream_jsonl(spec["corpus_url"].format(name=name)):
+            seen += 1
+            did = str(d.get("id"))
+            txt = str(d.get("contents") or "")
+            if did in needed and did not in id2text:
+                id2text[did] = txt
+            elif len(distract) < distractors:
+                distract.append((did, txt))
+            if (len(id2text) == len(needed) and len(distract) >= distractors) or seen >= max_stream:
+                break
+    except Exception as e:  # noqa: BLE001
+        print(f"  [qa] africlir/{our_lang} corpus stream failed: {type(e).__name__}")
+        return None
+
+    found = set(id2text)
+    queries = {q: qid2text[q] for q in qids if rel[q] & found}
+    rel = {q: sorted(rel[q] & found) for q in queries}
+    if not queries:
+        print(f"  [qa] africlir/{our_lang}: no relevant docs within {max_stream} streamed -> skip")
+        return None
+    pool_id = list(id2text) + [i for i, _ in distract]
+    pool_text = list(id2text.values()) + [t for _, t in distract]
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"queries": queries, "rel": rel, "pool_id": pool_id,
+                                 "pool_text": pool_text}, ensure_ascii=False), encoding="utf-8")
+    return queries, {k: set(v) for k, v in rel.items()}, pool_id, pool_text
+
+
 def _score_pool(encode_fn, built):
     """Encode queries + pool, return nDCG@10 / recall@100 over the (queries, rel, pool) tuple."""
     from common.eval import l2norm
@@ -259,11 +357,13 @@ def _score_pool(encode_fn, built):
             "n_queries": len(qids), "pool": len(pool_text)}
 
 
-def eval_qa_retrieval(encode_fn, benchmarks=("indicqa", "mrtydi", "amharicpr", "2airtc"), n_queries=250,
-                      distractors=20000, seed=0, cache_dir="checkpoints"):
+def eval_qa_retrieval(encode_fn,
+                      benchmarks=("indicqa", "mrtydi", "amharicpr", "2airtc", "africlir"),
+                      n_queries=250, distractors=20000, seed=0, cache_dir="checkpoints"):
     """Per-benchmark, per-language nDCG@10 / recall@100 (+ benchmark means). The RAG-retrieval axis.
-    Handles the mteb-layout benchmarks (`QA_BENCH`), flat query->passage ones (`QA_FLAT`), and
-    inverted-relevance collections (`QA_INV`, e.g. the formal Amharic 2AIRTC)."""
+    Handles mteb-layout benchmarks (`QA_BENCH`), flat query->passage ones (`QA_FLAT`), inverted-relevance
+    collections (`QA_INV`, e.g. the formal Amharic 2AIRTC), and cross-lingual IR (`QA_CLIR`, AfriCLIRMatrix
+    — English query -> African passage, the only public deep-retrieval signal for Hausa)."""
     out = {}
     for bench in benchmarks:
         per = {}
@@ -284,6 +384,12 @@ def eval_qa_retrieval(encode_fn, benchmarks=("indicqa", "mrtydi", "amharicpr", "
             for our_lang in spec["langs"]:
                 built = _build_pool_inv(spec, f"{bench}_{our_lang}", n_queries, distractors, seed,
                                         cache_dir)
+                per[our_lang] = _score_pool(encode_fn, built) if built else None
+        elif bench in QA_CLIR:
+            spec = QA_CLIR[bench]
+            for our_lang in spec["langs"]:
+                built = _build_pool_clir(spec, our_lang, f"{bench}_{our_lang}", n_queries, distractors,
+                                         seed, cache_dir)
                 per[our_lang] = _score_pool(encode_fn, built) if built else None
         else:
             print(f"  [qa] unknown benchmark {bench!r} -> skip")
