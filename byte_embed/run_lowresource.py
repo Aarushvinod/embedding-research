@@ -63,6 +63,7 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
     from byte_embed.eval_mteb import eval_battery
     from byte_embed.miracl import eval_miracl_langs
     from byte_embed.model import ByteStudent
+    from byte_embed.qa_retrieval import eval_qa_retrieval
     from byte_embed.teachers import (load_cached_targets, load_teacher, precompute_targets,
                                      targets_exist)
 
@@ -122,6 +123,9 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
             bm = eval_battery(enc, langs)
             bm["miracl"] = eval_miracl_langs(enc, miracl_langs, n_queries=miracl_q,
                                              distractors=miracl_extra, cache_dir=ckpt_dir)
+            bm["qa_retrieval"] = eval_qa_retrieval(enc, n_queries=(20 if smoke else miracl_q),
+                                                   distractors=(500 if smoke else miracl_extra),
+                                                   cache_dir=ckpt_dir)
             bm["profile"] = profile_model(student, student.tok, sentences[:256], device=device)
             bm.update(params=params, vocab_params=vocab_params,
                       transformer_params=params - vocab_params,
@@ -161,6 +165,8 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
             bm = eval_battery(benc, langs)
             bm["miracl"] = eval_miracl_langs(benc, miracl_langs, n_queries=miracl_q,
                                              distractors=miracl_extra, cache_dir=ckpt_dir)
+            bm["qa_retrieval"] = eval_qa_retrieval(benc, n_queries=miracl_q,
+                                                   distractors=miracl_extra, cache_dir=ckpt_dir)
             bm.update(params=sum(p.numel() for p in mdl.parameters()), kind="baseline", backbone=mid)
             results["models"][bname] = bm
             _save(results, out)
@@ -198,6 +204,14 @@ def _summary(results):
             x, y = bm.get(k), sm.get(k)
             return f"{x - y:+.3f}" if (x is not None and y is not None) else "-"
         print(f"  {size:6} Belebele {d('belebele_ndcg@10')}  FLORES {d('flores_p@1')}  STS {d('sts_spearman')}")
+    if any(r.get("qa_retrieval") for r in M.values()):
+        print("\nRAG-RETRIEVAL — QA open-retrieval nDCG@10 (IndicQA mr/ta/te · Mr.TyDi te):")
+        for name, r in M.items():
+            qa = r.get("qa_retrieval")
+            if qa:
+                iq = (qa.get("indicqa") or {}).get("ndcg@10_mean")
+                mt = (qa.get("mrtydi") or {}).get("ndcg@10_mean")
+                print(f"  {name:20} IndicQA {_f(iq, 7)}  Mr.TyDi {_f(mt, 7)}")
     eff = results.get("efficiency")
     if eff:
         print("\nTOKENIZATION (subword tax vs byte UTF-8 tax, vs English, on FLORES-1012):")

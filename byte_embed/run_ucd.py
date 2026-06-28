@@ -84,6 +84,7 @@ def run(out="results/ucd_lowresource.json", smoke=False, device="cuda", n_per_la
     from byte_embed.efficiency import fertility_table, profile_model
     from byte_embed.eval_mteb import eval_battery
     from byte_embed.miracl import eval_miracl_langs
+    from byte_embed.qa_retrieval import eval_qa_retrieval
     from byte_embed.teachers import (load_cached_targets, load_teacher, precompute_targets,
                                      targets_exist)
 
@@ -144,6 +145,9 @@ def run(out="results/ucd_lowresource.json", smoke=False, device="cuda", n_per_la
             bm = eval_battery(enc, langs)
             bm["miracl"] = eval_miracl_langs(enc, miracl_langs, n_queries=miracl_q,
                                              distractors=miracl_extra, cache_dir=ckpt_dir)
+            bm["qa_retrieval"] = eval_qa_retrieval(enc, n_queries=(20 if smoke else miracl_q),
+                                                   distractors=(500 if smoke else miracl_extra),
+                                                   cache_dir=ckpt_dir)
             bm["profile"] = profile_model(student, getattr(student, "tok", None),
                                           sentences[:256], device=device)
             bm.update(params=params, input_params=in_params, transformer_params=xfmr_params,
@@ -183,6 +187,8 @@ def run(out="results/ucd_lowresource.json", smoke=False, device="cuda", n_per_la
             bm = eval_battery(benc, langs)
             bm["miracl"] = eval_miracl_langs(benc, miracl_langs, n_queries=miracl_q,
                                              distractors=miracl_extra, cache_dir=ckpt_dir)
+            bm["qa_retrieval"] = eval_qa_retrieval(benc, n_queries=miracl_q,
+                                                   distractors=miracl_extra, cache_dir=ckpt_dir)
             bm.update(params=sum(p.numel() for p in mdl.parameters()), kind="baseline", backbone=mid)
             results["models"][bname] = bm
             _save(results, out)

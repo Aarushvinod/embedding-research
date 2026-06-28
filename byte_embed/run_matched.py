@@ -36,6 +36,7 @@ def run(out="results/matched.json", sizes=("small", "base"), steps=50000, batch=
     from byte_embed.eval_mteb import eval_battery
     from byte_embed.matched import MatchedStudent
     from byte_embed.miracl import eval_miracl_langs
+    from byte_embed.qa_retrieval import eval_qa_retrieval
     from byte_embed.teachers import (load_cached_targets, load_teacher, precompute_targets,
                                      targets_exist)
 
@@ -86,6 +87,9 @@ def run(out="results/matched.json", sizes=("small", "base"), steps=50000, batch=
             bm = eval_battery(enc, langs)
             bm["miracl"] = eval_miracl_langs(enc, miracl_langs, n_queries=250, distractors=20000,
                                              cache_dir=ckpt_dir)
+            bm["qa_retrieval"] = eval_qa_retrieval(enc, n_queries=(20 if smoke else 250),
+                                                   distractors=(500 if smoke else 20000),
+                                                   cache_dir=ckpt_dir)
             bm.update(variant=variant, size=size, params=total, input_params=emb,
                       transformer_params=xfmr, steps=steps,
                       peak_vram_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2))
