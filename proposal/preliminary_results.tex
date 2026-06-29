@@ -1,8 +1,13 @@
 % =====================================================================
 % Preliminary Results section.
-% REQUIRES in the preamble:  \usepackage{pgfplots}\pgfplotsset{compat=1.18}
-% (booktabs and xcolor are already loaded by main.tex.)
-% Self-contained otherwise — the color/style definitions below live in the body.
+%
+% REQUIRED: add these TWO lines to your preamble (before \begin{document}):
+%     \usepackage{pgfplots}
+%     \pgfplotsset{compat=1.18}
+% booktabs and xcolor are already loaded by main.tex. The \definecolor lines
+% just below MUST stay with this section (the figures reference them). This
+% file uses NO custom macros or styles, so it compiles as long as pgfplots is
+% loaded.
 % =====================================================================
 
 \definecolor{byteS}{HTML}{85B7EB}
@@ -11,24 +16,6 @@
 \definecolor{subwS}{HTML}{FAC775}
 \definecolor{subwB}{HTML}{EF9F27}
 \definecolor{subwL}{HTML}{BA7517}
-
-\pgfplotsset{
-  retrbar/.style={
-    ybar, bar width=4pt,
-    width=\linewidth, height=5.4cm,
-    enlarge x limits=0.12,
-    ymin=0,
-    ylabel={nDCG@10}, ylabel near ticks,
-    ymajorgrids, major grid style={draw=black!8},
-    axis lines*=left,
-    xtick=data, tick label style={font=\small},
-    legend style={at={(0.5,1.02)}, anchor=south, legend columns=6,
-                  font=\footnotesize, draw=none,
-                  /tikz/every even column/.append style={column sep=4pt}},
-    legend cell align=left,
-  },
-}
-\newcommand{\bytesubwlegend}{\legend{byte-S,byte-B,byte-L,subw-S,subw-B,subw-L}}
 
 \section{Preliminary Results}
 \label{sec:prelim}
@@ -39,9 +26,9 @@ large) distilled from a frozen SONAR teacher under an identical recipe on the ni
 then evaluated as retrievers and scored by nDCG@10. We report five retrieval benchmarks spanning
 shallow passage retrieval (Belebele), deep monolingual retrieval (MIRACL), small-pool QA (IndicQA),
 and native Amharic retrieval (Amharic-PR, 2AIRTC). Two further benchmarks are deferred and reported
-separately in later work: Mr.\,TyDi, whose corpus-streaming cap currently scores only a biased subset
-of queries, and the cross-lingual AfriCLIRMatrix, which measures a different (query-in-English) task
-axis from the monolingual retrieval studied here. Across the five benchmarks, byte embeddings win
+separately in later work: Mr.\,TyDi \citep{zhang2021mrtydi}, whose corpus-streaming cap currently
+scores only a biased subset of queries, and the cross-lingual AfriCLIRMatrix, which measures a
+different (query-in-English) task axis from the monolingual retrieval studied here. Across the five benchmarks, byte embeddings win
 four --- losing only on the small-pool IndicQA --- and the smallest byte model surpasses the largest
 subword model on every deep-retrieval benchmark (Table~\ref{tab:prelim}). These are single-seed
 results at 50k steps, intended to motivate rather than conclude the full study; absolute scores are
@@ -73,7 +60,14 @@ Amharic-PR the distilled byte student exceeds the strong mE5 baseline.}
 \begin{figure}[t]
 \centering
 \begin{tikzpicture}
-\begin{axis}[retrbar, bar width=4pt, ymax=0.8,
+\begin{axis}[
+  ybar, bar width=4pt, width=\linewidth, height=5.4cm,
+  enlarge x limits=0.12, ymin=0, ymax=0.8,
+  ylabel={nDCG@10}, ylabel near ticks,
+  ymajorgrids, major grid style={draw=black!8},
+  axis lines*=left, xtick=data, tick label style={font=\small},
+  legend style={at={(0.5,1.02)}, anchor=south, legend columns=6, font=\footnotesize, draw=none},
+  legend cell align=left,
   symbolic x coords={te,ta,mr,am,ha,rw,en,zh,ar}]
 \addplot[fill=byteS,draw=byteS] coordinates {(te,0.522)(ta,0.533)(mr,0.539)(am,0.506)(ha,0.509)(rw,0.539)(en,0.647)(zh,0.556)(ar,0.593)};
 \addplot[fill=byteB,draw=byteB] coordinates {(te,0.532)(ta,0.570)(mr,0.567)(am,0.541)(ha,0.555)(rw,0.587)(en,0.692)(zh,0.584)(ar,0.639)};
@@ -81,7 +75,7 @@ Amharic-PR the distilled byte student exceeds the strong mE5 baseline.}
 \addplot[fill=subwS,draw=subwS] coordinates {(te,0.390)(ta,0.451)(mr,0.414)(am,0.392)(ha,0.317)(rw,0.354)(en,0.485)(zh,0.447)(ar,0.386)};
 \addplot[fill=subwB,draw=subwB] coordinates {(te,0.510)(ta,0.584)(mr,0.572)(am,0.529)(ha,0.430)(rw,0.453)(en,0.628)(zh,0.566)(ar,0.543)};
 \addplot[fill=subwL,draw=subwL] coordinates {(te,0.566)(ta,0.616)(mr,0.634)(am,0.567)(ha,0.492)(rw,0.508)(en,0.671)(zh,0.598)(ar,0.597)};
-\bytesubwlegend
+\legend{byte-S,byte-B,byte-L,subw-S,subw-B,subw-L}
 \end{axis}
 \end{tikzpicture}
 \caption{\textbf{Belebele --- shallow passage retrieval (pool 488).} Byte embeddings outperform
@@ -93,7 +87,14 @@ subword at every size, with the gap largest for the smallest models and for the 
 \begin{figure}[t]
 \centering
 \begin{tikzpicture}
-\begin{axis}[retrbar, bar width=6pt, ymax=0.35,
+\begin{axis}[
+  ybar, bar width=6pt, width=\linewidth, height=5.4cm,
+  enlarge x limits=0.18, ymin=0, ymax=0.35,
+  ylabel={nDCG@10}, ylabel near ticks,
+  ymajorgrids, major grid style={draw=black!8},
+  axis lines*=left, xtick=data, tick label style={font=\small},
+  legend style={at={(0.5,1.02)}, anchor=south, legend columns=6, font=\footnotesize, draw=none},
+  legend cell align=left,
   symbolic x coords={en,zh,ar,te}]
 \addplot[fill=byteS,draw=byteS] coordinates {(en,0.225)(zh,0.051)(ar,0.232)(te,0.158)};
 \addplot[fill=byteB,draw=byteB] coordinates {(en,0.250)(zh,0.051)(ar,0.249)(te,0.145)};
@@ -101,7 +102,7 @@ subword at every size, with the gap largest for the smallest models and for the 
 \addplot[fill=subwS,draw=subwS] coordinates {(en,0.097)(zh,0.049)(ar,0.041)(te,0.040)};
 \addplot[fill=subwB,draw=subwB] coordinates {(en,0.101)(zh,0.063)(ar,0.053)(te,0.037)};
 \addplot[fill=subwL,draw=subwL] coordinates {(en,0.081)(zh,0.066)(ar,0.048)(te,0.034)};
-\bytesubwlegend
+\legend{byte-S,byte-B,byte-L,subw-S,subw-B,subw-L}
 \end{axis}
 \end{tikzpicture}
 \caption{\textbf{MIRACL --- deep monolingual retrieval (pool $\sim$20k).} Byte beats subword by
@@ -113,7 +114,14 @@ model (565M); Chinese is the single hard cell for both families.}
 \begin{figure}[t]
 \centering
 \begin{tikzpicture}
-\begin{axis}[retrbar, bar width=7pt, ymax=0.65,
+\begin{axis}[
+  ybar, bar width=7pt, width=\linewidth, height=5.4cm,
+  enlarge x limits=0.25, ymin=0, ymax=0.65,
+  ylabel={nDCG@10}, ylabel near ticks,
+  ymajorgrids, major grid style={draw=black!8},
+  axis lines*=left, xtick=data, tick label style={font=\small},
+  legend style={at={(0.5,1.02)}, anchor=south, legend columns=6, font=\footnotesize, draw=none},
+  legend cell align=left,
   symbolic x coords={mr,ta,te}]
 \addplot[fill=byteS,draw=byteS] coordinates {(mr,0.385)(ta,0.312)(te,0.357)};
 \addplot[fill=byteB,draw=byteB] coordinates {(mr,0.407)(ta,0.313)(te,0.354)};
@@ -121,7 +129,7 @@ model (565M); Chinese is the single hard cell for both families.}
 \addplot[fill=subwS,draw=subwS] coordinates {(mr,0.469)(ta,0.395)(te,0.435)};
 \addplot[fill=subwB,draw=subwB] coordinates {(mr,0.566)(ta,0.446)(te,0.495)};
 \addplot[fill=subwL,draw=subwL] coordinates {(mr,0.574)(ta,0.460)(te,0.513)};
-\bytesubwlegend
+\legend{byte-S,byte-B,byte-L,subw-S,subw-B,subw-L}
 \end{axis}
 \end{tikzpicture}
 \caption{\textbf{IndicQA --- small-pool QA retrieval (pool $\sim$250).} The one benchmark where
@@ -133,7 +141,14 @@ the larger subword vocabulary is sufficient and byte's advantage does not surfac
 \begin{figure}[t]
 \centering
 \begin{tikzpicture}
-\begin{axis}[retrbar, bar width=9pt, ymax=0.55,
+\begin{axis}[
+  ybar, bar width=9pt, width=\linewidth, height=5.4cm,
+  enlarge x limits=0.4, ymin=0, ymax=0.55,
+  ylabel={nDCG@10}, ylabel near ticks,
+  ymajorgrids, major grid style={draw=black!8},
+  axis lines*=left, xtick=data, tick label style={font=\small},
+  legend style={at={(0.5,1.02)}, anchor=south, legend columns=6, font=\footnotesize, draw=none},
+  legend cell align=left,
   symbolic x coords={AmharicPR,2AIRTC}, xticklabels={Amharic-PR,2AIRTC}]
 \addplot[fill=byteS,draw=byteS] coordinates {(AmharicPR,0.441)(2AIRTC,0.409)};
 \addplot[fill=byteB,draw=byteB] coordinates {(AmharicPR,0.470)(2AIRTC,0.422)};
@@ -141,7 +156,7 @@ the larger subword vocabulary is sufficient and byte's advantage does not surfac
 \addplot[fill=subwS,draw=subwS] coordinates {(AmharicPR,0.252)(2AIRTC,0.176)};
 \addplot[fill=subwB,draw=subwB] coordinates {(AmharicPR,0.363)(2AIRTC,0.213)};
 \addplot[fill=subwL,draw=subwL] coordinates {(AmharicPR,0.409)(2AIRTC,0.227)};
-\bytesubwlegend
+\legend{byte-S,byte-B,byte-L,subw-S,subw-B,subw-L}
 \end{axis}
 \end{tikzpicture}
 \caption{\textbf{Native Amharic retrieval.} On Amharic-PR (passage retrieval, pool 20k) byte leads

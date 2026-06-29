@@ -40,7 +40,7 @@ low-resource languages into far more tokens than they do for high-resource langu
 tokenizer-free, byte-level embeddings yield better retrieval. To test this, we distill SONAR
 embeddings into byte-level (ByT5) and subword (mT5) students across three model sizes, with fixed
 training objectives and parameters. We evaluate both embeddings on passage retrieval (Belebele) and
-deep retrieval tasks (MIRACL, IndicQA, 2AIRTC, and AfriCLIRMatrix), for six low-resource languages
+deep retrieval tasks (MIRACL, IndicQA, Amharic-PR, and 2AIRTC), for six low-resource languages
 (Telugu, Tamil, Marathi, Amharic, Kinyarwanda, Hausa). Preliminary results show that byte embeddings
 perform better on passage retrieval, although the advantage diminishes as parameter count increases.
 For deep retrieval, byte embeddings perform significantly better, with the smallest byte-level model
@@ -234,10 +234,9 @@ against a large distractor set; we report nDCG@10 and recall@100. We complement 
 semantic textual similarity (STS), classification, and bitext mining for a rounded picture, and with
 an intrinsic tokenization metric (Section~\ref{sec:intrinsic}). Table~\ref{tab:eval} lists the
 benchmarks and their language coverage. Belebele provides uniform shallow passage retrieval for all
-nine languages; deep retrieval is covered by MIRACL (monolingual), IndicQA and Mr.\,TyDi (QA), the
-peer-reviewed Amharic ad-hoc collection 2AIRTC \citep{yeshambel2020twoairtc}, and the cross-lingual
-AfriCLIRMatrix \citep{ogundepo2022africlirmatrix}, which supplies the only public deep-retrieval signal
-for Hausa.
+nine languages; deep retrieval is covered by MIRACL (monolingual), IndicQA (QA), and two native
+Amharic collections --- the community Amharic-PR passage set and the peer-reviewed ad-hoc IR
+collection 2AIRTC \citep{yeshambel2020twoairtc}.
 
 \begin{table}[t]
 \centering
@@ -250,9 +249,8 @@ Task & Benchmark & Metric & Languages\\
 Retrieval --- shallow        & Belebele \citep{bandarkar2023belebele}      & nDCG@10           & all 9\\
 Retrieval --- deep, mono     & MIRACL \citep{zhang2023miracl}              & nDCG@10, R@100    & en, zh, ar, te\\
 Retrieval --- deep, QA       & IndicQA \citep{doddapaneni2023indicxtreme}  & nDCG@10, R@100    & mr, ta, te\\
-                             & Mr.\,TyDi \citep{zhang2021mrtydi}           & nDCG@10, R@100    & te\\
-                             & 2AIRTC \citep{yeshambel2020twoairtc}        & nDCG@10, R@100    & am\\
-Retrieval --- deep, x-ling   & AfriCLIRMatrix \citep{ogundepo2022africlirmatrix} & nDCG@10, R@100 & am, ha\\
+Retrieval --- deep, Amharic  & 2AIRTC \citep{yeshambel2020twoairtc}        & nDCG@10, R@100    & am\\
+                             & Amharic-PR (community)                       & nDCG@10, R@100    & am\\
 Semantic similarity          & SemRel-2024 \citep{ousidhoum2024semrel} (+ Indic/C-MTEB) & Spearman & all 9\\
 Classification               & SIB-200                                      & accuracy          & all 9\\
 Bitext mining                & FLORES-200                                   & P@1 ($\to$ en)    & all 9\\
@@ -260,8 +258,9 @@ Intrinsic (no model)         & Tokenization parity / fertility              & ra
 \bottomrule
 \end{tabular}
 \caption{Evaluation matrix. Retrieval is the primary axis; every language has at least shallow
-retrieval (Belebele), and five of six low-resource languages have a deep-retrieval benchmark.
-Kinyarwanda currently has only shallow coverage (Section~\ref{sec:scope}).}
+retrieval (Belebele), and four of six low-resource languages (Telugu, Tamil, Marathi, Amharic) have a
+deep-retrieval benchmark. Hausa and Kinyarwanda currently have only shallow coverage
+(Section~\ref{sec:scope}).}
 \label{tab:eval}
 \end{table}
 
@@ -280,11 +279,12 @@ metrics do not cleanly predict downstream quality \citep{lee2026equity, ali2023t
 We report bootstrap 95\% confidence intervals on all benchmark means and, budget permitting, at least
 two random seeds for the small and base models; comparisons are made at matched optimizer steps. All
 teacher targets, retrieval pools, and checkpoints are cached so runs are resumable and results are
-reproducible. Two scope limitations are stated up front. First, AfriCLIRMatrix is cross-lingual
-(English query to African passage), a different axis from the monolingual sets, and is labeled as such.
-Second, \emph{Kinyarwanda has no public deep-retrieval corpus} --- AfriQA \citep{ogundepo2023afriqa}, the obvious candidate, ships
-no passage collection --- so it is evaluated on shallow retrieval (Belebele) only; extending deep
-coverage to Kinyarwanda is an explicit goal of ongoing data work.
+reproducible. One scope limitation is stated up front: \emph{Hausa and Kinyarwanda have no public
+monolingual deep-retrieval corpus} --- AfriQA \citep{ogundepo2023afriqa}, the obvious candidate, ships
+no passage collection --- so they are evaluated on shallow retrieval (Belebele) only. Extending deep
+coverage to them is an explicit goal of ongoing data work; the cross-lingual AfriCLIRMatrix
+\citep{ogundepo2022africlirmatrix} (English query to African passage), deferred from this study as a
+different task axis, is one candidate for Hausa.
 
 % =====================================================================
 \input{preliminary_results}
