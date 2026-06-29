@@ -29,7 +29,7 @@ than a retriever, which the proposed retrieval-focused training is designed to l
 the three blue bars are byte (small/base/large) and the three amber bars are subword
 (small/base/large).
 
-\begin{table}[t]
+\begin{table}[htbp]
 \centering
 \small
 \begin{tabular}{l rr rr}
@@ -51,7 +51,7 @@ Amharic-PR the distilled byte student exceeds the strong mE5 baseline.}
 \label{tab:prelim}
 \end{table}
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=\linewidth]{figures/fig_belebele}
 \caption{\textbf{Belebele --- shallow passage retrieval (pool 488).} Byte embeddings outperform
@@ -60,7 +60,7 @@ subword at every size, with the gap largest for the smallest models and for the 
 \label{fig:belebele}
 \end{figure}
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.72\linewidth]{figures/fig_miracl}
 \caption{\textbf{MIRACL --- deep monolingual retrieval (pool $\sim$20k).} Byte beats subword by
@@ -69,7 +69,7 @@ model (565M); Chinese is the single hard cell for both families.}
 \label{fig:miracl}
 \end{figure}
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.64\linewidth]{figures/fig_indicqa}
 \caption{\textbf{IndicQA --- small-pool QA retrieval (pool $\sim$250).} The one benchmark where
@@ -78,7 +78,7 @@ the larger subword vocabulary is sufficient and byte's advantage does not surfac
 \label{fig:indicqa}
 \end{figure}
 
-\begin{figure}[t]
+\begin{figure}[htbp]
 \centering
 \includegraphics[width=0.56\linewidth]{figures/fig_amharic}
 \caption{\textbf{Native Amharic retrieval.} On Amharic-PR (passage retrieval, pool 20k) byte leads
@@ -96,3 +96,6 @@ the largest subword model. The full study (Section~\ref{sec:method}) will add a 
 training objective to raise absolute quality, multiple seeds with confidence intervals, and the
 parameter-matched control to confirm the advantage is representational rather than a parameter-count
 artifact.
+
+% Flush all of this section's floats here so none drift into the bibliography that follows.
+\FloatBarrier
