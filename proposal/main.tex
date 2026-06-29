@@ -13,6 +13,8 @@
 \usepackage{booktabs}
 \usepackage{array}
 \usepackage{enumitem}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
 
 % --- Citations & links (natbib + bibtex; compiles on vanilla Overleaf with pdfLaTeX) ---
 \usepackage[dvipsnames]{xcolor}
@@ -283,6 +285,9 @@ reproducible. Two scope limitations are stated up front. First, AfriCLIRMatrix i
 Second, \emph{Kinyarwanda has no public deep-retrieval corpus} --- AfriQA \citep{ogundepo2023afriqa}, the obvious candidate, ships
 no passage collection --- so it is evaluated on shallow retrieval (Belebele) only; extending deep
 coverage to Kinyarwanda is an explicit goal of ongoing data work.
+
+% =====================================================================
+\input{preliminary_results}
 
 % =====================================================================
 \bibliography{references}

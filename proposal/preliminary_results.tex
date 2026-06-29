@@ -1,0 +1,161 @@
+% =====================================================================
+% Preliminary Results section.
+% REQUIRES in the preamble:  \usepackage{pgfplots}\pgfplotsset{compat=1.18}
+% (booktabs and xcolor are already loaded by main.tex.)
+% Self-contained otherwise — the color/style definitions below live in the body.
+% =====================================================================
+
+\definecolor{byteS}{HTML}{85B7EB}
+\definecolor{byteB}{HTML}{378ADD}
+\definecolor{byteL}{HTML}{185FA5}
+\definecolor{subwS}{HTML}{FAC775}
+\definecolor{subwB}{HTML}{EF9F27}
+\definecolor{subwL}{HTML}{BA7517}
+
+\pgfplotsset{
+  retrbar/.style={
+    ybar, bar width=4pt,
+    width=\linewidth, height=5.4cm,
+    enlarge x limits=0.12,
+    ymin=0,
+    ylabel={nDCG@10}, ylabel near ticks,
+    ymajorgrids, major grid style={draw=black!8},
+    axis lines*=left,
+    xtick=data, tick label style={font=\small},
+    legend style={at={(0.5,1.02)}, anchor=south, legend columns=6,
+                  font=\footnotesize, draw=none,
+                  /tikz/every even column/.append style={column sep=4pt}},
+    legend cell align=left,
+  },
+}
+\newcommand{\bytesubwlegend}{\legend{byte-S,byte-B,byte-L,subw-S,subw-B,subw-L}}
+
+\section{Preliminary Results}
+\label{sec:prelim}
+
+As a feasibility check for the proposed study (Section~\ref{sec:method}), we ran a preliminary
+version of the experiment: byte-level (ByT5) and subword (mT5) students at three sizes (small, base,
+large) distilled from a frozen SONAR teacher under an identical recipe on the nine study languages,
+then evaluated as retrievers and scored by nDCG@10. We report five retrieval benchmarks spanning
+shallow passage retrieval (Belebele), deep monolingual retrieval (MIRACL), small-pool QA (IndicQA),
+and native Amharic retrieval (Amharic-PR, 2AIRTC). Two further benchmarks are deferred and reported
+separately in later work: Mr.\,TyDi, whose corpus-streaming cap currently scores only a biased subset
+of queries, and the cross-lingual AfriCLIRMatrix, which measures a different (query-in-English) task
+axis from the monolingual retrieval studied here. Across the five benchmarks, byte embeddings win
+four --- losing only on the small-pool IndicQA --- and the smallest byte model surpasses the largest
+subword model on every deep-retrieval benchmark (Table~\ref{tab:prelim}). These are single-seed
+results at 50k steps, intended to motivate rather than conclude the full study; absolute scores are
+bounded by the SONAR teacher, a bitext encoder rather than a retriever, which the proposed
+retrieval-focused training is designed to lift.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{l rr rr}
+\toprule
+& \multicolumn{2}{c}{\textbf{Students (base)}} & \multicolumn{2}{c}{\textbf{Baselines}}\\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+Benchmark (pool) & byte & subword & mE5 & LaBSE\\
+\midrule
+Belebele (488)        & \textbf{0.585} & 0.535 & 0.806 & 0.684\\
+MIRACL ($\sim$20k)    & \textbf{0.174} & 0.064 & 0.946 & 0.522\\
+IndicQA ($\sim$250)   & 0.358 & \textbf{0.503} & 0.675 & 0.490\\
+Amharic-PR (20k)      & \textbf{0.470} & 0.363 & 0.333 & 0.524\\
+2AIRTC (12.5k)        & \textbf{0.422} & 0.213 & 0.508 & 0.569\\
+\bottomrule
+\end{tabular}
+\caption{Language-averaged nDCG@10 at the base size. Byte beats subword on four of five benchmarks
+(bold = byte-vs-subword winner); mE5 and LaBSE are retrieval-trained reference baselines. On
+Amharic-PR the distilled byte student exceeds the strong mE5 baseline.}
+\label{tab:prelim}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[retrbar, bar width=4pt, ymax=0.8,
+  symbolic x coords={te,ta,mr,am,ha,rw,en,zh,ar}]
+\addplot[fill=byteS,draw=byteS] coordinates {(te,0.522)(ta,0.533)(mr,0.539)(am,0.506)(ha,0.509)(rw,0.539)(en,0.647)(zh,0.556)(ar,0.593)};
+\addplot[fill=byteB,draw=byteB] coordinates {(te,0.532)(ta,0.570)(mr,0.567)(am,0.541)(ha,0.555)(rw,0.587)(en,0.692)(zh,0.584)(ar,0.639)};
+\addplot[fill=byteL,draw=byteL] coordinates {(te,0.543)(ta,0.558)(mr,0.579)(am,0.546)(ha,0.577)(rw,0.610)(en,0.724)(zh,0.619)(ar,0.653)};
+\addplot[fill=subwS,draw=subwS] coordinates {(te,0.390)(ta,0.451)(mr,0.414)(am,0.392)(ha,0.317)(rw,0.354)(en,0.485)(zh,0.447)(ar,0.386)};
+\addplot[fill=subwB,draw=subwB] coordinates {(te,0.510)(ta,0.584)(mr,0.572)(am,0.529)(ha,0.430)(rw,0.453)(en,0.628)(zh,0.566)(ar,0.543)};
+\addplot[fill=subwL,draw=subwL] coordinates {(te,0.566)(ta,0.616)(mr,0.634)(am,0.567)(ha,0.492)(rw,0.508)(en,0.671)(zh,0.598)(ar,0.597)};
+\bytesubwlegend
+\end{axis}
+\end{tikzpicture}
+\caption{\textbf{Belebele --- shallow passage retrieval (pool 488).} Byte embeddings outperform
+subword at every size, with the gap largest for the smallest models and for the African languages
+(Hausa, Kinyarwanda); the two families converge only at the large scale.}
+\label{fig:belebele}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[retrbar, bar width=6pt, ymax=0.35,
+  symbolic x coords={en,zh,ar,te}]
+\addplot[fill=byteS,draw=byteS] coordinates {(en,0.225)(zh,0.051)(ar,0.232)(te,0.158)};
+\addplot[fill=byteB,draw=byteB] coordinates {(en,0.250)(zh,0.051)(ar,0.249)(te,0.145)};
+\addplot[fill=byteL,draw=byteL] coordinates {(en,0.230)(zh,0.057)(ar,0.312)(te,0.167)};
+\addplot[fill=subwS,draw=subwS] coordinates {(en,0.097)(zh,0.049)(ar,0.041)(te,0.040)};
+\addplot[fill=subwB,draw=subwB] coordinates {(en,0.101)(zh,0.063)(ar,0.053)(te,0.037)};
+\addplot[fill=subwL,draw=subwL] coordinates {(en,0.081)(zh,0.066)(ar,0.048)(te,0.034)};
+\bytesubwlegend
+\end{axis}
+\end{tikzpicture}
+\caption{\textbf{MIRACL --- deep monolingual retrieval (pool $\sim$20k).} Byte beats subword by
+roughly 3--5$\times$ at every size, and the smallest byte model (219M) surpasses the largest subword
+model (565M); Chinese is the single hard cell for both families.}
+\label{fig:miracl}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[retrbar, bar width=7pt, ymax=0.65,
+  symbolic x coords={mr,ta,te}]
+\addplot[fill=byteS,draw=byteS] coordinates {(mr,0.385)(ta,0.312)(te,0.357)};
+\addplot[fill=byteB,draw=byteB] coordinates {(mr,0.407)(ta,0.313)(te,0.354)};
+\addplot[fill=byteL,draw=byteL] coordinates {(mr,0.389)(ta,0.314)(te,0.360)};
+\addplot[fill=subwS,draw=subwS] coordinates {(mr,0.469)(ta,0.395)(te,0.435)};
+\addplot[fill=subwB,draw=subwB] coordinates {(mr,0.566)(ta,0.446)(te,0.495)};
+\addplot[fill=subwL,draw=subwL] coordinates {(mr,0.574)(ta,0.460)(te,0.513)};
+\bytesubwlegend
+\end{axis}
+\end{tikzpicture}
+\caption{\textbf{IndicQA --- small-pool QA retrieval (pool $\sim$250).} The one benchmark where
+subword leads byte at every size; we attribute the reversal to the very small candidate pool, where
+the larger subword vocabulary is sufficient and byte's advantage does not surface.}
+\label{fig:indicqa}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}
+\begin{axis}[retrbar, bar width=9pt, ymax=0.55,
+  symbolic x coords={AmharicPR,2AIRTC}, xticklabels={Amharic-PR,2AIRTC}]
+\addplot[fill=byteS,draw=byteS] coordinates {(AmharicPR,0.441)(2AIRTC,0.409)};
+\addplot[fill=byteB,draw=byteB] coordinates {(AmharicPR,0.470)(2AIRTC,0.422)};
+\addplot[fill=byteL,draw=byteL] coordinates {(AmharicPR,0.482)(2AIRTC,0.423)};
+\addplot[fill=subwS,draw=subwS] coordinates {(AmharicPR,0.252)(2AIRTC,0.176)};
+\addplot[fill=subwB,draw=subwB] coordinates {(AmharicPR,0.363)(2AIRTC,0.213)};
+\addplot[fill=subwL,draw=subwL] coordinates {(AmharicPR,0.409)(2AIRTC,0.227)};
+\bytesubwlegend
+\end{axis}
+\end{tikzpicture}
+\caption{\textbf{Native Amharic retrieval.} On Amharic-PR (passage retrieval, pool 20k) byte leads
+subword at every size and byte-base/large exceed the retrieval-trained mE5 baseline (0.47--0.48 vs
+0.33). On the peer-reviewed 2AIRTC ad-hoc IR collection (pool 12.5k) byte roughly doubles subword,
+corroborating the result on an independent, formally-constructed corpus.}
+\label{fig:amharic}
+\end{figure}
+
+\noindent
+Taken together, the preliminary run supports the central hypothesis: under a fixed distillation recipe
+that varies only the tokenizer, byte embeddings are the stronger retriever for low-resource languages,
+decisively so on every deep, large-pool benchmark, with the smallest byte model already outperforming
+the largest subword model. The full study (Section~\ref{sec:method}) will add a retrieval-specific
+training objective to raise absolute quality, multiple seeds with confidence intervals, and the
+parameter-matched control to confirm the advantage is representational rather than a parameter-count
+artifact.
