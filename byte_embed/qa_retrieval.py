@@ -2,7 +2,7 @@
 passage against a relevant+distractor pool (the same rerank-pool proxy as `miracl.py`). This is the
 retrieval step that bottlenecks multilingual RAG, and where byte-level embeddings win on deep retrieval.
 
-Two dataset shapes are supported, both reduced to one scoring path (`_score_pool`):
+Four dataset shapes are supported, all reduced to one scoring path (`_score_pool`):
 
 * mteb `{cfg}-corpus/-queries/-qrels` layout (`QA_BENCH`, built by `_build_pool`):
     IndicQA (mteb/IndicQARetrieval): Marathi, Tamil, Telugu  — small corpora; the valuable NEW coverage
@@ -19,6 +19,11 @@ Two dataset shapes are supported, both reduced to one scoring path (`_score_pool
     (240 topics, 12,587 docs). The HF dump stores relevance inverted (each doc lists the topics it is
     relevant to), so topics=queries + qrels + corpus are reconstructed from one split. This is the
     FORMAL Amharic benchmark; Amharic-PR corroborates it on a second (community) corpus.
+
+* cross-lingual IR (`QA_CLIR`, built by `_build_pool_clir`):
+    AfriCLIRMatrix (Ogundepo et al. 2022): Amharic + Hausa — English topics + TREC qrels from GitHub,
+    scored over the HF document corpus. The FORMAL African IR collection and the only public
+    deep-retrieval signal for Hausa.
 
 This gives every low-resource language a deep-retrieval signal on top of Belebele (shallow, all 9, in
 eval_battery): te/ta/mr via Indic QA; am via two monolingual Amharic corpora (formal 2AIRTC + community
@@ -77,6 +82,28 @@ QA_CLIR = {
 _CORPUS_SPLITS = ("test", "train", "dev", "corpus")     # the corpus split varies by dataset
 
 
+def _cache_path(cache_dir, key, n_queries, distractors, seed):
+    return Path(cache_dir) / f"qa_{key}_{n_queries}q_{distractors}d_{seed}.json"
+
+
+def _cache_load(cache):
+    """Return a cached (queries, rel, pool_id, pool_text) tuple (rel as sets), or None if not cached."""
+    if cache.exists():
+        d = json.loads(cache.read_text(encoding="utf-8"))
+        return d["queries"], {k: set(v) for k, v in d["rel"].items()}, d["pool_id"], d["pool_text"]
+    return None
+
+
+def _cache_save(cache, queries, rel, pool_id, pool_text):
+    """Persist a built pool (rel serialized as sorted lists) and return it in-memory (rel as sets).
+    `rel` may be a dict of sets or of lists — both are accepted."""
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps({"queries": queries, "rel": {k: sorted(v) for k, v in rel.items()},
+                                 "pool_id": pool_id, "pool_text": pool_text}, ensure_ascii=False),
+                     encoding="utf-8")
+    return queries, {k: set(v) for k, v in rel.items()}, pool_id, pool_text
+
+
 def _corpus_stream(path, cfg, prefer):
     from datasets import load_dataset
     for sp in (prefer, *_CORPUS_SPLITS):
@@ -90,10 +117,10 @@ def _corpus_stream(path, cfg, prefer):
 def _build_pool(path, cfg, split, key, n_queries, distractors, seed, cache_dir, max_stream=300000):
     """Stream the corpus once -> (queries, rel, pool_id, pool_text); cached. Returns None if unavailable
     or if no relevant docs surface within `max_stream` (bounds very large corpora)."""
-    cache = Path(cache_dir) / f"qa_{key}_{n_queries}q_{distractors}d_{seed}.json"
-    if cache.exists():
-        d = json.loads(cache.read_text(encoding="utf-8"))
-        return d["queries"], {k: set(v) for k, v in d["rel"].items()}, d["pool_id"], d["pool_text"]
+    cache = _cache_path(cache_dir, key, n_queries, distractors, seed)
+    hit = _cache_load(cache)
+    if hit is not None:
+        return hit
 
     from datasets import load_dataset
     try:
@@ -140,20 +167,17 @@ def _build_pool(path, cfg, split, key, n_queries, distractors, seed, cache_dir, 
         return None
     pool_id = list(id2text) + [i for i, _ in distract]
     pool_text = list(id2text.values()) + [t for _, t in distract]
-    Path(cache_dir).mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps({"queries": queries, "rel": rel, "pool_id": pool_id,
-                                 "pool_text": pool_text}, ensure_ascii=False), encoding="utf-8")
-    return queries, {k: set(v) for k, v in rel.items()}, pool_id, pool_text
+    return _cache_save(cache, queries, rel, pool_id, pool_text)
 
 
 def _build_pool_flat(spec, key, n_queries, distractors, seed, cache_dir, max_corpus=400000):
     """Flat (query, positive-passage) table -> (queries, rel, pool_id, pool_text); cached (same schema
     as `_build_pool`). The corpus is the passages themselves: every sampled query's relevant passage
     plus distractor passages, topped up by streaming `extra_split` when the eval split is small."""
-    cache = Path(cache_dir) / f"qa_{key}_{n_queries}q_{distractors}d_{seed}.json"
-    if cache.exists():
-        d = json.loads(cache.read_text(encoding="utf-8"))
-        return d["queries"], {k: set(v) for k, v in d["rel"].items()}, d["pool_id"], d["pool_text"]
+    cache = _cache_path(cache_dir, key, n_queries, distractors, seed)
+    hit = _cache_load(cache)
+    if hit is not None:
+        return hit
 
     from datasets import load_dataset
     qid, pid, qcol, pcol = spec["qid"], spec["pid"], spec["qcol"], spec["pcol"]
@@ -197,11 +221,7 @@ def _build_pool_flat(spec, key, n_queries, distractors, seed, cache_dir, max_cor
             pass
 
     pool_text = [id2text[i] for i in pool_id]
-    Path(cache_dir).mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps({"queries": queries, "rel": {k: sorted(v) for k, v in rel.items()},
-                                 "pool_id": pool_id, "pool_text": pool_text}, ensure_ascii=False),
-                     encoding="utf-8")
-    return queries, {k: set(v) for k, v in rel.items()}, pool_id, pool_text
+    return _cache_save(cache, queries, rel, pool_id, pool_text)
 
 
 def _build_pool_inv(spec, key, n_queries, distractors, seed, cache_dir):
@@ -209,10 +229,10 @@ def _build_pool_inv(spec, key, n_queries, distractors, seed, cache_dir):
     topics=queries + qrels + corpus, then pool = relevant docs + distractor docs (same schema as the
     other builders). The whole collection is the corpus, so distractors >= |collection| ranks every doc
     (true ad-hoc IR over the full collection)."""
-    cache = Path(cache_dir) / f"qa_{key}_{n_queries}q_{distractors}d_{seed}.json"
-    if cache.exists():
-        d = json.loads(cache.read_text(encoding="utf-8"))
-        return d["queries"], {k: set(v) for k, v in d["rel"].items()}, d["pool_id"], d["pool_text"]
+    cache = _cache_path(cache_dir, key, n_queries, distractors, seed)
+    hit = _cache_load(cache)
+    if hit is not None:
+        return hit
 
     from datasets import load_dataset
     did, dtext, tno_k, tt_k = spec["did"], spec["dtext"], spec["tno"], spec["ttitle"]
@@ -227,6 +247,8 @@ def _build_pool_inv(spec, key, n_queries, distractors, seed, cache_dir):
         dno = str(r[did])
         corpus[dno] = str(r[dtext])
         for tno, tt in zip(r.get(tno_k) or [], r.get(tt_k) or []):
+            if tno is None:
+                continue
             t = str(int(tno))
             topics.setdefault(t, str(tt))
             qrels.setdefault(t, set()).add(dno)
@@ -246,11 +268,7 @@ def _build_pool_inv(spec, key, n_queries, distractors, seed, cache_dir):
     rng.shuffle(distract)
     pool_id += distract[:distractors]
     pool_text = [corpus[d] for d in pool_id]
-    Path(cache_dir).mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps({"queries": queries, "rel": {k: sorted(v) for k, v in rel.items()},
-                                 "pool_id": pool_id, "pool_text": pool_text}, ensure_ascii=False),
-                     encoding="utf-8")
-    return queries, {k: set(v) for k, v in rel.items()}, pool_id, pool_text
+    return _cache_save(cache, queries, rel, pool_id, pool_text)
 
 
 def _fetch_lines(url, timeout=60):
@@ -275,10 +293,10 @@ def _build_pool_clir(spec, our_lang, key, n_queries, distractors, seed, cache_di
     """Cross-lingual IR: English topics (TSV) + TREC qrels from GitHub, scored over the HF document
     corpus streamed as JSONL (relevant docs + distractors). Same return schema as the other builders;
     returns None (graceful) if any source is unreachable or no relevant docs surface within max_stream."""
-    cache = Path(cache_dir) / f"qa_{key}_{n_queries}q_{distractors}d_{seed}.json"
-    if cache.exists():
-        d = json.loads(cache.read_text(encoding="utf-8"))
-        return d["queries"], {k: set(v) for k, v in d["rel"].items()}, d["pool_id"], d["pool_text"]
+    cache = _cache_path(cache_dir, key, n_queries, distractors, seed)
+    hit = _cache_load(cache)
+    if hit is not None:
+        return hit
 
     name, code = spec["langs"][our_lang]
     try:
@@ -331,10 +349,7 @@ def _build_pool_clir(spec, our_lang, key, n_queries, distractors, seed, cache_di
         return None
     pool_id = list(id2text) + [i for i, _ in distract]
     pool_text = list(id2text.values()) + [t for _, t in distract]
-    Path(cache_dir).mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps({"queries": queries, "rel": rel, "pool_id": pool_id,
-                                 "pool_text": pool_text}, ensure_ascii=False), encoding="utf-8")
-    return queries, {k: set(v) for k, v in rel.items()}, pool_id, pool_text
+    return _cache_save(cache, queries, rel, pool_id, pool_text)
 
 
 def _score_pool(encode_fn, built):
@@ -349,12 +364,16 @@ def _score_pool(encode_fn, built):
     ndcgs, recalls = [], []
     for k, qid in enumerate(qids):
         r = rel[qid]
+        if not r:                                            # no relevant doc in pool -> skip (no div/0)
+            continue
         ranked = docid[np.argsort(-(Q[k] @ P.T))]
         rr = np.fromiter((1.0 if d in r else 0.0 for d in ranked), float, len(ranked))
         ndcgs.append(_ndcg_at_k(rr, 10))
         recalls.append(float(rr[:100].sum()) / len(r))
+    if not ndcgs:
+        return None
     return {"ndcg@10": round(float(np.mean(ndcgs)), 4), "recall@100": round(float(np.mean(recalls)), 4),
-            "n_queries": len(qids), "pool": len(pool_text)}
+            "n_queries": len(ndcgs), "pool": len(pool_text)}
 
 
 def eval_qa_retrieval(encode_fn,
@@ -363,34 +382,39 @@ def eval_qa_retrieval(encode_fn,
     """Per-benchmark, per-language nDCG@10 / recall@100 (+ benchmark means). The RAG-retrieval axis.
     Handles mteb-layout benchmarks (`QA_BENCH`), flat query->passage ones (`QA_FLAT`), inverted-relevance
     collections (`QA_INV`, e.g. the formal Amharic 2AIRTC), and cross-lingual IR (`QA_CLIR`, AfriCLIRMatrix
-    — English query -> African passage, the only public deep-retrieval signal for Hausa)."""
+    — English query -> African passage, the only public deep-retrieval signal for Hausa). A failure in one
+    (benchmark, language) degrades to None for that cell only — it never sinks the rest."""
+    def safe(label, build):
+        try:
+            built = build()
+            return _score_pool(encode_fn, built) if built else None
+        except Exception as e:  # noqa: BLE001
+            print(f"  [qa:{label}] failed: {type(e).__name__}: {e}")
+            return None
+
     out = {}
     for bench in benchmarks:
         per = {}
         if bench in QA_BENCH:
             path, split, langmap = QA_BENCH[bench]
             for our_lang, cfg in langmap.items():
-                built = _build_pool(path, cfg, split, f"{bench}_{our_lang}", n_queries, distractors,
-                                    seed, cache_dir)
-                per[our_lang] = _score_pool(encode_fn, built) if built else None
+                per[our_lang] = safe(f"{bench}:{our_lang}", lambda c=cfg, l=our_lang: _build_pool(
+                    path, c, split, f"{bench}_{l}", n_queries, distractors, seed, cache_dir))
         elif bench in QA_FLAT:
             spec = QA_FLAT[bench]
             for our_lang in spec["langs"]:
-                built = _build_pool_flat(spec, f"{bench}_{our_lang}", n_queries, distractors, seed,
-                                         cache_dir)
-                per[our_lang] = _score_pool(encode_fn, built) if built else None
+                per[our_lang] = safe(f"{bench}:{our_lang}", lambda l=our_lang: _build_pool_flat(
+                    spec, f"{bench}_{l}", n_queries, distractors, seed, cache_dir))
         elif bench in QA_INV:
             spec = QA_INV[bench]
             for our_lang in spec["langs"]:
-                built = _build_pool_inv(spec, f"{bench}_{our_lang}", n_queries, distractors, seed,
-                                        cache_dir)
-                per[our_lang] = _score_pool(encode_fn, built) if built else None
+                per[our_lang] = safe(f"{bench}:{our_lang}", lambda l=our_lang: _build_pool_inv(
+                    spec, f"{bench}_{l}", n_queries, distractors, seed, cache_dir))
         elif bench in QA_CLIR:
             spec = QA_CLIR[bench]
             for our_lang in spec["langs"]:
-                built = _build_pool_clir(spec, our_lang, f"{bench}_{our_lang}", n_queries, distractors,
-                                         seed, cache_dir)
-                per[our_lang] = _score_pool(encode_fn, built) if built else None
+                per[our_lang] = safe(f"{bench}:{our_lang}", lambda l=our_lang: _build_pool_clir(
+                    spec, l, f"{bench}_{l}", n_queries, distractors, seed, cache_dir))
         else:
             print(f"  [qa] unknown benchmark {bench!r} -> skip")
             continue
