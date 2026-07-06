@@ -1,12 +1,12 @@
 """Low-resource byte-vs-subword RETRIEVAL study — the A100 orchestrator.
 
 Trains 6 students — byt5 / mt5 × {small, base, large} — distilled from a frozen teacher (default
-SONAR; `--teacher bge-m3` for the finalized retrieval run) on 9 languages (6 lower-resource:
-te/bn/sw/yo/am/ha + 3 anchors: en/zh/ar). EQUAL max-min balanced training data (~42k/lang) and CACHED
-teacher targets (one teacher pass; both students train against the identical vectors). Retrieval-only
-scoring: Belebele + FLORES bitext (eval_battery), MIRACL deep retrieval (en/zh/ar/te/bn/sw/yo), the
-QA benchmarks (qa_retrieval), and a compute profile. A one-time tokenization-efficiency table
-quantifies the subword tax vs the byte UTF-8 cost.
+SONAR; `--teacher bge-m3` for the finalized retrieval run) on 10 languages (7 lower-resource:
+te/bn/sw/yo/am/ha/rw + 3 anchors: en/zh/ar). EQUAL max-min balanced training data (~42k/lang) and
+CACHED teacher targets (one teacher pass; both students train against the identical vectors).
+Retrieval-only scoring: Belebele (eval_battery), MIRACL deep retrieval (en/zh/ar/te/bn/sw/yo), the QA
+benchmarks (qa_retrieval: Amharic-PR am, CIRAL ha, AfriQA rw + probe), and a compute profile. A
+one-time tokenization-efficiency table quantifies the subword tax vs the byte UTF-8 cost.
 
 INCREMENTAL + RESUMABLE: the results JSON is rewritten after every model, a model already present is
 skipped, and `*-large` checkpoints model+optimizer (a Colab disconnect just means re-running the cell).
@@ -232,14 +232,16 @@ def _summary(results):
         dm = f"{bmir - smir:+.3f}" if (bmir is not None and smir is not None) else "-"
         print(f"  {size:6} Belebele {db}  MIRACL {dm}")
     if any(r.get("qa_retrieval") for r in M.values()):
-        print("\nDEEP QA-RETRIEVAL — nDCG@10 (Amharic-PR am · CIRAL ha [cross-lingual]):")
+        print("\nDEEP QA-RETRIEVAL — nDCG@10 (Amharic-PR am · CIRAL ha · AfriQA rw [both cross-lingual]):")
         for name, r in M.items():
             qa = r.get("qa_retrieval")
             if qa:
                 am = (qa.get("amharicpr") or {}).get("ndcg@10_mean")
                 cl = (qa.get("ciral") or {}).get("per_lang") or {}
+                xq = (qa.get("afriqa") or {}).get("per_lang") or {}
                 print(f"  {name:20} Amharic-PR {_f(am, 7)}  "
-                      f"CIRAL-ha {_f((cl.get('ha') or {}).get('ndcg@10'), 7)}")
+                      f"CIRAL-ha {_f((cl.get('ha') or {}).get('ndcg@10'), 7)}  "
+                      f"AfriQA-rw {_f((xq.get('rw') or {}).get('ndcg@10'), 7)}")
     eff = results.get("efficiency")
     if eff:
         print("\nTOKENIZATION (subword tax vs byte UTF-8 tax, vs English, on FLORES-1012):")

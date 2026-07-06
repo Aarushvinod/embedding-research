@@ -23,19 +23,21 @@ FLORES_CODE = {"en": "eng_Latn", "tr": "tur_Latn", "sw": "swh_Latn", "bn": "ben_
                "ha": "hau_Latn", "rw": "kin_Latn", "zh": "zho_Hans",
                "yo": "yor_Latn", "so": "som_Latn"}
 
-# The FINALIZED retrieval study set (deep-research verified, 2026-07): 6 lower-resource languages +
+# The FINALIZED retrieval study set (deep-research verified, 2026-07): 7 lower-resource languages +
 # 3 high-resource anchors. Every language has ONE deep-retrieval benchmark: te/bn/sw/yo via MIRACL
-# (monolingual, human judgments), am via Amharic-PR (monolingual), ha via CIRAL (cross-lingual,
-# flagged). Joshi classes: te=1, sw/yo/am/ha=2, bn=3 — Bengali is the one deliberate relaxation of
-# the class 0-2 rule (no remaining class 0-2 language has ANY usable deep benchmark; bn has the best
-# monolingual coverage of the backfill candidates). Dropped: rw (no deep benchmark exists), ta/mr
-# (IndicQA pool ~250 docs — not deep), so (CIRAL-only + wiki too small to train).
-# Wikipedia floors OK for all (yo = 91k usable paragraphs, bn = 143k articles, measured).
+# (monolingual, human judgments), am via Amharic-PR (monolingual), ha via CIRAL (en query -> ha
+# passage, cross-lingual, flagged), rw via AfriQA (rw question -> en passage, cross-lingual REVERSE
+# direction, flagged — the same standard as ha, mirrored). Joshi classes: te/rw=1, sw/yo/am/ha=2,
+# bn=3 — Bengali is the one deliberate relaxation of the class 0-2 rule (no remaining class 0-2
+# language has ANY usable deep benchmark beyond these). Dropped: ta/mr (IndicQA pool ~250 docs — not
+# deep), so (CIRAL-only + wiki too small to train).
+# Wikipedia floors OK for all (rw = 42,621 usable sentences — the floor-setter; yo = 91k paragraphs,
+# bn = 143k articles, measured).
 # NOTE yo is NOT in XLM-R/CC-100 (the BGE-M3 teacher's backbone) — both students inherit the same
 # weakened targets there, so byte-vs-subword stays internally fair; flag it when reporting.
-LOWRES_LANGS = ["te", "bn", "sw", "yo", "am", "ha"]   # Dravidian/Indo-Aryan/Bantu/Niger-Congo/Semitic/Chadic
+LOWRES_LANGS = ["te", "bn", "sw", "yo", "am", "ha", "rw"]  # Dravidian/Indo-Aryan/Bantu/Niger-Congo/Semitic/Chadic/Bantu
 HIGHRES_LANGS = ["en", "zh", "ar"]               # anchors (incl. two non-Latin scripts)
-STUDY_LANGS = LOWRES_LANGS + HIGHRES_LANGS       # the canonical 9 (trained AND evaluated)
+STUDY_LANGS = LOWRES_LANGS + HIGHRES_LANGS       # the canonical 10 (trained AND evaluated)
 
 N_PER_LANG = 15000   # training sentences per language (× 8 langs)
 MAX_BYTES = 256      # truncation length in BYTES (byte-level => longer than subword)

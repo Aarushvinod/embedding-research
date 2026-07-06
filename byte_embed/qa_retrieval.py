@@ -29,11 +29,12 @@ Four dataset shapes are supported, all reduced to one scoring path (`_score_pool
 FINALIZED coverage — ONE deep benchmark per language (the one with the most passages available):
 MIRACL (byte_embed/miracl.py) carries te/bn/sw/yo/en/zh/ar (49k-33M passages, monolingual);
 Amharic-PR carries am (68,301 passages > 2AIRTC's 12,587); CIRAL carries ha (715k passages,
-cross-lingual, flagged). So the DEFAULT here is just ("amharicpr", "ciral") — Mr.TyDi, IndicQA,
-2AIRTC, and AfriCLIRMatrix stay wired for optional corroboration via benchmarks=. Belebele
-(eval_battery) covers all languages shallow. Dropped from the study: rw (no deep benchmark exists —
-AfriQA's gold passages are English/French text, not Kinyarwanda), ta/mr (IndicQA's ~250-doc pool is
-not deep), so (CIRAL-only coverage + a Wikipedia too small to train on).
+cross-lingual, flagged); AfriQA carries rw (347 native questions -> English passages, cross-lingual
+REVERSE direction, flagged — the mirrored counterpart of ha's standard). So the DEFAULT here is
+("amharicpr", "ciral", "afriqa") — Mr.TyDi, IndicQA, 2AIRTC, and AfriCLIRMatrix stay wired for
+optional corroboration via benchmarks=. Belebele (eval_battery) covers all languages shallow.
+Dropped from the study: ta/mr (IndicQA's ~250-doc pool is not deep), so (CIRAL-only coverage + a
+Wikipedia too small to train on).
 
   python -m byte_embed.qa_retrieval --selftest      # tiny pool build for indicqa + amharicpr
 """
@@ -99,13 +100,14 @@ QA_CLIR = {
 # REVERSED cross-lingual (XOR) benchmark: AfriQA gold passages — AFRICAN-language question -> ENGLISH
 # gold passage (the direction a low-resource speaker querying English Wikipedia needs). Queries are
 # native human questions from the masakhane GitHub release (JSONL); the pool = every gold context
-# (train/dev/test) + English distractors streamed from the MIRACL en corpus. OFF the default battery —
-# a viability probe for the reverse axis, on TRAINED languages only (ha/sw/yo).
+# (train/dev/test) + English distractors streamed from the MIRACL en corpus. ON the default battery:
+# it is Kinyarwanda's deep benchmark (347 test questions; rw is trained — flagged cross-lingual, the
+# mirrored counterpart of Hausa's CIRAL standard); ha/sw/yo ride along as the reverse-axis probe.
 QA_XOR = {
     "afriqa": {
         "url": "https://github.com/masakhane-io/afriqa/raw/main/data/gold_passages/"
                "{code}/gold_span_passages.afriqa.{code}.en.{split}.json",
-        "langs": {"ha": "hau", "sw": "swa", "yo": "yor"},
+        "langs": {"rw": "kin", "ha": "hau", "sw": "swa", "yo": "yor"},
         "query_splits": ("test",), "pool_splits": ("train", "dev", "test"),
         "distractor_corpus": ("mteb/MIRACLRetrieval", "en", "dev"),
     },
@@ -468,7 +470,7 @@ def _score_pool(encode_fn, built):
 
 
 def eval_qa_retrieval(encode_fn,
-                      benchmarks=("amharicpr", "ciral"),
+                      benchmarks=("amharicpr", "ciral", "afriqa"),
                       n_queries=250, distractors=20000, seed=0, cache_dir="checkpoints"):
     """Per-benchmark, per-language nDCG@10 / recall@100 (+ benchmark means). The RAG-retrieval axis.
     Handles mteb-layout benchmarks (`QA_BENCH`), flat query->passage ones (`QA_FLAT`), inverted-relevance

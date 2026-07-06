@@ -142,13 +142,15 @@ def _summary(results):
               f"byte-subword: Belebele {db} MIRACL {dmir}")
     if any(r.get("qa_retrieval") for r in M.values()):
         g = lambda x, w=7: (f"{x:>{w}.3f}" if isinstance(x, (int, float)) else f"{'-':>{w}}")  # noqa: E731
-        print("\nDEEP QA-RETRIEVAL — nDCG@10 (Amharic-PR am · CIRAL ha [cross-lingual]):")
+        print("\nDEEP QA-RETRIEVAL — nDCG@10 (Amharic-PR am · CIRAL ha · AfriQA rw [both cross-lingual]):")
         for name, r in M.items():
             qa = r.get("qa_retrieval")
             if qa:
                 am = (qa.get("amharicpr") or {}).get("ndcg@10_mean")
                 cl = (qa.get("ciral") or {}).get("per_lang") or {}
-                print(f"  {name:16} Amharic-PR {g(am)}  CIRAL-ha {g((cl.get('ha') or {}).get('ndcg@10'))}")
+                xq = (qa.get("afriqa") or {}).get("per_lang") or {}
+                print(f"  {name:16} Amharic-PR {g(am)}  CIRAL-ha {g((cl.get('ha') or {}).get('ndcg@10'))}  "
+                      f"AfriQA-rw {g((xq.get('rw') or {}).get('ndcg@10'))}")
 
 
 def main():
