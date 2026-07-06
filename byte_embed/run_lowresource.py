@@ -62,11 +62,11 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
     makes `steps` a cap — the realized step count lands in the results as `steps_run`.
     `boundary` ('teacher'|'random') runs the boundary-injection arms: byte students only, markers
     inserted into all student inputs (train AND eval); teacher targets stay clean. Use a separate
-    `out` file per arm. ZEROSHOT_LANGS (currently none) are EVALUATED but never trained on."""
+    `out` file per arm."""
     import torch
 
     from byte_embed.boundaries import make_transform
-    from byte_embed.config import STUDY_LANGS, ZEROSHOT_LANGS
+    from byte_embed.config import STUDY_LANGS
     from byte_embed.data import load_balanced_sentences
     from byte_embed.distill import distill
     from byte_embed.efficiency import fertility_table, profile_model
@@ -78,7 +78,6 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
                                      targets_exist)
 
     langs = ["am", "sw", "en"] if smoke else STUDY_LANGS
-    eval_langs = langs + ([] if smoke else ZEROSHOT_LANGS)   # zero-shot langs: eval-only, never trained
     miracl_langs = (["te"] if smoke else ["en", "zh", "ar", "te", "bn", "sw", "yo"])  # 7 of our 9 in MIRACL
     grid = _grid(steps)
     if smoke:
@@ -117,7 +116,7 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
     # 3) efficiency / tokenization table (once; no training) --------------------------------------
     if with_efficiency and "efficiency" not in results:
         print("\n=== tokenization-efficiency table (FLORES-1012) ===")
-        results["efficiency"] = fertility_table(eval_langs)
+        results["efficiency"] = fertility_table(langs)
         _save(results, out)
 
     # 4) the 6 students ---------------------------------------------------------------------------
@@ -145,7 +144,7 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
             def enc(xs, _s=student, _t=transform):           # each arm evals with its own transform
                 return _s.encode([_t(x) for x in xs] if _t else xs, device=device)
 
-            bm = eval_battery(enc, eval_langs)
+            bm = eval_battery(enc, langs)
             bm["miracl"] = eval_miracl_langs(enc, miracl_langs, n_queries=miracl_q,
                                              distractors=miracl_extra, cache_dir=ckpt_dir)
             bm["qa_retrieval"] = eval_qa_retrieval(enc, n_queries=(20 if smoke else miracl_q),
@@ -163,8 +162,7 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
             m = bm["means"]
             mir = (bm["miracl"] or {}).get("ndcg@10_mean")
             print(f"  saved {name}: params={params/1e6:.0f}M steps={steps_run}/{steps} "
-                  f"Belebele={m.get('belebele_ndcg@10')} FLORES={m.get('flores_p@1')} "
-                  f"MIRACL={mir} peak={bm['peak_vram_gb']}GB")
+                  f"Belebele={m.get('belebele_ndcg@10')} MIRACL={mir} peak={bm['peak_vram_gb']}GB")
             del student
             torch.cuda.empty_cache()
         except Exception as e:  # noqa: BLE001 — one model erroring shouldn't lose the others
@@ -190,7 +188,7 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
                 return _m.encode([_p + x for x in xs], normalize_embeddings=True,
                                  convert_to_numpy=True, show_progress_bar=False)
 
-            bm = eval_battery(benc, eval_langs)
+            bm = eval_battery(benc, langs)
             bm["miracl"] = eval_miracl_langs(benc, miracl_langs, n_queries=miracl_q,
                                              distractors=miracl_extra, cache_dir=ckpt_dir)
             bm["qa_retrieval"] = eval_qa_retrieval(benc, n_queries=miracl_q,
@@ -210,29 +208,29 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
 
 def _summary(results):
     M = results["models"]
-    print("\n" + "=" * 104)
+    print("\n" + "=" * 80)
     print(f"LOW-RESOURCE BYTE vs SUBWORD — teacher={results.get('teacher', 'sonar')} "
-          "(Belebele nDCG@10 | FLORES P@1 | MIRACL; SIB/STS shown when present in older results)")
-    print("=" * 104)
-    print(f"{'model':20}{'params(M)':>10}{'xfmr(M)':>9}{'SIB':>7}{'Belebele':>9}"
-          f"{'FLORES':>8}{'STS':>7}{'MIRACL':>8}")
+          "(Belebele nDCG@10 | MIRACL nDCG@10)")
+    print("=" * 80)
+    print(f"{'model':20}{'params(M)':>10}{'xfmr(M)':>9}{'Belebele':>10}{'MIRACL':>9}")
     for name, r in M.items():
         m = r.get("means", {})
         mir = (r.get("miracl") or {}).get("ndcg@10_mean")
         print(f"{name:20}{r.get('params', 0) / 1e6:>10.0f}"
               f"{r.get('transformer_params', 0) / 1e6:>9.0f}"
-              f"{_f(m.get('sib'), 7)}{_f(m.get('belebele_ndcg@10'), 9)}{_f(m.get('flores_p@1'), 8)}"
-              f"{_f(m.get('sts_spearman'), 7)}{_f(mir, 8)}")
-    print("\nISO-COMPUTE byte − subword at matched size (Belebele | FLORES | STS):")
+              f"{_f(m.get('belebele_ndcg@10'), 10)}{_f(mir, 9)}")
+    print("\nISO-STEP byte − subword at matched size (Belebele | MIRACL):")
     for size in ("small", "base", "large"):
         b, s = M.get(f"byte-{size}"), M.get(f"subword-{size}")
         if not (b and s):
             continue
-        bm, sm = b.get("means", {}), s.get("means", {})
-        def d(k):
-            x, y = bm.get(k), sm.get(k)
-            return f"{x - y:+.3f}" if (x is not None and y is not None) else "-"
-        print(f"  {size:6} Belebele {d('belebele_ndcg@10')}  FLORES {d('flores_p@1')}  STS {d('sts_spearman')}")
+        bb = (b.get("means") or {}).get("belebele_ndcg@10")
+        sb = (s.get("means") or {}).get("belebele_ndcg@10")
+        bmir = (b.get("miracl") or {}).get("ndcg@10_mean")
+        smir = (s.get("miracl") or {}).get("ndcg@10_mean")
+        db = f"{bb - sb:+.3f}" if (bb is not None and sb is not None) else "-"
+        dm = f"{bmir - smir:+.3f}" if (bmir is not None and smir is not None) else "-"
+        print(f"  {size:6} Belebele {db}  MIRACL {dm}")
     if any(r.get("qa_retrieval") for r in M.values()):
         print("\nDEEP QA-RETRIEVAL — nDCG@10 (Amharic-PR am · CIRAL ha [cross-lingual]):")
         for name, r in M.items():

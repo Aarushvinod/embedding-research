@@ -100,13 +100,12 @@ QA_CLIR = {
 # gold passage (the direction a low-resource speaker querying English Wikipedia needs). Queries are
 # native human questions from the masakhane GitHub release (JSONL); the pool = every gold context
 # (train/dev/test) + English distractors streamed from the MIRACL en corpus. OFF the default battery —
-# a viability probe for the reverse axis. 'rw' (Kinyarwanda, 347 test questions) rides along as a
-# query-side ZERO-SHOT language (never trained on).
+# a viability probe for the reverse axis, on TRAINED languages only (ha/sw/yo).
 QA_XOR = {
     "afriqa": {
         "url": "https://github.com/masakhane-io/afriqa/raw/main/data/gold_passages/"
                "{code}/gold_span_passages.afriqa.{code}.en.{split}.json",
-        "langs": {"ha": "hau", "sw": "swa", "yo": "yor", "rw": "kin"},
+        "langs": {"ha": "hau", "sw": "swa", "yo": "yor"},
         "query_splits": ("test",), "pool_splits": ("train", "dev", "test"),
         "distractor_corpus": ("mteb/MIRACLRetrieval", "en", "dev"),
     },

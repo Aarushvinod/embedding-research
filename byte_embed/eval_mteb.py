@@ -1,15 +1,12 @@
 """Uniform eval battery for the low-resource byte-vs-subword study (run_lowresource.py).
 
-The study is retrieval/QA-focused, so the DEFAULT battery is retrieval-only:
+The study is retrieval/QA-focused, so the DEFAULT battery is Belebele only:
 
   - **Retrieval (uniform)** : Belebele — rank a question against the pool of unique passages
                               (nDCG@10 / recall@10). 900 questions/lang, all 9 langs.
-  - **Retrieval (bitext)**  : FLORES-1012 — find-the-translation P@1 (lang -> English) on the
-                              1012 perfectly-parallel FLORES devtest sentences (`mteb/flores`) —
-                              cross-lingual sentence retrieval; the axis that covers Kinyarwanda.
 
-SIB-200 (classification) and STS were dropped from the default when the paper narrowed to
-QA/retrieval — their eval functions remain below and run when requested via
+FLORES bitext (find-the-translation P@1), SIB-200 (classification), and STS were dropped from the
+default — their eval functions remain below and run when requested via
 `eval_battery(..., tasks=("sib", "belebele", "flores", "sts"))`.
 
 MIRACL deep retrieval (en/zh/ar/te) stays in `byte_embed/miracl.py` and the QA benchmarks in
@@ -148,11 +145,11 @@ def eval_flores_bitext(encode_fn, langs, pivot="en", _cache={}):
 
 
 # --------------------------------------------------------------------------- battery
-def eval_battery(encode_fn, langs, tasks=("belebele", "flores")):
-    """RETRIEVAL-ONLY by default (the paper's axis): Belebele passage retrieval per language +
-    FLORES bitext retrieval across languages. Pass tasks=("sib","belebele","flores","sts") to also
-    compute the dropped classification/STS axes (kept for backward comparability with the SONAR-run
-    results). MIRACL + the QA benchmarks are run separately by the orchestrator."""
+def eval_battery(encode_fn, langs, tasks=("belebele",)):
+    """DEFAULT = Belebele passage retrieval only (the paper's shallow axis). Pass
+    tasks=("sib","belebele","flores","sts") to also compute the dropped FLORES/classification/STS
+    axes (kept for backward comparability with the SONAR-run results). MIRACL + the QA benchmarks
+    are run separately by the orchestrator."""
     res = {t: {} for t in ("sib", "belebele", "sts") if t in tasks}
     for lang in langs:
         if "sib" in tasks:

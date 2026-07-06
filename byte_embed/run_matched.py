@@ -101,7 +101,7 @@ def run(out="results/matched.json", sizes=("small", "base"), steps=50000, batch=
             m = bm["means"]
             mir = (bm["miracl"] or {}).get("ndcg@10_mean")
             print(f"  saved {name}: xfmr={xfmr / 1e6:.0f}M steps={steps_run}/{steps} "
-                  f"Belebele={m.get('belebele_ndcg@10')} FLORES={m.get('flores_p@1')} MIRACL={mir}")
+                  f"Belebele={m.get('belebele_ndcg@10')} MIRACL={mir}")
             del student
             torch.cuda.empty_cache()
         except Exception as e:  # noqa: BLE001
@@ -118,30 +118,28 @@ def _summary(results):
     print("\n" + "=" * 96)
     print("MATCHED-TRANSFORMER CONTROL — byte vs subword at EQUAL transformer params (random init)")
     print("=" * 96)
-    print(f"{'model':16}{'total(M)':>9}{'input(M)':>9}{'xfmr(M)':>9}{'SIB':>7}{'Belebele':>9}"
-          f"{'FLORES':>8}{'STS':>7}{'MIRACL':>8}")
+    print(f"{'model':16}{'total(M)':>9}{'input(M)':>9}{'xfmr(M)':>9}{'Belebele':>10}{'MIRACL':>9}")
     for name, r in M.items():
         m = r.get("means", {})
         mir = (r.get("miracl") or {}).get("ndcg@10_mean")
         f = lambda x, w=7: (f"{x:>{w}.3f}" if isinstance(x, (int, float)) else f"{'-':>{w}}")  # noqa: E731
         print(f"{name:16}{r.get('params', 0) / 1e6:>9.0f}{r.get('input_params', 0) / 1e6:>9.1f}"
               f"{r.get('transformer_params', 0) / 1e6:>9.1f}"
-              f"{f(m.get('sib'))}{f(m.get('belebele_ndcg@10'), 9)}{f(m.get('flores_p@1'), 8)}"
-              f"{f(m.get('sts_spearman'))}{f(mir, 8)}")
+              f"{f(m.get('belebele_ndcg@10'), 10)}{f(mir, 9)}")
     # byte - subword deltas at matched transformer
     for size in ("small", "base", "large"):
         b, s = M.get(f"byte-{size}"), M.get(f"subword-{size}")
         if not (b and s):
             continue
         bx, sx = b.get("transformer_params", 0) / 1e6, s.get("transformer_params", 0) / 1e6
-        bm, sm = b.get("means", {}), s.get("means", {})
-        d = lambda k: (f"{bm[k] - sm[k]:+.3f}" if bm.get(k) is not None and sm.get(k) is not None else "-")  # noqa: E731
+        bb = (b.get("means") or {}).get("belebele_ndcg@10")
+        sb = (s.get("means") or {}).get("belebele_ndcg@10")
+        db = f"{bb - sb:+.3f}" if (bb is not None and sb is not None) else "-"
         bmir = (b.get("miracl") or {}).get("ndcg@10_mean")
         smir = (s.get("miracl") or {}).get("ndcg@10_mean")
         dmir = f"{bmir - smir:+.3f}" if bmir is not None and smir is not None else "-"
         print(f"\n{size}: byte transformer {bx:.0f}M vs subword {sx:.0f}M (matched) | "
-              f"byte-subword: SIB {d('sib')} Belebele {d('belebele_ndcg@10')} "
-              f"FLORES {d('flores_p@1')} STS {d('sts_spearman')} MIRACL {dmir}")
+              f"byte-subword: Belebele {db} MIRACL {dmir}")
     if any(r.get("qa_retrieval") for r in M.values()):
         g = lambda x, w=7: (f"{x:>{w}.3f}" if isinstance(x, (int, float)) else f"{'-':>{w}}")  # noqa: E731
         print("\nDEEP QA-RETRIEVAL — nDCG@10 (Amharic-PR am · CIRAL ha [cross-lingual]):")

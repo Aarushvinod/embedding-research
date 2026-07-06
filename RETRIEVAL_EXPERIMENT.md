@@ -63,15 +63,14 @@ comparison stays internally fair — and both ByT5/mT5 saw yo in mC4 pretraining
 | Benchmark | Pool | Languages | Axis / metric |
 |---|---|---|---|
 | Belebele | 488 | all 9 | shallow passage retrieval, nDCG@10 |
-| FLORES bitext | 1,012 | all 9 | cross-lingual sentence retrieval, P@1 |
 | MIRACL (dev) | 20k rerank pools | en zh ar te bn sw yo | deep monolingual, nDCG@10 + R@100 |
 | Amharic-PR | 20k | am | deep monolingual, nDCG@10 + R@100 |
 | CIRAL Test A | full-corpus stream → pool | ha | **cross-lingual, flagged**, nDCG@10 + R@100 |
 
-SIB and STS are dropped (`eval_battery` computes them only on request via `tasks=`). Mr.TyDi,
-IndicQA, 2AIRTC, and AfriCLIRMatrix remain wired but off the default battery (optional
-corroboration). MIRACL evaluation must use dev (test qrels are held out); report CIs for yo (119
-queries) and te's judgment-sparse dev (~2 judgments/query).
+FLORES bitext, SIB, and STS are dropped from the default (`eval_battery` computes them only on
+request via `tasks=`). Mr.TyDi, IndicQA, 2AIRTC, and AfriCLIRMatrix remain wired but off the default
+battery (optional corroboration). MIRACL evaluation must use dev (test qrels are held out); report
+CIs for yo (119 queries) and te's judgment-sparse dev (~2 judgments/query).
 
 ## Boundary-injection arms (the tokenization-mechanism probe; byte students only)
 
@@ -95,11 +94,10 @@ prints the three-arm comparison table (A = the main run's byte-small).
 The REVERSE cross-lingual axis: **African-language question → English gold passage** — the direction
 a low-resource speaker querying English Wikipedia actually needs. Benchmark `afriqa` (off the default
 battery): native human questions from `masakhane-io/afriqa` gold passages (GitHub JSONL), pool = all
-gold contexts + English distractors streamed from the MIRACL en corpus. Languages: ha (300q),
-sw (295q), yo (254q) — and **rw (Kinyarwanda, 347q) as a query-side ZERO-SHOT language** (never
-trained on; partially restores rw coverage). Backfilled additively onto every model (students +
-baselines) via `reeval(..., qa_only=True, benchmarks=('afriqa',))`; the notebook prints the
-per-language viability table.
+gold contexts + English distractors streamed from the MIRACL en corpus. Languages (trained only):
+ha (300q), sw (295q), yo (254q). Backfilled additively onto every model via
+`reeval(..., qa_only=True, benchmarks=('afriqa',))`; the notebook prints the per-language viability
+table.
 
 ## Predictions (written before running)
 
@@ -107,9 +105,7 @@ per-language viability table.
    objective purely discriminative).
 2. Byte > subword persists at every size on the deep monolingual benchmarks.
 3. byte-small vs subword-large: byte-small stays ahead on deep retrieval (the cross-size headline).
-4. FLORES bitext DROPS vs the SONAR run (no bitext teacher, no alignment term) — report as the
-   specialization trade-off, not a regression.
-5. yo scores land low for both students (teacher coverage), with the byte−subword gap still positive.
+4. yo scores land low for both students (teacher coverage), with the byte−subword gap still positive.
 
 ## How to run
 

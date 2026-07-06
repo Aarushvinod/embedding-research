@@ -37,10 +37,6 @@ LOWRES_LANGS = ["te", "bn", "sw", "yo", "am", "ha"]   # Dravidian/Indo-Aryan/Ban
 HIGHRES_LANGS = ["en", "zh", "ar"]               # anchors (incl. two non-Latin scripts)
 STUDY_LANGS = LOWRES_LANGS + HIGHRES_LANGS       # the canonical 9 (trained AND evaluated)
 
-# Zero-shot (eval-only) languages: currently none. The mechanism stays wired — any language added
-# here is evaluated on Belebele/FLORES (+ any qa benchmark covering it) but never trained on.
-ZEROSHOT_LANGS = []
-
 N_PER_LANG = 15000   # training sentences per language (× 8 langs)
 MAX_BYTES = 256      # truncation length in BYTES (byte-level => longer than subword)
 BATCH = 64
