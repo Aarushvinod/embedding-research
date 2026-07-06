@@ -5,8 +5,8 @@ retrieval step that bottlenecks multilingual RAG, and where byte-level embedding
 Four dataset shapes are supported, all reduced to one scoring path (`_score_pool`):
 
 * mteb `{cfg}-corpus/-queries/-qrels` layout (`QA_BENCH`, built by `_build_pool`):
-    IndicQA (mteb/IndicQARetrieval): Marathi, Tamil, Telugu  — small corpora; the valuable NEW coverage
-    Mr.TyDi (mteb/mrtidy):           Telugu                  — corroborates MIRACL te on a different corpus
+    Mr.TyDi (mteb/mrtidy):           Telugu + Swahili — monolingual, human TyDi questions
+    IndicQA (mteb/IndicQARetrieval): Telugu           — small pool (~250), secondary only
   The corpus *split* differs per dataset (IndicQA 'test', Mr.TyDi 'train', MIRACL 'dev'), so we try
   candidates; a max-stream cap bounds very large corpora.
 
@@ -20,16 +20,18 @@ Four dataset shapes are supported, all reduced to one scoring path (`_score_pool
     relevant to), so topics=queries + qrels + corpus are reconstructed from one split. This is the
     FORMAL Amharic benchmark; Amharic-PR corroborates it on a second (community) corpus.
 
-* cross-lingual IR (`QA_CLIR`, built by `_build_pool_clir`):
-    AfriCLIRMatrix (Ogundepo et al. 2022): Amharic + Hausa — English topics + TREC qrels from GitHub,
-    scored over the HF document corpus. The FORMAL African IR collection and the only public
-    deep-retrieval signal for Hausa.
+* cross-lingual IR (`QA_CLIR`, built by `_build_pool_clir`) — English query -> African passage, always
+  flagged as a different axis:
+    CIRAL (SIGIR 2024) Test A: Hausa — the deep-research-verified African IR collection and the only
+    public deep-retrieval signal for Hausa (715k news passages; never its 10-query dev split).
+    AfriCLIRMatrix (Ogundepo et al. 2022): kept available (am/ha), off the default battery.
 
-This gives every low-resource language a deep-retrieval signal on top of Belebele (shallow, all 9, in
-eval_battery): te/ta/mr via Indic QA; am via two monolingual Amharic corpora (formal 2AIRTC + community
-Amharic-PR); am/ha cross-lingually via AfriCLIRMatrix (English query -> African passage) — the only
-public deep-retrieval signal for Hausa; en/zh/ar/te also via MIRACL. Only Kinyarwanda still lacks a
-public deep corpus (AfriQA ships no passages), so it rests on Belebele.
+FINALIZED coverage (STUDY_LANGS te/sw/yo/am/ha + en/zh/ar): MIRACL (byte_embed/miracl.py) carries the
+monolingual deep axis for te/sw/yo/en/zh/ar; here Mr.TyDi corroborates te/sw, 2AIRTC + Amharic-PR
+carry am (monolingual), CIRAL carries ha (cross-lingual, flagged), IndicQA stays as a small-pool
+secondary for te. Belebele (eval_battery) covers all languages shallow. Dropped from the study: rw
+(no deep benchmark exists — AfriQA's gold passages are English/French text, not Kinyarwanda), ta/mr
+(IndicQA's ~250-doc pool is not deep).
 
   python -m byte_embed.qa_retrieval --selftest      # tiny pool build for indicqa + amharicpr
 """
@@ -44,8 +46,8 @@ from byte_embed.miracl import _ndcg_at_k
 
 # mteb-layout benchmarks: name -> (hf path, queries/qrels split, {our_lang: dataset_lang_config})
 QA_BENCH = {
-    "indicqa": ("mteb/IndicQARetrieval", "test", {"mr": "mr", "ta": "ta", "te": "te"}),
-    "mrtydi":  ("mteb/mrtidy",           "test", {"te": "telugu"}),
+    "indicqa": ("mteb/IndicQARetrieval", "test", {"te": "te"}),   # small pool (~250); te only (ta/mr left the study)
+    "mrtydi":  ("mteb/mrtidy",           "test", {"te": "telugu", "sw": "swahili"}),
 }
 # flat (query,passage) benchmarks: name -> spec (corpus is the passages themselves)
 QA_FLAT = {
@@ -66,11 +68,24 @@ QA_INV = {
     },
 }
 # cross-lingual IR benchmarks (`QA_CLIR`, built by `_build_pool_clir`): English topics (TSV) + TREC
-# qrels fetched from GitHub, scored over an HF document corpus streamed as JSONL. AfriCLIRMatrix
-# (Ogundepo et al. 2022) is the FORMAL African IR collection and the only public deep-retrieval signal
-# for Hausa. Cross-lingual: English query -> African passage (a different axis from the monolingual sets).
+# qrels fetched over HTTP, scored over a document corpus streamed as JSONL. Cross-lingual axis:
+# English query -> African passage — a different task from the monolingual sets, always flagged.
+#   ciral    — CIRAL (Adeyemi et al., SIGIR 2024): the deep-research-verified African IR collection;
+#              Test A split (80-100 q/lang, shallow+deep judgments; NEVER the 10-query dev). The only
+#              public deep-retrieval signal for Hausa. Corpus = real news passages (NOT the
+#              machine-translated variant).
+#   africlir — AfriCLIRMatrix (Ogundepo et al. 2022): kept available, off the default battery.
 _AFRICLIR_GH = "https://raw.githubusercontent.com/castorini/africlirmatrix/main/test"
+_CIRAL_HF = "https://huggingface.co/datasets/CIRAL/ciral/resolve/main"
 QA_CLIR = {
+    "ciral": {
+        "topics_url": _CIRAL_HF + "/ciral-{name}/topics/topics.ciral-v1.0-{code}-test-a.tsv",
+        "qrels_url":  _CIRAL_HF + "/ciral-{name}/qrels/qrels.ciral-v1.0-{code}-test-a.tsv",
+        "corpus_url": "https://huggingface.co/datasets/CIRAL/ciral-corpus/resolve/main/"
+                      "passages-v1.0/{name}_passages.jsonl",
+        "langs": {"ha": ("hausa", "ha")},       # sw/yo/so also exist; sw/yo have monolingual MIRACL
+        "did": "docid", "dtext": "text", "max_stream": 800000,   # ha corpus = 715k, full pass, cached
+    },
     "africlir": {
         "topics_url": _AFRICLIR_GH + "/queries/topics.africlirmatrix-v1.0.en.{code}.tsv",
         "qrels_url":  _AFRICLIR_GH + "/qrels/qrels.africlirmatrix-v1.0.en.{code}.txt",
@@ -289,21 +304,25 @@ def _stream_jsonl(url, timeout=180):
                     continue
 
 
-def _build_pool_clir(spec, our_lang, key, n_queries, distractors, seed, cache_dir, max_stream=400000):
-    """Cross-lingual IR: English topics (TSV) + TREC qrels from GitHub, scored over the HF document
-    corpus streamed as JSONL (relevant docs + distractors). Same return schema as the other builders;
-    returns None (graceful) if any source is unreachable or no relevant docs surface within max_stream."""
+def _build_pool_clir(spec, our_lang, key, n_queries, distractors, seed, cache_dir):
+    """Cross-lingual IR: English topics (TSV) + TREC qrels fetched over HTTP, scored over the corpus
+    streamed as JSONL (relevant docs + distractors). Corpus field names and the stream cap come from
+    the spec (`did`/`dtext`/`max_stream`; CIRAL uses docid/text, AfriCLIRMatrix id/contents). Same
+    return schema as the other builders; returns None (graceful) if any source is unreachable or no
+    relevant docs surface within the cap."""
     cache = _cache_path(cache_dir, key, n_queries, distractors, seed)
     hit = _cache_load(cache)
     if hit is not None:
         return hit
 
     name, code = spec["langs"][our_lang]
+    did_k, dtext_k = spec.get("did", "id"), spec.get("dtext", "contents")
+    max_stream = spec.get("max_stream", 400000)
     try:
-        topics = _fetch_lines(spec["topics_url"].format(code=code))
-        qrels = _fetch_lines(spec["qrels_url"].format(code=code))
+        topics = _fetch_lines(spec["topics_url"].format(name=name, code=code))
+        qrels = _fetch_lines(spec["qrels_url"].format(name=name, code=code))
     except Exception as e:  # noqa: BLE001
-        print(f"  [qa] africlir/{our_lang} topics/qrels fetch failed: {type(e).__name__}")
+        print(f"  [qa] {key} topics/qrels fetch failed: {type(e).__name__}")
         return None
 
     qid2text = {}
@@ -329,8 +348,8 @@ def _build_pool_clir(spec, our_lang, key, n_queries, distractors, seed, cache_di
     try:
         for d in _stream_jsonl(spec["corpus_url"].format(name=name)):
             seen += 1
-            did = str(d.get("id"))
-            txt = str(d.get("contents") or "")
+            did = str(d.get(did_k))
+            txt = (str(d.get("title") or "") + " " + str(d.get(dtext_k) or "")).strip()
             if did in needed and did not in id2text:
                 id2text[did] = txt
             elif len(distract) < distractors:
@@ -338,14 +357,14 @@ def _build_pool_clir(spec, our_lang, key, n_queries, distractors, seed, cache_di
             if (len(id2text) == len(needed) and len(distract) >= distractors) or seen >= max_stream:
                 break
     except Exception as e:  # noqa: BLE001
-        print(f"  [qa] africlir/{our_lang} corpus stream failed: {type(e).__name__}")
+        print(f"  [qa] {key} corpus stream failed: {type(e).__name__}")
         return None
 
     found = set(id2text)
     queries = {q: qid2text[q] for q in qids if rel[q] & found}
     rel = {q: sorted(rel[q] & found) for q in queries}
     if not queries:
-        print(f"  [qa] africlir/{our_lang}: no relevant docs within {max_stream} streamed -> skip")
+        print(f"  [qa] {key}: no relevant docs within {max_stream} streamed -> skip")
         return None
     pool_id = list(id2text) + [i for i, _ in distract]
     pool_text = list(id2text.values()) + [t for _, t in distract]
@@ -377,7 +396,7 @@ def _score_pool(encode_fn, built):
 
 
 def eval_qa_retrieval(encode_fn,
-                      benchmarks=("indicqa", "mrtydi", "amharicpr", "2airtc", "africlir"),
+                      benchmarks=("indicqa", "mrtydi", "amharicpr", "2airtc", "ciral"),
                       n_queries=250, distractors=20000, seed=0, cache_dir="checkpoints"):
     """Per-benchmark, per-language nDCG@10 / recall@100 (+ benchmark means). The RAG-retrieval axis.
     Handles mteb-layout benchmarks (`QA_BENCH`), flat query->passage ones (`QA_FLAT`), inverted-relevance

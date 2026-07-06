@@ -1,73 +1,86 @@
 # Finalized retrieval experiment — byte vs subword, BGE-M3 teacher
 
-The locked design for the paper's retrieval/QA axis. One variable changes vs the completed SONAR
-study: **the teacher**. Everything else — students, data, recipe, evaluation — is identical, so the
-two runs are directly comparable and any lift is attributable to the teacher's retrieval geometry.
+The locked design for the paper's retrieval/QA axis. vs the completed SONAR study, the go-forward run
+changes the **teacher** (SONAR → BGE-M3), the **objective** (retrieval-only InfoNCE), and the
+**language set** (deep-research-verified, below). The core comparison — byte vs subword — is entirely
+WITHIN this run: both students share the teacher, targets, data, recipe, and evaluation, so the
+tokenizer remains the only manipulated variable.
 
-## Why change the teacher
+## Languages (finalized 2026-07 via adversarially-verified deep research)
 
-The SONAR study's deep-retrieval scores were bounded by the teacher, not the students: SONAR is an
-NLLB bitext encoder trained for translation alignment (hence near-perfect FLORES bitext, ~0.17 MIRACL),
-not for asymmetric query→passage matching. Distilling a **retrieval-trained** teacher hands both
-students a retrieval-shaped embedding space while keeping training monolingual-text-only (no QA pairs
-needed — viable for low-resource languages with no supervised retrieval data).
+5 low-resource (Joshi class 0–2) + 3 high-resource anchors; every language has a deep-retrieval
+benchmark with real human queries and public relevance labels:
 
-**Teacher: `BAAI/bge-m3`** — the strongest open multilingual dense retriever (XLM-R-large backbone,
-100+ languages, 1024-d, SOTA-level MIRACL). No query/passage prefix needed; we distill its dense
-vector. `intfloat/multilingual-e5-large` is wired as the ablation teacher (`teacher_name='me5-large'`,
-`passage: ` prefix) to show the result does not depend on the teacher choice.
+| Lang | Joshi | Deep retrieval | Axis | Notes |
+|---|---|---|---|---|
+| Telugu (te) | 1 | MIRACL dev (828q/518k psgs) + Mr.TyDi + IndicQA (secondary) | monolingual | |
+| Swahili (sw) | 2 | MIRACL dev (482q/132k) + Mr.TyDi | monolingual | new |
+| Yoruba (yo) | 2 | MIRACL dev (119q/49k, "surprise language") | monolingual | new; NOT in XLM-R (see caveat) |
+| Amharic (am) | 2 | 2AIRTC (240 topics, peer-reviewed) + Amharic-PR (community) | monolingual | first-party verified |
+| Hausa (ha) | 2 | CIRAL Test A (80q/1.4k judgments, 715k news psgs) | **cross-lingual** (en query → ha passage) — flagged | |
+| English (en) | 5 | MIRACL (799q/32.9M) + Mr.TyDi | monolingual | anchor |
+| Chinese (zh) | 5 | MIRACL (393q/4.9M) | monolingual | non-Latin anchor |
+| Arabic (ar) | 5 | MIRACL (2,896q/2.1M) + Mr.TyDi | monolingual | non-Latin anchor |
 
-Known trade-off vs SONAR: XLM-R's ~100 languages cover am/ha but likely NOT Kinyarwanda (SONAR's 200
-do). rw has no deep-retrieval benchmark anyway (Belebele-only), but watch its Belebele score; if it
-craters, hybrid targets (BGE-M3 where covered, SONAR elsewhere) are a one-line mix at the cache layer.
+**Dropped:** Kinyarwanda (no deep-retrieval benchmark exists anywhere — AfriQA's gold passages are
+English/French pivot text, not Kinyarwanda), Tamil + Marathi (their only benchmark, IndicQA, has a
+~250-doc pool — not deep). **AfriQA finding:** `masakhane/afriqa-gold-passages` DOES ship `context`
+passages, but they are English/French Wikipedia text — usable only as reversed cross-lingual
+(African query → pivot passage) coverage for bem/fon/ibo/kin/twi/wol/zul; not wired.
+
+**Yoruba caveat (state in the paper):** yo is not in XLM-R/CC-100, the BGE-M3 backbone, so the teacher
+signal is weakest there. Both students inherit the same weakened targets — the byte-vs-subword
+comparison stays internally fair — and both ByT5/mT5 saw yo in mC4 pretraining. Training data is fine
+(91k usable wiki paragraphs, measured).
 
 ## Design (locked)
 
 | Axis | Setting |
 |---|---|
 | Students | `google/byt5-{small,base,large}` vs `google/mt5-{small,base,large}` (encoder-only + attn pool + 1024-d head) |
-| Objective | InfoNCE (τ=0.05, MoCo queue 8192) + alignment + relational (`objective='both'`, `rel_weight=1.0`) |
+| Teacher | **BGE-M3** (`BAAI/bge-m3`, retrieval-trained, 1024-d); `me5-large` wired as the ablation teacher |
+| Objective | **Retrieval-only: pure InfoNCE** (τ=0.05, MoCo queue 8192) — `objective='contrastive'`, `rel_weight=0` (the alignment add-on and the STS-motivated relational term are dropped) |
 | Optimizer | AdamW lr 2e-4, batch 64, **50k steps for every model (iso-step)**, bf16 |
-| Early stop | `patience` windows (of `log_every` steps) without window-avg loss improving > `min_delta`. **Default 0 = off** (exact iso-step). If enabled, `steps` is a cap; the realized `steps_run` is saved per model and must be reported |
-| Data | 9 languages (te ta mr am ha rw + en zh ar), balanced ~42k sentences/lang (~378k), unchanged |
-| Targets | BGE-M3, precomputed once, cached as `teachertargets_bge-m3_9langs_42000.npy` |
+| Early stop | `patience` windows without window-avg loss improving > `min_delta`. **Default 0 = off** (exact iso-step). If enabled, `steps` is a cap; realized `steps_run` is saved and must be reported |
+| Data | 8 languages, balanced max-min Wikipedia sentences (~42k/lang, ~336k total) |
+| Targets | BGE-M3, precomputed once, cached as `teachertargets_bge-m3_8langs_*` |
 | Pooling | `attn` for byte AND subword (fair) |
 | Checkpoints | `{name}_attn_bge-m3.pt` — per-teacher namespace, never resumes from SONAR checkpoints |
 | Baselines | mE5-base, LaBSE (same battery, same pools) |
 
-## Evaluation
+## Evaluation (retrieval-only)
 
-Headline retrieval benchmarks (nDCG@10, plus recall@100 where pools are deep):
-
-| Benchmark | Pool | Languages | Axis |
+| Benchmark | Pool | Languages | Axis / metric |
 |---|---|---|---|
-| Belebele | 488 | all 9 | shallow passage retrieval |
-| MIRACL | ~20k | en zh ar te | deep monolingual |
-| IndicQA | ~250 | mr ta te | small-pool QA |
-| Amharic-PR | ~20k | am | deep monolingual (community) |
-| 2AIRTC | 12.6k | am | deep ad-hoc IR (peer-reviewed) |
+| Belebele | 488 | all 8 | shallow passage retrieval, nDCG@10 |
+| FLORES bitext | 1,012 | all 8 | cross-lingual sentence retrieval, P@1 |
+| MIRACL (dev) | 20k rerank pools | en zh ar te sw yo | deep monolingual, nDCG@10 + R@100 |
+| Mr.TyDi | 20k rerank pools | te sw | deep monolingual QA, nDCG@10 + R@100 |
+| 2AIRTC | 12.6k (full) | am | deep ad-hoc IR (peer-reviewed), nDCG@10 + R@100 |
+| Amharic-PR | 20k | am | deep monolingual (community), nDCG@10 + R@100 |
+| CIRAL Test A | 715k stream → pool | ha | **cross-lingual, flagged**, nDCG@10 + R@100 |
+| IndicQA | ~250 | te | small-pool secondary |
 
-Mr.TyDi (te) and AfriCLIRMatrix (am/ha, cross-lingual) are still computed but reported as secondary
-(coverage-capped pool / different task axis). **The battery is retrieval-only**: SIB (classification)
-and STS were dropped when the paper narrowed to QA/retrieval (`eval_battery` computes them only on
-request via `tasks=`). FLORES bitext stays — it IS retrieval (find-the-translation P@1) and is the one
-deep-ish axis covering Kinyarwanda. Expect FLORES to DROP vs the SONAR run (the teacher is no longer a
-bitext specialist); report that honestly as the retrieval-specialization trade-off.
+SIB and STS are dropped (`eval_battery` computes them only on request via `tasks=`). AfriCLIRMatrix
+remains wired but off the default battery (superseded by CIRAL for ha; am has two monolingual sets).
+MIRACL evaluation must use dev (test qrels are held out); report CIs for yo (119 queries) and te's
+judgment-sparse dev (~2 judgments/query).
 
-## Predictions (write down before running)
+## Predictions (written before running)
 
-1. Both students' deep-retrieval scores rise substantially vs the SONAR run (teacher ceiling lifted).
-2. Byte > subword persists at every size on the deep benchmarks (the gap is representational, not
-   teacher-specific).
+1. Both students' deep-retrieval scores rise substantially vs the SONAR run (teacher ceiling lifted;
+   objective purely discriminative).
+2. Byte > subword persists at every size on the deep monolingual benchmarks.
 3. byte-small vs subword-large: byte-small stays ahead on deep retrieval (the cross-size headline).
-4. IndicQA (small pool) stays the closest benchmark; whether subword's lead survives the retrieval
-   teacher is an open question the run answers.
+4. FLORES bitext DROPS vs the SONAR run (no bitext teacher, no alignment term) — report as the
+   specialization trade-off, not a regression.
+5. yo scores land low for both students (teacher coverage), with the byte−subword gap still positive.
 
 ## How to run
 
 Colab: `notebooks/byteembed_retrieval_a100.ipynb` top-to-bottom (smoke → parallel run → baselines).
 CLI: `python -m byte_embed.run_lowresource --teacher bge-m3 --pooling attn --steps 50000 --out results/retrieval_bgem3.json`
 
-Results land in `results/retrieval_bgem3.json`; the SONAR results file is untouched, so the
-teacher-comparison table (SONAR-taught vs BGE-M3-taught, same students) falls straight out of the two
-JSONs.
+Results land in `results/retrieval_bgem3.json`. The first eval builds the retrieval pools (CIRAL
+streams its 715k-passage corpus once — the big one-time download; everything caches to
+`checkpoints/qa_*.json` and is reused by every later model).

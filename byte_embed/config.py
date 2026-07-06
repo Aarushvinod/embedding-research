@@ -20,14 +20,19 @@ FLORES_CODE = {"en": "eng_Latn", "tr": "tur_Latn", "sw": "swh_Latn", "bn": "ben_
                "ca": "cat_Latn", "fi": "fin_Latn",
                # low-resource-study languages (run_lowresource.py)
                "te": "tel_Telu", "ta": "tam_Taml", "mr": "mar_Deva", "am": "amh_Ethi",
-               "ha": "hau_Latn", "rw": "kin_Latn", "zh": "zho_Hans"}
+               "ha": "hau_Latn", "rw": "kin_Latn", "zh": "zho_Hans",
+               "yo": "yor_Latn", "so": "som_Latn"}
 
-# The low-resource byte-vs-subword study (run_lowresource.py): 6 low-resource + 3 high-resource
-# anchors, all with full uniform eval coverage (STS + retrieval + classification + bitext) and all
-# covered by the SONAR teacher. Wikipedia training floor = 42,621 sentences (Kinyarwanda).
-LOWRES_LANGS = ["te", "ta", "mr", "am", "ha", "rw"]          # Dravidian/Indo-Aryan/Semitic/Chadic/Bantu
-HIGHRES_LANGS = ["en", "zh", "ar"]                            # control anchors (low subword fertility)
-STUDY_LANGS = LOWRES_LANGS + HIGHRES_LANGS                    # the canonical 9
+# The FINALIZED retrieval study set (deep-research verified, 2026-07): 5 low-resource (Joshi class
+# 0-2) + 3 high-resource anchors. Every language has a deep-retrieval benchmark: te/sw/yo via MIRACL
+# (monolingual; te/sw also Mr.TyDi), am via 2AIRTC + Amharic-PR (monolingual), ha via CIRAL
+# (cross-lingual, flagged). Dropped: rw (no deep benchmark exists), ta/mr (IndicQA pool ~250 docs —
+# not deep). Wikipedia floors OK for all (yo = 91k usable paragraphs, measured; old rw floor gone).
+# NOTE yo is NOT in XLM-R/CC-100 (the BGE-M3 teacher's backbone) — both students inherit the same
+# weakened targets there, so byte-vs-subword stays internally fair; flag it when reporting.
+LOWRES_LANGS = ["te", "sw", "yo", "am", "ha"]    # Dravidian/Bantu/Niger-Congo/Semitic/Chadic
+HIGHRES_LANGS = ["en", "zh", "ar"]               # anchors (incl. two non-Latin scripts)
+STUDY_LANGS = LOWRES_LANGS + HIGHRES_LANGS       # the canonical 8
 
 N_PER_LANG = 15000   # training sentences per language (× 8 langs)
 MAX_BYTES = 256      # truncation length in BYTES (byte-level => longer than subword)

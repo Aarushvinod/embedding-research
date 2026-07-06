@@ -1,12 +1,12 @@
-"""Low-resource byte-vs-subword distillation study (SONAR teacher) — the A100 orchestrator.
+"""Low-resource byte-vs-subword RETRIEVAL study — the A100 orchestrator.
 
-Trains 6 students — byt5 / mt5 × {small, base, large} — distilled from a frozen **SONAR** teacher
-(1024-d; LaBSE fallback) on 9 languages (6 low-resource: te/ta/mr/am/ha/rw + 3 high-resource
-anchors: en/zh/ar). EQUAL max-min balanced training data (~42k/lang) and CACHED teacher targets
-(one teacher pass; both students train against the identical vectors). Each student is scored on the
-uniform battery — SIB-200 (classification), Belebele (retrieval), FLORES-1012 (bitext), STS — plus
-MIRACL deep retrieval (en/zh/ar/te) and a compute profile. A one-time tokenization-efficiency table
-quantifies the subword tax vs the byte UTF-8 cost.
+Trains 6 students — byt5 / mt5 × {small, base, large} — distilled from a frozen teacher (default
+SONAR; `--teacher bge-m3` for the finalized retrieval run) on 8 languages (5 low-resource:
+te/sw/yo/am/ha + 3 anchors: en/zh/ar). EQUAL max-min balanced training data (~42k/lang) and CACHED
+teacher targets (one teacher pass; both students train against the identical vectors). Retrieval-only
+scoring: Belebele + FLORES bitext (eval_battery), MIRACL deep retrieval (en/zh/ar/te/sw/yo), the QA
+benchmarks (qa_retrieval), and a compute profile. A one-time tokenization-efficiency table quantifies
+the subword tax vs the byte UTF-8 cost.
 
 INCREMENTAL + RESUMABLE: the results JSON is rewritten after every model, a model already present is
 skipped, and `*-large` checkpoints model+optimizer (a Colab disconnect just means re-running the cell).
@@ -20,8 +20,11 @@ import argparse
 import json
 from pathlib import Path
 
-# balanced objective + big negative queue + relational (STS) term; AdamW on the A100.
-OBJ = dict(objective="both", queue_size=8192, rel_weight=1.0, optimizer="adamw")
+# RETRIEVAL-ONLY objective: pure InfoNCE contrastive distillation (student_i must pick teacher_i out
+# of in-batch + queued negatives) — the discriminative geometry retrieval needs, nothing else. The
+# alignment add-on ("both") and the relational term (rel_weight — added to target STS) were dropped
+# when the paper narrowed to QA/retrieval.
+OBJ = dict(objective="contrastive", queue_size=8192, rel_weight=0.0, optimizer="adamw")
 
 # EQUAL batch 64. Per-size step schedule — bigger models train MORE: small 50k / base 75k / large 100k.
 # byte and subword are matched WITHIN each size (the primary byte-vs-subword comparison stays iso-step);
@@ -70,8 +73,8 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
     from byte_embed.teachers import (load_cached_targets, load_teacher, precompute_targets,
                                      targets_exist)
 
-    langs = ["am", "rw", "en"] if smoke else STUDY_LANGS
-    miracl_langs = (["te"] if smoke else ["en", "zh", "ar", "te"])   # the 4 of our 9 in MIRACL
+    langs = ["am", "sw", "en"] if smoke else STUDY_LANGS
+    miracl_langs = (["te"] if smoke else ["en", "zh", "ar", "te", "sw", "yo"])   # the 6 of our 8 in MIRACL
     grid = _grid(steps)
     if smoke:
         n_per_lang = 1200
@@ -214,8 +217,8 @@ def _summary(results):
             return f"{x - y:+.3f}" if (x is not None and y is not None) else "-"
         print(f"  {size:6} Belebele {d('belebele_ndcg@10')}  FLORES {d('flores_p@1')}  STS {d('sts_spearman')}")
     if any(r.get("qa_retrieval") for r in M.values()):
-        print("\nRAG-RETRIEVAL — QA open-retrieval nDCG@10 (IndicQA mr/ta/te · Mr.TyDi te · "
-              "Amharic-PR am · 2AIRTC am · AfriCLIR am/ha [cross-lingual]):")
+        print("\nRAG-RETRIEVAL — QA open-retrieval nDCG@10 (IndicQA te · Mr.TyDi te/sw · "
+              "Amharic-PR am · 2AIRTC am · CIRAL ha [cross-lingual]):")
         for name, r in M.items():
             qa = r.get("qa_retrieval")
             if qa:
@@ -223,11 +226,9 @@ def _summary(results):
                 mt = (qa.get("mrtydi") or {}).get("ndcg@10_mean")
                 am = (qa.get("amharicpr") or {}).get("ndcg@10_mean")
                 a2 = (qa.get("2airtc") or {}).get("ndcg@10_mean")
-                acl = (qa.get("africlir") or {}).get("per_lang") or {}
-                ac_am = (acl.get("am") or {}).get("ndcg@10")
-                ac_ha = (acl.get("ha") or {}).get("ndcg@10")
+                ci = ((qa.get("ciral") or {}).get("per_lang") or {}).get("ha") or {}
                 print(f"  {name:20} IndicQA {_f(iq, 7)}  Mr.TyDi {_f(mt, 7)}  Amharic-PR {_f(am, 7)}  "
-                      f"2AIRTC {_f(a2, 7)}  AfriCLIR {_f(ac_am, 7)}/{_f(ac_ha, 7)}")
+                      f"2AIRTC {_f(a2, 7)}  CIRAL-ha {_f(ci.get('ndcg@10'), 7)}")
     eff = results.get("efficiency")
     if eff:
         print("\nTOKENIZATION (subword tax vs byte UTF-8 tax, vs English, on FLORES-1012):")

@@ -17,7 +17,7 @@ import argparse
 import json
 from pathlib import Path
 
-OBJ = dict(objective="both", queue_size=8192, rel_weight=1.0, optimizer="adamw")   # same as main runs
+OBJ = dict(objective="contrastive", queue_size=8192, rel_weight=0.0, optimizer="adamw")  # same as main runs (retrieval-only InfoNCE)
 
 
 def _save(results, out):
@@ -144,8 +144,8 @@ def _summary(results):
               f"FLORES {d('flores_p@1')} STS {d('sts_spearman')} MIRACL {dmir}")
     if any(r.get("qa_retrieval") for r in M.values()):
         g = lambda x, w=7: (f"{x:>{w}.3f}" if isinstance(x, (int, float)) else f"{'-':>{w}}")  # noqa: E731
-        print("\nRAG-RETRIEVAL — QA open-retrieval nDCG@10 (IndicQA mr/ta/te · Mr.TyDi te · "
-              "Amharic-PR am · 2AIRTC am · AfriCLIR am/ha [cross-lingual]):")
+        print("\nRAG-RETRIEVAL — QA open-retrieval nDCG@10 (IndicQA te · Mr.TyDi te/sw · "
+              "Amharic-PR am · 2AIRTC am · CIRAL ha [cross-lingual]):")
         for name, r in M.items():
             qa = r.get("qa_retrieval")
             if qa:
@@ -153,11 +153,9 @@ def _summary(results):
                 mt = (qa.get("mrtydi") or {}).get("ndcg@10_mean")
                 am = (qa.get("amharicpr") or {}).get("ndcg@10_mean")
                 a2 = (qa.get("2airtc") or {}).get("ndcg@10_mean")
-                acl = (qa.get("africlir") or {}).get("per_lang") or {}
-                ac_am = (acl.get("am") or {}).get("ndcg@10")
-                ac_ha = (acl.get("ha") or {}).get("ndcg@10")
+                ci = ((qa.get("ciral") or {}).get("per_lang") or {}).get("ha") or {}
                 print(f"  {name:16} IndicQA {g(iq)}  Mr.TyDi {g(mt)}  Amharic-PR {g(am)}  "
-                      f"2AIRTC {g(a2)}  AfriCLIR {g(ac_am)}/{g(ac_ha)}")
+                      f"2AIRTC {g(a2)}  CIRAL-ha {g(ci.get('ndcg@10'))}")
 
 
 def main():
