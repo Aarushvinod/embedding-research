@@ -8,31 +8,35 @@ tokenizer remains the only manipulated variable.
 
 ## Languages (finalized 2026-07 via adversarially-verified deep research)
 
-6 low-resource (Joshi class 0–2) + 3 high-resource anchors. **ONE deep benchmark per language** —
-the one with the most passages available (simplest to track; the alternatives stay wired for optional
+6 lower-resource languages + 3 high-resource anchors. **ONE deep benchmark per language** — the one
+with the most passages available (simplest to track; the alternatives stay wired for optional
 corroboration via `benchmarks=`):
 
 | Lang | Joshi | Deep retrieval (the one) | Axis | Notes |
 |---|---|---|---|---|
 | Telugu (te) | 1 | MIRACL dev (828q / 518k psgs) | monolingual | Mr.TyDi + IndicQA off-default |
-| Swahili (sw) | 2 | MIRACL dev (482q / 132k) | monolingual | new; Mr.TyDi off-default |
-| Yoruba (yo) | 2 | MIRACL dev (119q / 49k, "surprise language") | monolingual | new; NOT in XLM-R (see caveat) |
+| Bengali (bn) | 3 | MIRACL dev (411q / 297k) | monolingual | the ONE class-rule relaxation (see below) |
+| Swahili (sw) | 2 | MIRACL dev (482q / 132k) | monolingual | Mr.TyDi off-default |
+| Yoruba (yo) | 2 | MIRACL dev (119q / 49k, "surprise language") | monolingual | NOT in XLM-R (see caveat) |
 | Amharic (am) | 2 | Amharic-PR (68,301 psgs) | monolingual | > 2AIRTC's 12,587; 2AIRTC off-default |
 | Hausa (ha) | 2 | CIRAL Test A (80q / 715k news psgs) | **cross-lingual** (en query → ha passage) — flagged | |
-| Somali (so) | 1 | CIRAL Test A (99q / ~1M news psgs) | **cross-lingual** — flagged | **ZERO-SHOT: eval-only, never trained** (wiki ~9k articles, below the training floor) |
 | English (en) | 5 | MIRACL (799q / 32.9M) | monolingual | anchor |
 | Chinese (zh) | 5 | MIRACL (393q / 4.9M) | monolingual | non-Latin anchor |
 | Arabic (ar) | 5 | MIRACL (2,896q / 2.1M) | monolingual | non-Latin anchor |
 
-Somali doubles as the **unseen-language test**: neither student trains on a single Somali sentence,
-so its Belebele/FLORES/CIRAL scores measure zero-shot generalization — a natural tokenizer-free
-selling point (bytes have no unseen-vocabulary problem).
+**Bengali (Joshi class 3) is the one deliberate relaxation of the class 0–2 rule**, and it is stated
+as such in the paper: the adversarially-verified sweep found NO remaining class 0–2 language with any
+usable deep-retrieval benchmark (Somali is CIRAL-only and its ~9k-article Wikipedia cannot meet the
+training floor; Tigrinya's TiQuAD is not publicly distributed; Sinhala/Nepali/Khmer/Lao/Burmese have
+nothing real). Among the verified backfill candidates (bn/th/id, all class 3), Bengali has the
+strongest case: monolingual MIRACL with human judgments, a fifth script (Bengali–Assamese) for the
+study, and 270M speakers served by thin per-capita NLP resources.
 
 **Dropped:** Kinyarwanda (no deep-retrieval benchmark exists anywhere — AfriQA's gold passages are
 English/French pivot text, not Kinyarwanda), Tamil + Marathi (their only benchmark, IndicQA, has a
-~250-doc pool — not deep). **AfriQA finding:** `masakhane/afriqa-gold-passages` DOES ship `context`
-passages, but they are English/French Wikipedia text — usable only as reversed cross-lingual
-(African query → pivot passage) coverage for bem/fon/ibo/kin/twi/wol/zul; not wired.
+~250-doc pool — not deep), Somali (CIRAL-only + untrainable wiki). **AfriQA finding:**
+`masakhane/afriqa-gold-passages` DOES ship `context` passages, but they are English/French Wikipedia
+text — usable only as reversed cross-lingual coverage for bem/fon/ibo/kin/twi/wol/zul; not wired.
 
 **Yoruba caveat (state in the paper):** yo is not in XLM-R/CC-100, the BGE-M3 backbone, so the teacher
 signal is weakest there. Both students inherit the same weakened targets — the byte-vs-subword
@@ -48,8 +52,8 @@ comparison stays internally fair — and both ByT5/mT5 saw yo in mC4 pretraining
 | Objective | **Retrieval-only: pure InfoNCE** (τ=0.05, MoCo queue 8192) — `objective='contrastive'`, `rel_weight=0` (the alignment add-on and the STS-motivated relational term are dropped) |
 | Optimizer | AdamW lr 2e-4, batch 64, **50k steps for every model (iso-step)**, bf16 |
 | Early stop | `patience` windows without window-avg loss improving > `min_delta`. **Default 0 = off** (exact iso-step). If enabled, `steps` is a cap; realized `steps_run` is saved and must be reported |
-| Data | 8 languages, balanced max-min Wikipedia sentences (~42k/lang, ~336k total) |
-| Targets | BGE-M3, precomputed once, cached as `teachertargets_bge-m3_8langs_*` |
+| Data | 9 languages, balanced max-min Wikipedia sentences (~42k/lang, ~378k total) |
+| Targets | BGE-M3, precomputed once, cached per language-LIST tag (`teachertargets_bge-m3_te-bn-sw-..._42000`) |
 | Pooling | `attn` for byte AND subword (fair) |
 | Checkpoints | `{name}_attn_bge-m3.pt` — per-teacher namespace (+ `_b-{arm}` for boundary arms) |
 | Baselines | **BGE-M3 (the teacher — measures the ceiling per benchmark)**, mE5-base, LaBSE |
@@ -58,11 +62,11 @@ comparison stays internally fair — and both ByT5/mT5 saw yo in mC4 pretraining
 
 | Benchmark | Pool | Languages | Axis / metric |
 |---|---|---|---|
-| Belebele | 488 | all 8 + so | shallow passage retrieval, nDCG@10 |
-| FLORES bitext | 1,012 | all 8 + so | cross-lingual sentence retrieval, P@1 |
-| MIRACL (dev) | 20k rerank pools | en zh ar te sw yo | deep monolingual, nDCG@10 + R@100 |
+| Belebele | 488 | all 9 | shallow passage retrieval, nDCG@10 |
+| FLORES bitext | 1,012 | all 9 | cross-lingual sentence retrieval, P@1 |
+| MIRACL (dev) | 20k rerank pools | en zh ar te bn sw yo | deep monolingual, nDCG@10 + R@100 |
 | Amharic-PR | 20k | am | deep monolingual, nDCG@10 + R@100 |
-| CIRAL Test A | full-corpus stream → pool | ha, so (zero-shot) | **cross-lingual, flagged**, nDCG@10 + R@100 |
+| CIRAL Test A | full-corpus stream → pool | ha | **cross-lingual, flagged**, nDCG@10 + R@100 |
 
 SIB and STS are dropped (`eval_battery` computes them only on request via `tasks=`). Mr.TyDi,
 IndicQA, 2AIRTC, and AfriCLIRMatrix remain wired but off the default battery (optional

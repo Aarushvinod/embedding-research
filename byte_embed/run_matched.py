@@ -40,8 +40,8 @@ def run(out="results/matched.json", sizes=("small", "base"), steps=50000, batch=
     from byte_embed.teachers import (load_cached_targets, load_teacher, precompute_targets,
                                      targets_exist)
 
-    langs = ["am", "rw", "en"] if smoke else STUDY_LANGS
-    miracl_langs = ["te"] if smoke else ["en", "zh", "ar", "te"]
+    langs = ["am", "sw", "en"] if smoke else STUDY_LANGS
+    miracl_langs = ["te"] if smoke else ["en", "zh", "ar", "te", "bn", "sw", "yo"]
     if smoke:
         n_per_lang, steps, sizes = 1200, 80, ("small",)
     grid = [(f"{v}-{s}", v, s) for s in sizes for v in ("byte", "subword")]
@@ -56,7 +56,7 @@ def run(out="results/matched.json", sizes=("small", "base"), steps=50000, batch=
     # balanced data + cached SONAR targets (reuses the main runs' cache; no teacher reload) -----------
     balanced = load_balanced_sentences(langs, n_per_lang=n_per_lang, cache_dir=ckpt_dir)
     floor = min(len(v) for v in balanced.values())
-    tag = f"{len(langs)}langs_{floor}"
+    tag = f"{'-'.join(langs)}_{floor}"     # language-list tag (count-based tags collide across sets)
     if targets_exist(ckpt_dir, teacher_name, tag):
         sentences, sent_langs, targets = load_cached_targets(ckpt_dir, teacher_name, tag)
     else:
@@ -144,14 +144,13 @@ def _summary(results):
               f"FLORES {d('flores_p@1')} STS {d('sts_spearman')} MIRACL {dmir}")
     if any(r.get("qa_retrieval") for r in M.values()):
         g = lambda x, w=7: (f"{x:>{w}.3f}" if isinstance(x, (int, float)) else f"{'-':>{w}}")  # noqa: E731
-        print("\nDEEP QA-RETRIEVAL — nDCG@10 (Amharic-PR am · CIRAL ha + zero-shot so [cross-lingual]):")
+        print("\nDEEP QA-RETRIEVAL — nDCG@10 (Amharic-PR am · CIRAL ha [cross-lingual]):")
         for name, r in M.items():
             qa = r.get("qa_retrieval")
             if qa:
                 am = (qa.get("amharicpr") or {}).get("ndcg@10_mean")
                 cl = (qa.get("ciral") or {}).get("per_lang") or {}
-                print(f"  {name:16} Amharic-PR {g(am)}  CIRAL-ha {g((cl.get('ha') or {}).get('ndcg@10'))}  "
-                      f"CIRAL-so {g((cl.get('so') or {}).get('ndcg@10'))}")
+                print(f"  {name:16} Amharic-PR {g(am)}  CIRAL-ha {g((cl.get('ha') or {}).get('ndcg@10'))}")
 
 
 def main():

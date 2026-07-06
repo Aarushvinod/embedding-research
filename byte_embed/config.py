@@ -23,22 +23,23 @@ FLORES_CODE = {"en": "eng_Latn", "tr": "tur_Latn", "sw": "swh_Latn", "bn": "ben_
                "ha": "hau_Latn", "rw": "kin_Latn", "zh": "zho_Hans",
                "yo": "yor_Latn", "so": "som_Latn"}
 
-# The FINALIZED retrieval study set (deep-research verified, 2026-07): 5 low-resource (Joshi class
-# 0-2) + 3 high-resource anchors. Every language has a deep-retrieval benchmark: te/sw/yo via MIRACL
-# (monolingual; te/sw also Mr.TyDi), am via 2AIRTC + Amharic-PR (monolingual), ha via CIRAL
-# (cross-lingual, flagged). Dropped: rw (no deep benchmark exists), ta/mr (IndicQA pool ~250 docs —
-# not deep). Wikipedia floors OK for all (yo = 91k usable paragraphs, measured; old rw floor gone).
+# The FINALIZED retrieval study set (deep-research verified, 2026-07): 6 lower-resource languages +
+# 3 high-resource anchors. Every language has ONE deep-retrieval benchmark: te/bn/sw/yo via MIRACL
+# (monolingual, human judgments), am via Amharic-PR (monolingual), ha via CIRAL (cross-lingual,
+# flagged). Joshi classes: te=1, sw/yo/am/ha=2, bn=3 — Bengali is the one deliberate relaxation of
+# the class 0-2 rule (no remaining class 0-2 language has ANY usable deep benchmark; bn has the best
+# monolingual coverage of the backfill candidates). Dropped: rw (no deep benchmark exists), ta/mr
+# (IndicQA pool ~250 docs — not deep), so (CIRAL-only + wiki too small to train).
+# Wikipedia floors OK for all (yo = 91k usable paragraphs, bn = 143k articles, measured).
 # NOTE yo is NOT in XLM-R/CC-100 (the BGE-M3 teacher's backbone) — both students inherit the same
 # weakened targets there, so byte-vs-subword stays internally fair; flag it when reporting.
-LOWRES_LANGS = ["te", "sw", "yo", "am", "ha"]    # Dravidian/Bantu/Niger-Congo/Semitic/Chadic
+LOWRES_LANGS = ["te", "bn", "sw", "yo", "am", "ha"]   # Dravidian/Indo-Aryan/Bantu/Niger-Congo/Semitic/Chadic
 HIGHRES_LANGS = ["en", "zh", "ar"]               # anchors (incl. two non-Latin scripts)
-STUDY_LANGS = LOWRES_LANGS + HIGHRES_LANGS       # the canonical 8 (trained AND evaluated)
+STUDY_LANGS = LOWRES_LANGS + HIGHRES_LANGS       # the canonical 9 (trained AND evaluated)
 
-# 6th low-resource language: Somali (Joshi 1) — EVAL-ONLY / zero-shot. Its Wikipedia (~9k articles)
-# is far below the ~42k training floor, so it is never trained on; it is evaluated via Belebele +
-# FLORES (shallow) and CIRAL (deep, cross-lingual). Unseen-language eval is itself a tokenizer-free
-# selling point: byte models have no unseen-vocabulary problem.
-ZEROSHOT_LANGS = ["so"]
+# Zero-shot (eval-only) languages: currently none. The mechanism stays wired — any language added
+# here is evaluated on Belebele/FLORES (+ any qa benchmark covering it) but never trained on.
+ZEROSHOT_LANGS = []
 
 N_PER_LANG = 15000   # training sentences per language (× 8 langs)
 MAX_BYTES = 256      # truncation length in BYTES (byte-level => longer than subword)

@@ -108,8 +108,7 @@ def reeval(results_path, pooling, ckpt_dir="checkpoints", device="cuda", langs=N
         am = (qa.get("amharicpr") or {}).get("ndcg@10_mean")
         cl = (qa.get("ciral") or {}).get("per_lang") or {}
         print(f"  [reeval] {name}: saved | AmharicPR={am} "
-              f"CIRAL-ha={(cl.get('ha') or {}).get('ndcg@10')} "
-              f"CIRAL-so={(cl.get('so') or {}).get('ndcg@10')}")
+              f"CIRAL-ha={(cl.get('ha') or {}).get('ndcg@10')}")
         if "cuda" in str(device):
             torch.cuda.empty_cache()
 

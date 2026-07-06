@@ -1,12 +1,12 @@
 """Low-resource byte-vs-subword RETRIEVAL study — the A100 orchestrator.
 
 Trains 6 students — byt5 / mt5 × {small, base, large} — distilled from a frozen teacher (default
-SONAR; `--teacher bge-m3` for the finalized retrieval run) on 8 languages (5 low-resource:
-te/sw/yo/am/ha + 3 anchors: en/zh/ar). EQUAL max-min balanced training data (~42k/lang) and CACHED
+SONAR; `--teacher bge-m3` for the finalized retrieval run) on 9 languages (6 lower-resource:
+te/bn/sw/yo/am/ha + 3 anchors: en/zh/ar). EQUAL max-min balanced training data (~42k/lang) and CACHED
 teacher targets (one teacher pass; both students train against the identical vectors). Retrieval-only
-scoring: Belebele + FLORES bitext (eval_battery), MIRACL deep retrieval (en/zh/ar/te/sw/yo), the QA
-benchmarks (qa_retrieval), and a compute profile. A one-time tokenization-efficiency table quantifies
-the subword tax vs the byte UTF-8 cost.
+scoring: Belebele + FLORES bitext (eval_battery), MIRACL deep retrieval (en/zh/ar/te/bn/sw/yo), the
+QA benchmarks (qa_retrieval), and a compute profile. A one-time tokenization-efficiency table
+quantifies the subword tax vs the byte UTF-8 cost.
 
 INCREMENTAL + RESUMABLE: the results JSON is rewritten after every model, a model already present is
 skipped, and `*-large` checkpoints model+optimizer (a Colab disconnect just means re-running the cell).
@@ -62,7 +62,7 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
     makes `steps` a cap — the realized step count lands in the results as `steps_run`.
     `boundary` ('teacher'|'random') runs the boundary-injection arms: byte students only, markers
     inserted into all student inputs (train AND eval); teacher targets stay clean. Use a separate
-    `out` file per arm. Zero-shot: ZEROSHOT_LANGS (Somali) are EVALUATED but never trained on."""
+    `out` file per arm. ZEROSHOT_LANGS (currently none) are EVALUATED but never trained on."""
     import torch
 
     from byte_embed.boundaries import make_transform
@@ -78,8 +78,8 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
                                      targets_exist)
 
     langs = ["am", "sw", "en"] if smoke else STUDY_LANGS
-    eval_langs = langs + ([] if smoke else ZEROSHOT_LANGS)   # Somali: eval-only (wiki too small to train)
-    miracl_langs = (["te"] if smoke else ["en", "zh", "ar", "te", "sw", "yo"])   # the 6 of our 8 in MIRACL
+    eval_langs = langs + ([] if smoke else ZEROSHOT_LANGS)   # zero-shot langs: eval-only, never trained
+    miracl_langs = (["te"] if smoke else ["en", "zh", "ar", "te", "bn", "sw", "yo"])  # 7 of our 9 in MIRACL
     grid = _grid(steps)
     if smoke:
         n_per_lang = 1200
@@ -99,7 +99,10 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
     # 1) balanced training data + 2) teacher targets (cached: one pass, all students reuse) --------
     balanced = load_balanced_sentences(langs, n_per_lang=n_per_lang, cache_dir=ckpt_dir)
     floor = min(len(v) for v in balanced.values())
-    tag = f"{len(langs)}langs_{floor}"
+    # tag carries the language LIST (not just the count) — a count-based tag would collide between
+    # different 9-language sets (e.g. the old ta/mr/rw set vs the new bn/sw/yo set) and silently
+    # reuse the wrong cached targets.
+    tag = f"{'-'.join(langs)}_{floor}"
     if targets_exist(ckpt_dir, teacher_name, tag):            # parallel workers hit this -> no teacher
         sentences, sent_langs, targets = load_cached_targets(ckpt_dir, teacher_name, tag)
     else:
@@ -230,16 +233,14 @@ def _summary(results):
             return f"{x - y:+.3f}" if (x is not None and y is not None) else "-"
         print(f"  {size:6} Belebele {d('belebele_ndcg@10')}  FLORES {d('flores_p@1')}  STS {d('sts_spearman')}")
     if any(r.get("qa_retrieval") for r in M.values()):
-        print("\nDEEP QA-RETRIEVAL — nDCG@10 (Amharic-PR am · CIRAL ha + zero-shot so [cross-lingual]):")
+        print("\nDEEP QA-RETRIEVAL — nDCG@10 (Amharic-PR am · CIRAL ha [cross-lingual]):")
         for name, r in M.items():
             qa = r.get("qa_retrieval")
             if qa:
                 am = (qa.get("amharicpr") or {}).get("ndcg@10_mean")
                 cl = (qa.get("ciral") or {}).get("per_lang") or {}
-                ci_ha = (cl.get("ha") or {}).get("ndcg@10")
-                ci_so = (cl.get("so") or {}).get("ndcg@10")
-                print(f"  {name:20} Amharic-PR {_f(am, 7)}  CIRAL-ha {_f(ci_ha, 7)}  "
-                      f"CIRAL-so {_f(ci_so, 7)}")
+                print(f"  {name:20} Amharic-PR {_f(am, 7)}  "
+                      f"CIRAL-ha {_f((cl.get('ha') or {}).get('ndcg@10'), 7)}")
     eff = results.get("efficiency")
     if eff:
         print("\nTOKENIZATION (subword tax vs byte UTF-8 tax, vs English, on FLORES-1012):")
