@@ -96,6 +96,21 @@ QA_CLIR = {
         "langs": {"am": ("amharic", "amh"), "ha": ("hausa", "hau")},   # our_lang -> (corpus_name, code)
     },
 }
+# REVERSED cross-lingual (XOR) benchmark: AfriQA gold passages — AFRICAN-language question -> ENGLISH
+# gold passage (the direction a low-resource speaker querying English Wikipedia needs). Queries are
+# native human questions from the masakhane GitHub release (JSONL); the pool = every gold context
+# (train/dev/test) + English distractors streamed from the MIRACL en corpus. OFF the default battery —
+# a viability probe for the reverse axis. 'rw' (Kinyarwanda, 347 test questions) rides along as a
+# query-side ZERO-SHOT language (never trained on).
+QA_XOR = {
+    "afriqa": {
+        "url": "https://github.com/masakhane-io/afriqa/raw/main/data/gold_passages/"
+               "{code}/gold_span_passages.afriqa.{code}.en.{split}.json",
+        "langs": {"ha": "hau", "sw": "swa", "yo": "yor", "rw": "kin"},
+        "query_splits": ("test",), "pool_splits": ("train", "dev", "test"),
+        "distractor_corpus": ("mteb/MIRACLRetrieval", "en", "dev"),
+    },
+}
 _CORPUS_SPLITS = ("test", "train", "dev", "corpus")     # the corpus split varies by dataset
 
 
@@ -373,6 +388,62 @@ def _build_pool_clir(spec, our_lang, key, n_queries, distractors, seed, cache_di
     return _cache_save(cache, queries, rel, pool_id, pool_text)
 
 
+def _build_pool_afriqa(spec, our_lang, key, n_queries, distractors, seed, cache_dir):
+    """AfriQA XOR: native African-language questions -> ENGLISH gold passages (JSONL from GitHub).
+    Pool = all gold contexts across pool_splits (natural confusables) + English distractors streamed
+    from the MIRACL en corpus. Same return schema as the other builders."""
+    cache = _cache_path(cache_dir, key, n_queries, distractors, seed)
+    hit = _cache_load(cache)
+    if hit is not None:
+        return hit
+
+    code = spec["langs"][our_lang]
+    ctx_id, id2text, rows = {}, {}, []
+    try:
+        for split in spec["pool_splits"]:
+            try:
+                lines = _fetch_lines(spec["url"].format(code=code, split=split))
+            except Exception:  # noqa: BLE001 — a split may not exist for this language
+                continue
+            for ln in lines:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                r = json.loads(ln)
+                txt = (str(r.get("title") or "") + " " + str(r.get("context") or "")).strip()
+                pid = ctx_id.setdefault(txt, f"g{len(ctx_id)}")
+                id2text[pid] = txt
+                if split in spec["query_splits"]:
+                    rows.append((f"{split}-{r.get('id')}", str(r.get("question_lang") or ""), pid))
+    except Exception as e:  # noqa: BLE001
+        print(f"  [qa] {key} fetch failed: {type(e).__name__}")
+        return None
+    if not rows:
+        print(f"  [qa] {key}: no queries")
+        return None
+
+    rng = np.random.default_rng(seed)
+    rng.shuffle(rows)
+    rows = rows[:n_queries]
+    queries = {qid: q for qid, q, _ in rows if q}
+    rel = {qid: {pid} for qid, q, pid in rows if q}
+
+    pool_id = list(id2text)                                   # every gold context (incl. non-sampled)
+    pool_text = [id2text[i] for i in pool_id]
+    path, cfg, prefer = spec["distractor_corpus"]             # top up with English distractors
+    cs = _corpus_stream(path, cfg, prefer)
+    if cs is not None:
+        seen = 0
+        for d in cs:
+            seen += 1
+            pool_id.append(f"d{seen}")
+            pool_text.append((str(d.get("title") or "") + " " + str(d.get("text") or "")).strip())
+            if seen >= distractors:
+                break
+    _cache_save(cache, queries, rel, pool_id, pool_text)
+    return queries, rel, pool_id, pool_text
+
+
 def _score_pool(encode_fn, built):
     """Encode queries + pool, return nDCG@10 / recall@100 over the (queries, rel, pool) tuple."""
     from common.eval import l2norm
@@ -435,6 +506,11 @@ def eval_qa_retrieval(encode_fn,
             spec = QA_CLIR[bench]
             for our_lang in spec["langs"]:
                 per[our_lang] = safe(f"{bench}:{our_lang}", lambda l=our_lang: _build_pool_clir(
+                    spec, l, f"{bench}_{l}", n_queries, distractors, seed, cache_dir))
+        elif bench in QA_XOR:
+            spec = QA_XOR[bench]
+            for our_lang in spec["langs"]:
+                per[our_lang] = safe(f"{bench}:{our_lang}", lambda l=our_lang: _build_pool_afriqa(
                     spec, l, f"{bench}_{l}", n_queries, distractors, seed, cache_dir))
         else:
             print(f"  [qa] unknown benchmark {bench!r} -> skip")

@@ -57,9 +57,11 @@ def _load_enc(name, bm, pooling, ckpt_dir, teacher_dim, device, tsuf=""):
 
 def reeval(results_path, pooling, ckpt_dir="checkpoints", device="cuda", langs=None,
            miracl_langs=("en", "zh", "ar", "te"), n_queries=250, distractors=20000,
-           qa_only=False, out=None):
+           qa_only=False, out=None, benchmarks=None):
     """Re-eval every model in `results_path`. qa_only=True just adds the missing QA-retrieval (fast);
-    otherwise also refreshes SIB/Belebele/FLORES/STS + MIRACL (holistic). Saves after each model."""
+    otherwise also refreshes the battery + MIRACL (holistic). Saves after each model.
+    `benchmarks` (tuple) restricts/extends the QA benchmarks and merges ADDITIVELY into the model's
+    existing qa_retrieval dict — e.g. benchmarks=('afriqa',) backfills just the AfriQA XOR probe."""
     import torch
 
     from byte_embed.eval_mteb import eval_battery
@@ -76,7 +78,8 @@ def reeval(results_path, pooling, ckpt_dir="checkpoints", device="cuda", langs=N
           f"teacher={teacher}, {'QA only' if qa_only else 'full battery + MIRACL + QA'}) ===")
 
     for name, bm in list(results.get("models", {}).items()):
-        if qa_only and bm.get("qa_retrieval"):
+        have = bm.get("qa_retrieval") or {}
+        if qa_only and (all(b in have for b in benchmarks) if benchmarks else bool(have)):
             print(f"  [reeval] {name}: already has QA -> skip")
             continue
         # boundary-arm models: per-arm checkpoint namespace + the arm's input transform at eval
@@ -98,8 +101,12 @@ def reeval(results_path, pooling, ckpt_dir="checkpoints", device="cuda", langs=N
                 bm.update(eval_battery(enc, langs))
                 bm["miracl"] = eval_miracl_langs(enc, list(miracl_langs), n_queries=n_queries,
                                                  distractors=distractors, cache_dir=ckpt_dir)
-            bm["qa_retrieval"] = eval_qa_retrieval(enc, n_queries=n_queries, distractors=distractors,
-                                                   cache_dir=ckpt_dir)
+            kw = {} if benchmarks is None else {"benchmarks": tuple(benchmarks)}
+            qa_new = eval_qa_retrieval(enc, n_queries=n_queries, distractors=distractors,
+                                       cache_dir=ckpt_dir, **kw)
+            merged = dict(bm.get("qa_retrieval") or {})       # additive: keep other benchmarks' numbers
+            merged.update(qa_new)
+            bm["qa_retrieval"] = merged
         except Exception as e:  # noqa: BLE001
             print(f"  [reeval] {name}: eval failed {type(e).__name__}: {e}")
             continue

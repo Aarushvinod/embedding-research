@@ -87,7 +87,19 @@ queries) and te's judgment-sparse dev (~2 judgments/query).
 Teacher targets stay clean; the transform applies to the student's training inputs AND all its eval
 inputs. Reading: B > C ≈ A → segmentation info genuinely helps; B ≈ C > A → any markers help
 (artifact — no credit to the tokenizer); B ≈ C ≈ A → byte needs nothing from segmentation.
-Sequencing: run B first (byte-small only, 50k); build C only if B > A materially.
+**BOTH arms run** in the notebook (byte-small each, 50k, back to back, resumable); the notebook cell
+prints the three-arm comparison table (A = the main run's byte-small).
+
+## AfriQA cross-lingual viability probe (eval-only)
+
+The REVERSE cross-lingual axis: **African-language question → English gold passage** — the direction
+a low-resource speaker querying English Wikipedia actually needs. Benchmark `afriqa` (off the default
+battery): native human questions from `masakhane-io/afriqa` gold passages (GitHub JSONL), pool = all
+gold contexts + English distractors streamed from the MIRACL en corpus. Languages: ha (300q),
+sw (295q), yo (254q) — and **rw (Kinyarwanda, 347q) as a query-side ZERO-SHOT language** (never
+trained on; partially restores rw coverage). Backfilled additively onto every model (students +
+baselines) via `reeval(..., qa_only=True, benchmarks=('afriqa',))`; the notebook prints the
+per-language viability table.
 
 ## Predictions (written before running)
 
