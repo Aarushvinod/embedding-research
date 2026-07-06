@@ -56,7 +56,7 @@ comparison stays internally fair — and both ByT5/mT5 saw yo in mC4 pretraining
 | Targets | BGE-M3, precomputed once, cached per language-LIST tag (`teachertargets_bge-m3_te-bn-sw-..._42000`) |
 | Pooling | `attn` for byte AND subword (fair) |
 | Checkpoints | `{name}_attn_bge-m3.pt` — per-teacher namespace (+ `_b-{arm}` for boundary arms) |
-| Baselines | **BGE-M3 (the teacher — measures the ceiling per benchmark)**, mE5-base, LaBSE |
+| Baselines | **The teacher only (BGE-M3)** — its scores are the per-benchmark ceiling; no third-party baselines are measured in this run (mE5/LaBSE reference numbers live in the SONAR-run results) |
 
 ## Evaluation (retrieval-only, one deep benchmark per language)
 

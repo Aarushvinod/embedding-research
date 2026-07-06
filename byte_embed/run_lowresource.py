@@ -171,11 +171,12 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
             print(f"  [{name}] FAILED: {type(e).__name__}: {e}")
             torch.cuda.empty_cache()
 
-    # 5) reference baselines — incl. BGE-M3 itself (the teacher ceiling per benchmark) -------------
+    # 5) baseline = THE TEACHER only (its scores are the per-benchmark ceiling the students chase).
+    # mE5/LaBSE reference numbers already exist in the SONAR-run results if ever needed.
     from sentence_transformers import SentenceTransformer
-    baselines = [("BGE-M3", "BAAI/bge-m3", ""),              # the teacher: measures the ceiling
-                 ("mE5-base", "intfloat/multilingual-e5-base", "query: "),
-                 ("LaBSE", "sentence-transformers/LaBSE", "")]
+    _teacher_baseline = {"bge-m3": ("BGE-M3", "BAAI/bge-m3", ""),
+                         "me5-large": ("mE5-large", "intfloat/multilingual-e5-large", "passage: ")}
+    baselines = [_teacher_baseline[teacher_name]] if teacher_name in _teacher_baseline else []
     if smoke or not with_baselines:        # parallel workers skip baselines; orchestrator runs them once
         baselines = []
     for bname, mid, prefix in baselines:
