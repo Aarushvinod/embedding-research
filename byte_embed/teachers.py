@@ -93,6 +93,31 @@ class SonarHFTeacher:
         return _l2(np.concatenate(out, 0))
 
 
+class RetrievalTeacher:
+    """Retrieval-trained teacher via sentence-transformers — the retrieval-study teachers.
+
+    Unlike SONAR (a bitext/translation encoder), these models were TRAINED for dense retrieval, so
+    distilling them hands the students a retrieval-shaped geometry (the deep-retrieval ceiling of the
+    SONAR runs was the teacher, not the students). Language-agnostic encode: `source_lang` accepted
+    and ignored. `prefix` is prepended to every sentence (mE5 wants its 'passage: ' role marker;
+    BGE-M3 needs none). Both are 1024-d, so the student head is unchanged vs the SONAR runs."""
+
+    def __init__(self, model_id, name, prefix="", device="cuda"):
+        from sentence_transformers import SentenceTransformer
+
+        self.name = name
+        self.prefix = prefix
+        self._m = SentenceTransformer(model_id, device=device)
+        self.dim = self._m.get_sentence_embedding_dimension()
+
+    def encode(self, texts, source_lang=None, batch_size=64):
+        if not texts:
+            return np.zeros((0, self.dim), np.float32)
+        return self._m.encode([self.prefix + t for t in texts], batch_size=batch_size,
+                              normalize_embeddings=True, convert_to_numpy=True,
+                              show_progress_bar=False)
+
+
 class LabseTeacher:
     """Fallback teacher: LaBSE (768-d) via sentence-transformers. `source_lang` ignored."""
 
@@ -113,9 +138,19 @@ class LabseTeacher:
 
 
 def load_teacher(name="sonar", device="cuda"):
-    """Load the teacher. For SONAR, prefer the official `sonar-space`/fairseq2 stack (source of
-    truth) if it's installed; otherwise use the fairseq2-free HF port (faithful, validated to
-    match); LaBSE is only a last resort. All three expose the same `encode(texts, source_lang)`."""
+    """Load the teacher. `sonar` (default): official `sonar-space`/fairseq2 stack if installed, else
+    the fairseq2-free HF port, else LaBSE. `bge-m3` / `me5-large`: retrieval-trained teachers for the
+    retrieval study. All expose the same `encode(texts, source_lang)` (retrieval teachers ignore
+    source_lang), so the cached-targets pipeline is teacher-agnostic."""
+    if name in ("bge-m3", "bgem3"):
+        t = RetrievalTeacher("BAAI/bge-m3", "bge-m3", device=device)
+        print(f"  [teacher] BGE-M3 (BAAI/bge-m3) loaded — retrieval-trained, {t.dim}-d")
+        return t
+    if name in ("me5-large", "me5"):
+        t = RetrievalTeacher("intfloat/multilingual-e5-large", "me5-large",
+                             prefix="passage: ", device=device)
+        print(f"  [teacher] mE5-large loaded — retrieval-trained, {t.dim}-d ('passage: ' prefix)")
+        return t
     if name == "sonar":
         try:
             t = SonarTeacher(device=device)

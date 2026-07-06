@@ -77,7 +77,8 @@ def run(out="results/matched.json", sizes=("small", "base"), steps=50000, batch=
             print(f"\n=== {name}  total={total / 1e6:.0f}M  input={emb / 1e6:.1f}M  "
                   f"TRANSFORMER={xfmr / 1e6:.1f}M  (random init, {steps}x{batch}) ===")
             torch.cuda.reset_peak_memory_stats()
-            cpath = str(Path(ckpt_dir) / f"matched_{name}_{pooling}.pt")
+            tsuf = "" if teacher_name == "sonar" else f"_{teacher_name}"   # per-teacher ckpt namespace
+            cpath = str(Path(ckpt_dir) / f"matched_{name}_{pooling}{tsuf}.pt")
             distill(student, None, sentences, device=device, steps=steps, batch=batch,
                     log_every=max(200, steps // 100), ckpt_path=cpath, targets=targets, **OBJ)
 

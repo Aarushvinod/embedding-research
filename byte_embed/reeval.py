@@ -6,12 +6,11 @@ writing the refreshed metrics back into the JSON. Use this to backfill the RAG-r
 get a holistic, consistent results file) for models you've already paid to train.
 
 The orchestrators SKIP models already in results, so a plain re-run won't add new evals to old models —
-this does. Pass the pooling the run used (byte/subword 50k = 'attn'; UCD/matched = 'mean'). MIRACL/QA
+this does. Pass the pooling the run used (byte/subword 50k = 'attn'; matched = 'mean'). MIRACL/QA
 pools are cached on Drive, so the cost is just re-encoding.
 
   from byte_embed.reeval import reeval
   reeval('results/byte_lowresource_attn.json', pooling='attn')   # byte + subword
-  reeval('results/ucd_lowresource.json',       pooling='mean')   # UCD
   reeval('results/matched.json',               pooling='mean')   # matched-transformer
   reeval('results/byte_lowresource_attn.json', pooling='attn', qa_only=True)  # fast: only add QA
 """
@@ -21,8 +20,9 @@ import json
 from pathlib import Path
 
 
-def _load_enc(name, bm, pooling, ckpt_dir, teacher_dim, device):
-    """Return an encode_fn for one saved model (rebuild + load checkpoint), or None if unavailable."""
+def _load_enc(name, bm, pooling, ckpt_dir, teacher_dim, device, tsuf=""):
+    """Return an encode_fn for one saved model (rebuild + load checkpoint), or None if unavailable.
+    `tsuf` is the per-teacher checkpoint suffix ('' for SONAR runs, '_bge-m3' for the retrieval run)."""
     import torch
 
     kind = bm.get("kind")
@@ -37,15 +37,11 @@ def _load_enc(name, bm, pooling, ckpt_dir, teacher_dim, device):
     if bm.get("variant"):                                    # matched-transformer student
         from byte_embed.matched import MatchedStudent
         student = MatchedStudent(bm["variant"], size=bm["size"], out_dim=teacher_dim, pooling=pooling)
-        cpath = Path(ckpt_dir) / f"matched_{name}_{pooling}.pt"
-    elif kind == "ucd":
-        from byte_embed.ucd import UCDStudent
-        student = UCDStudent(bm["backbone"], out_dim=teacher_dim, pooling=pooling)
-        cpath = Path(ckpt_dir) / f"{name}_{pooling}.pt"
+        cpath = Path(ckpt_dir) / f"matched_{name}_{pooling}{tsuf}.pt"
     elif kind in ("byte", "subword"):
         from byte_embed.model import ByteStudent
         student = ByteStudent(bm["backbone"], out_dim=teacher_dim, pooling=pooling)
-        cpath = Path(ckpt_dir) / f"{name}_{pooling}.pt"
+        cpath = Path(ckpt_dir) / f"{name}_{pooling}{tsuf}.pt"
     else:
         print(f"  [reeval] {name}: unknown kind {kind!r} -> skip")
         return None
@@ -74,15 +70,17 @@ def reeval(results_path, pooling, ckpt_dir="checkpoints", device="cuda", langs=N
     results = json.loads(Path(results_path).read_text(encoding="utf-8"))
     langs = langs or results.get("langs")
     teacher_dim = results.get("teacher_dim", 1024)
+    teacher = results.get("teacher", "sonar")
+    tsuf = "" if teacher == "sonar" else f"_{teacher}"       # per-teacher checkpoint namespace
     print(f"=== re-eval {results_path}  ({len(results.get('models', {}))} models, pooling={pooling}, "
-          f"{'QA only' if qa_only else 'full battery + MIRACL + QA'}) ===")
+          f"teacher={teacher}, {'QA only' if qa_only else 'full battery + MIRACL + QA'}) ===")
 
     for name, bm in list(results.get("models", {}).items()):
         if qa_only and bm.get("qa_retrieval"):
             print(f"  [reeval] {name}: already has QA -> skip")
             continue
         try:
-            enc = _load_enc(name, bm, pooling, ckpt_dir, teacher_dim, device)
+            enc = _load_enc(name, bm, pooling, ckpt_dir, teacher_dim, device, tsuf=tsuf)
         except Exception as e:  # noqa: BLE001
             print(f"  [reeval] {name}: load failed {type(e).__name__}: {e}")
             continue
