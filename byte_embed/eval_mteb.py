@@ -1,23 +1,22 @@
-"""Uniform MTEB eval battery for the low-resource byte-vs-subword study (run_lowresource.py).
+"""Uniform eval battery for the low-resource byte-vs-subword study (run_lowresource.py).
 
-Every one of the 9 study languages is scored on the SAME four task types, so cross-language
-comparison is clean (no "flaky" per-language task gaps):
+The study is retrieval/QA-focused, so the DEFAULT battery is retrieval-only:
 
   - **Retrieval (uniform)** : Belebele — rank a question against the pool of unique passages
                               (nDCG@10 / recall@10). 900 questions/lang, all 9 langs.
-  - **Bitext (parallel)**   : FLORES-1012 — find-the-translation P@1 (lang -> English) on the
-                              1012 perfectly-parallel FLORES devtest sentences (`mteb/flores`,
-                              one column per language). The common, comparable semantic axis.
-  - **Classification**      : SIB-200 (reuse `common.eval.sib_probe`).
-  - **STS**                 : Spearman of cosine vs. human score. Routed per language to the
-                              dataset that covers it (SemRel24STS / IndicCrosslingualSTS /
-                              C-MTEB STS-B); all three share `sentence1/sentence2/score`. STS is
-                              zero-shot (no fitting) so we concatenate ALL available splits.
+  - **Retrieval (bitext)**  : FLORES-1012 — find-the-translation P@1 (lang -> English) on the
+                              1012 perfectly-parallel FLORES devtest sentences (`mteb/flores`) —
+                              cross-lingual sentence retrieval; the axis that covers Kinyarwanda.
 
-MIRACL deep retrieval (en/zh/ar/te only) stays in `byte_embed/miracl.py` and is called by the
-orchestrator as a bonus axis. Every `encode_fn` here is `list[str] -> np.ndarray [n, d]`.
+SIB-200 (classification) and STS were dropped from the default when the paper narrowed to
+QA/retrieval — their eval functions remain below and run when requested via
+`eval_battery(..., tasks=("sib", "belebele", "flores", "sts"))`.
 
-Exact sizes (measured): SIB 204 test/701 train · FLORES 1012 · Belebele 900 · STS all-splits
+MIRACL deep retrieval (en/zh/ar/te) stays in `byte_embed/miracl.py` and the QA benchmarks in
+`byte_embed/qa_retrieval.py`; the orchestrator calls both. Every `encode_fn` here is
+`list[str] -> np.ndarray [n, d]`.
+
+Exact sizes (measured): Belebele 900/lang · FLORES 1012 · SIB 204 test/701 train · STS all-splits
 en 8350/ha 2551/mr 1746/te 1573/am 1258/rw 1102/ar 627/ta 256(en-ta)/zh 1361.
 """
 from __future__ import annotations
@@ -149,29 +148,39 @@ def eval_flores_bitext(encode_fn, langs, pivot="en", _cache={}):
 
 
 # --------------------------------------------------------------------------- battery
-def eval_battery(encode_fn, langs):
-    """Run SIB (classification) + Belebele (retrieval) + STS for every language, and FLORES bitext
-    across languages. Returns a structured per-task dict with per-language means. MIRACL (deep
-    retrieval, en/zh/ar/te) is run separately by the orchestrator via byte_embed.miracl."""
-    res = {"sib": {}, "belebele": {}, "sts": {}}
+def eval_battery(encode_fn, langs, tasks=("belebele", "flores")):
+    """RETRIEVAL-ONLY by default (the paper's axis): Belebele passage retrieval per language +
+    FLORES bitext retrieval across languages. Pass tasks=("sib","belebele","flores","sts") to also
+    compute the dropped classification/STS axes (kept for backward comparability with the SONAR-run
+    results). MIRACL + the QA benchmarks are run separately by the orchestrator."""
+    res = {t: {} for t in ("sib", "belebele", "sts") if t in tasks}
     for lang in langs:
-        res["sib"][lang] = sib_probe(encode_fn, lang)
-        res["belebele"][lang] = eval_belebele(encode_fn, lang)
-        res["sts"][lang] = eval_sts(encode_fn, lang)
-        b = res["belebele"][lang]; s = res["sts"][lang]
-        print(f"    {lang}: sib={res['sib'][lang]} "
-              f"belebele_ndcg={b['ndcg@10'] if b else None} "
-              f"sts={s['spearman'] if s else None}")
-    res["flores_bitext"] = eval_flores_bitext(encode_fn, langs)
+        if "sib" in tasks:
+            res["sib"][lang] = sib_probe(encode_fn, lang)
+        if "belebele" in tasks:
+            res["belebele"][lang] = eval_belebele(encode_fn, lang)
+        if "sts" in tasks:
+            res["sts"][lang] = eval_sts(encode_fn, lang)
+        b = (res.get("belebele") or {}).get(lang)
+        s = (res.get("sts") or {}).get(lang)
+        print(f"    {lang}:"
+              + (f" sib={res['sib'][lang]}" if "sib" in tasks else "")
+              + (f" belebele_ndcg={b['ndcg@10'] if b else None}" if "belebele" in tasks else "")
+              + (f" sts={s['spearman'] if s else None}" if "sts" in tasks else ""))
+    if "flores" in tasks:
+        res["flores_bitext"] = eval_flores_bitext(encode_fn, langs)
 
     def _mean(d, key=None):
         vals = [(v[key] if key else v) for v in d.values() if v is not None]
         return round(float(np.mean(vals)), 4) if vals else None
 
-    res["means"] = {
-        "sib": _mean(res["sib"]),
-        "belebele_ndcg@10": _mean(res["belebele"], "ndcg@10"),
-        "flores_p@1": _mean(res["flores_bitext"], "p@1"),
-        "sts_spearman": _mean(res["sts"], "spearman"),
-    }
+    res["means"] = {}
+    if "sib" in tasks:
+        res["means"]["sib"] = _mean(res["sib"])
+    if "belebele" in tasks:
+        res["means"]["belebele_ndcg@10"] = _mean(res["belebele"], "ndcg@10")
+    if "flores" in tasks:
+        res["means"]["flores_p@1"] = _mean(res["flores_bitext"], "p@1")
+    if "sts" in tasks:
+        res["means"]["sts_spearman"] = _mean(res["sts"], "spearman")
     return res

@@ -16,12 +16,20 @@ from torch.optim import AdamW
 def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
             lr=2e-4, log_every=100, objective="cosine", temp=0.05,
             augment=False, queue_size=0, rel_weight=0.0, optimizer="adamw",
+            patience=0, min_delta=1e-3,
             ckpt_path=None, ckpt_every=5000, targets=None):
     """augment=True feeds the student orthographically-noised input while the teacher targets
     CLEAN text — distilling orthographic INVARIANCE while contrastive keeps discriminativeness
     (the robustness↔retrieval tradeoff-breaker). queue_size>0 keeps a MoCo-style FIFO of past
     (frozen-)teacher embeddings as extra contrastive negatives — more negatives => sharper
     retrieval within a 12 GB budget (the frozen teacher makes queued negatives non-stale).
+
+    patience: early-stop on loss plateau. The per-step contrastive loss is noisy, so we compare
+    WINDOW-AVERAGED loss (window = `log_every` steps): if the window average fails to improve on the
+    best-so-far by more than `min_delta` for `patience` consecutive windows, training stops (and
+    checkpoints). patience=0 (default) disables it — `steps` is then exact, which keeps byte/subword
+    iso-step; with patience on, `steps` is a CAP and the realized step count should be reported.
+    On a checkpoint resume the plateau tracker restarts (best/stale reset).
 
     targets: optional precomputed teacher embeddings (np.ndarray [len(sentences), d], L2-normalized
     and index-aligned with `sentences`). When given, the live `teacher` is NOT called — both the byte
@@ -56,6 +64,7 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
         start = ck["step"] + 1
         print(f"  [resume] loaded {ckpt_path} -> continuing from step {start}/{steps}")
     targets_t = torch.as_tensor(targets, dtype=torch.float32) if targets is not None else None
+    win, best_avg, stale = [], float("inf"), 0        # loss-plateau (patience) tracker
     t0 = time.time()
     for step in range(start, steps + 1):
         idx = random.sample(range(n), min(batch, n))
@@ -97,10 +106,26 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
         opt.zero_grad(set_to_none=True)
         if queue is not None:
             queue.append(t_emb.detach().float())  # frozen-teacher embs -> non-stale negatives
+        win.append(float(loss.item()))
         if step == 1 or step % log_every == 0:
             history.append({"step": step, "loss": float(loss.item())})
             print(f"  step {step:>5}/{steps}  loss {loss.item():.4f}  "
                   f"({(time.time() - t0) / (step - start + 1) * 1000:.0f} ms/step)")
+        if step % log_every == 0:                     # plateau check on the window average
+            avg, win = sum(win) / len(win), []
+            if avg < best_avg - min_delta:
+                best_avg, stale = avg, 0
+            else:
+                stale += 1
+            if patience and stale >= patience:
+                print(f"  [early-stop] window-avg loss stuck at {best_avg:.4f} "
+                      f"(no {min_delta} improvement for {patience}x{log_every} steps) "
+                      f"-> stopping at step {step}/{steps}")
+                if ckpt_path:
+                    torch.save({"step": step, "model": student.state_dict(),
+                                "opt": opt.state_dict()}, ckpt_path)
+                history.append({"step": step, "loss": avg, "early_stop": True})
+                break
         if ckpt_path and (step % ckpt_every == 0 or step == steps):  # disconnect-safe checkpoint
             torch.save({"step": step, "model": student.state_dict(), "opt": opt.state_dict()},
                        ckpt_path)

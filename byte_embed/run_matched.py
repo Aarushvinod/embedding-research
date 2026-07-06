@@ -27,7 +27,7 @@ def _save(results, out):
 
 def run(out="results/matched.json", sizes=("small", "base"), steps=50000, batch=64, pooling="mean",
         device="cuda", n_per_lang=42000, teacher_name="sonar", ckpt_dir="checkpoints",
-        only=None, smoke=False):
+        only=None, smoke=False, patience=0, min_delta=1e-3):
     import torch
 
     from byte_embed.config import STUDY_LANGS
@@ -79,8 +79,10 @@ def run(out="results/matched.json", sizes=("small", "base"), steps=50000, batch=
             torch.cuda.reset_peak_memory_stats()
             tsuf = "" if teacher_name == "sonar" else f"_{teacher_name}"   # per-teacher ckpt namespace
             cpath = str(Path(ckpt_dir) / f"matched_{name}_{pooling}{tsuf}.pt")
-            distill(student, None, sentences, device=device, steps=steps, batch=batch,
-                    log_every=max(200, steps // 100), ckpt_path=cpath, targets=targets, **OBJ)
+            hist = distill(student, None, sentences, device=device, steps=steps, batch=batch,
+                           log_every=max(200, steps // 100), ckpt_path=cpath, targets=targets,
+                           patience=patience, min_delta=min_delta, **OBJ)
+            steps_run = hist[-1]["step"] if hist else steps
 
             def enc(xs, _s=student):
                 return _s.encode(xs, device=device)
@@ -92,14 +94,14 @@ def run(out="results/matched.json", sizes=("small", "base"), steps=50000, batch=
                                                    distractors=(500 if smoke else 20000),
                                                    cache_dir=ckpt_dir)
             bm.update(variant=variant, size=size, params=total, input_params=emb,
-                      transformer_params=xfmr, steps=steps,
+                      transformer_params=xfmr, steps=steps, steps_run=steps_run,
                       peak_vram_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2))
             results["models"][name] = bm
             _save(results, out)
             m = bm["means"]
             mir = (bm["miracl"] or {}).get("ndcg@10_mean")
-            print(f"  saved {name}: xfmr={xfmr / 1e6:.0f}M  SIB={m['sib']} Belebele={m['belebele_ndcg@10']} "
-                  f"FLORES={m['flores_p@1']} STS={m['sts_spearman']} MIRACL={mir}")
+            print(f"  saved {name}: xfmr={xfmr / 1e6:.0f}M steps={steps_run}/{steps} "
+                  f"Belebele={m.get('belebele_ndcg@10')} FLORES={m.get('flores_p@1')} MIRACL={mir}")
             del student
             torch.cuda.empty_cache()
         except Exception as e:  # noqa: BLE001
@@ -169,10 +171,14 @@ def main():
     ap.add_argument("--n-per-lang", type=int, dest="n_per_lang", default=42000)
     ap.add_argument("--only", default=None, help="comma-separated model names (e.g. 'byte-small,subword-small')")
     ap.add_argument("--smoke", action="store_true")
+    ap.add_argument("--patience", type=int, default=0,
+                    help="early-stop after N log-windows without loss improvement (0 = off)")
+    ap.add_argument("--min-delta", type=float, dest="min_delta", default=1e-3)
     a = ap.parse_args()
     only = None if a.only is None else [x for x in a.only.split(",") if x]
     run(out=a.out, sizes=tuple(a.sizes.split(",")), steps=a.steps, batch=a.batch, pooling=a.pooling,
-        device=a.device, n_per_lang=a.n_per_lang, only=only, smoke=a.smoke)
+        device=a.device, n_per_lang=a.n_per_lang, only=only, smoke=a.smoke,
+        patience=a.patience, min_delta=a.min_delta)
 
 
 if __name__ == "__main__":

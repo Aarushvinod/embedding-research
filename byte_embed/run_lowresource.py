@@ -50,10 +50,13 @@ def _save(results, out):
 
 def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_lang=42000,
         ckpt_dir="checkpoints", teacher_name="sonar", miracl_q=250, miracl_extra=20000,
-        only=None, with_baselines=True, with_efficiency=True, pooling="mean", steps=None):
+        only=None, with_baselines=True, with_efficiency=True, pooling="mean", steps=None,
+        patience=0, min_delta=1e-3):
     """Train (a subset of) the 6 students. `only` = list of model names to train (None = all,
     [] = precompute-only). `with_baselines`/`with_efficiency` are turned OFF for parallel workers
-    (the orchestrator does those once). Workers SKIP loading the teacher when targets are cached."""
+    (the orchestrator does those once). Workers SKIP loading the teacher when targets are cached.
+    `patience` (windows of no window-avg loss improvement > `min_delta` before stopping; 0 = off)
+    makes `steps` a cap — the realized step count lands in the results as `steps_run`."""
     import torch
 
     from byte_embed.config import STUDY_LANGS
@@ -117,8 +120,10 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
             # logic would load the SONAR run's finished checkpoint and silently skip training.
             tsuf = "" if teacher_name == "sonar" else f"_{teacher_name}"
             cpath = str(Path(ckpt_dir) / f"{name}_{pooling}{tsuf}.pt") if ckpt else None
-            distill(student, None, sentences, device=device, steps=steps, batch=batch,
-                    log_every=max(200, steps // 100), ckpt_path=cpath, targets=targets, **OBJ)
+            hist = distill(student, None, sentences, device=device, steps=steps, batch=batch,
+                           log_every=max(200, steps // 100), ckpt_path=cpath, targets=targets,
+                           patience=patience, min_delta=min_delta, **OBJ)
+            steps_run = hist[-1]["step"] if hist else steps   # < steps when patience stopped early
 
             def enc(xs, _s=student):
                 return _s.encode(xs, device=device)
@@ -133,15 +138,15 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
             bm.update(params=params, vocab_params=vocab_params,
                       transformer_params=params - vocab_params,
                       kind=("byte" if "byt5" in backbone else "subword"),
-                      backbone=backbone, steps=steps,
+                      backbone=backbone, steps=steps, steps_run=steps_run,
                       peak_vram_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2))
             results["models"][name] = bm
             _save(results, out)
             m = bm["means"]
             mir = (bm["miracl"] or {}).get("ndcg@10_mean")
-            print(f"  saved {name}: params={params/1e6:.0f}M SIB={m['sib']} "
-                  f"Belebele={m['belebele_ndcg@10']} FLORES={m['flores_p@1']} "
-                  f"STS={m['sts_spearman']} MIRACL={mir} peak={bm['peak_vram_gb']}GB")
+            print(f"  saved {name}: params={params/1e6:.0f}M steps={steps_run}/{steps} "
+                  f"Belebele={m.get('belebele_ndcg@10')} FLORES={m.get('flores_p@1')} "
+                  f"MIRACL={mir} peak={bm['peak_vram_gb']}GB")
             del student
             torch.cuda.empty_cache()
         except Exception as e:  # noqa: BLE001 — one model erroring shouldn't lose the others
@@ -186,7 +191,8 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
 def _summary(results):
     M = results["models"]
     print("\n" + "=" * 104)
-    print("LOW-RESOURCE BYTE vs SUBWORD — SONAR teacher (SIB | Belebele nDCG@10 | FLORES P@1 | STS | MIRACL)")
+    print(f"LOW-RESOURCE BYTE vs SUBWORD — teacher={results.get('teacher', 'sonar')} "
+          "(Belebele nDCG@10 | FLORES P@1 | MIRACL; SIB/STS shown when present in older results)")
     print("=" * 104)
     print(f"{'model':20}{'params(M)':>10}{'xfmr(M)':>9}{'SIB':>7}{'Belebele':>9}"
           f"{'FLORES':>8}{'STS':>7}{'MIRACL':>8}")
@@ -247,11 +253,16 @@ def main():
                     help="student sentence pooling ('attn' = lightweight multi-head attentive pool)")
     ap.add_argument("--steps", type=int, default=None,
                     help="override steps for the model(s) trained in this call (int = same for all)")
+    ap.add_argument("--patience", type=int, default=0,
+                    help="early-stop after N log-windows without loss improvement (0 = off, iso-step)")
+    ap.add_argument("--min-delta", type=float, dest="min_delta", default=1e-3,
+                    help="minimum window-avg loss improvement that resets the patience counter")
     a = ap.parse_args()
     only = None if a.only is None else [x for x in a.only.split(",") if x]
     run(out=a.out, smoke=a.smoke, device=a.device, n_per_lang=a.n_per_lang,
         teacher_name=a.teacher_name, only=only, with_baselines=a.with_baselines,
-        with_efficiency=a.with_efficiency, pooling=a.pooling, steps=a.steps)
+        with_efficiency=a.with_efficiency, pooling=a.pooling, steps=a.steps,
+        patience=a.patience, min_delta=a.min_delta)
 
 
 if __name__ == "__main__":

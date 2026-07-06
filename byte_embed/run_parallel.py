@@ -43,7 +43,8 @@ def _merge(out, names):
 
 
 def parallel(out="results/byte_lowresource.json", device="cuda", max_concurrent=3,
-             n_per_lang=42000, teacher_name="sonar", pooling="mean", steps=None):
+             n_per_lang=42000, teacher_name="sonar", pooling="mean", steps=None,
+             patience=0, min_delta=1e-3):
     rows = _grid(steps)                              # [(name, backbone, steps, batch, ckpt), ...]
     names = [r[0] for r in rows]
     model_steps = {r[0]: r[2] for r in rows}         # per-model step count (size schedule)
@@ -65,7 +66,8 @@ def parallel(out="results/byte_lowresource.json", device="cuda", max_concurrent=
             cmd = [sys.executable, "-u", "-m", "byte_embed.run_lowresource", "--only", n,  # -u: unbuffered
                    "--out", _part(out, n), "--device", device, "--no-baselines", "--no-efficiency",
                    "--n-per-lang", str(n_per_lang), "--teacher", teacher_name, "--pooling", pooling,
-                   "--steps", str(model_steps[n])]
+                   "--steps", str(model_steps[n]),
+                   "--patience", str(patience), "--min-delta", str(min_delta)]
             procs[n] = (subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT), logf)
             print(f"  launched {n}  (log -> {logf.name})")
         for n, (p, logf) in list(procs.items()):
@@ -93,9 +95,13 @@ def main():
     ap.add_argument("--pooling", default="mean", choices=["mean", "max", "attn"])
     ap.add_argument("--steps", type=int, default=None, help="int = same steps for all sizes "
                     "(default = the per-size schedule small 50k / base 75k / large 100k)")
+    ap.add_argument("--patience", type=int, default=0,
+                    help="early-stop after N log-windows without loss improvement (0 = off)")
+    ap.add_argument("--min-delta", type=float, dest="min_delta", default=1e-3)
     a = ap.parse_args()
     parallel(out=a.out, device=a.device, max_concurrent=a.max_concurrent,
-             n_per_lang=a.n_per_lang, teacher_name=a.teacher_name, pooling=a.pooling, steps=a.steps)
+             n_per_lang=a.n_per_lang, teacher_name=a.teacher_name, pooling=a.pooling, steps=a.steps,
+             patience=a.patience, min_delta=a.min_delta)
 
 
 if __name__ == "__main__":

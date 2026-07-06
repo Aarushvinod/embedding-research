@@ -28,6 +28,7 @@ craters, hybrid targets (BGE-M3 where covered, SONAR elsewhere) are a one-line m
 | Students | `google/byt5-{small,base,large}` vs `google/mt5-{small,base,large}` (encoder-only + attn pool + 1024-d head) |
 | Objective | InfoNCE (τ=0.05, MoCo queue 8192) + alignment + relational (`objective='both'`, `rel_weight=1.0`) |
 | Optimizer | AdamW lr 2e-4, batch 64, **50k steps for every model (iso-step)**, bf16 |
+| Early stop | `patience` windows (of `log_every` steps) without window-avg loss improving > `min_delta`. **Default 0 = off** (exact iso-step). If enabled, `steps` is a cap; the realized `steps_run` is saved per model and must be reported |
 | Data | 9 languages (te ta mr am ha rw + en zh ar), balanced ~42k sentences/lang (~378k), unchanged |
 | Targets | BGE-M3, precomputed once, cached as `teachertargets_bge-m3_9langs_42000.npy` |
 | Pooling | `attn` for byte AND subword (fair) |
@@ -47,9 +48,11 @@ Headline retrieval benchmarks (nDCG@10, plus recall@100 where pools are deep):
 | 2AIRTC | 12.6k | am | deep ad-hoc IR (peer-reviewed) |
 
 Mr.TyDi (te) and AfriCLIRMatrix (am/ha, cross-lingual) are still computed but reported as secondary
-(coverage-capped pool / different task axis). The non-retrieval battery (SIB, FLORES, STS) still runs —
-we expect FLORES/STS to DROP vs the SONAR run (the teacher is no longer a bitext specialist); report
-that honestly as the retrieval-specialization trade-off.
+(coverage-capped pool / different task axis). **The battery is retrieval-only**: SIB (classification)
+and STS were dropped when the paper narrowed to QA/retrieval (`eval_battery` computes them only on
+request via `tasks=`). FLORES bitext stays — it IS retrieval (find-the-translation P@1) and is the one
+deep-ish axis covering Kinyarwanda. Expect FLORES to DROP vs the SONAR run (the teacher is no longer a
+bitext specialist); report that honestly as the retrieval-specialization trade-off.
 
 ## Predictions (write down before running)
 
