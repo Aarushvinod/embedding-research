@@ -37,19 +37,6 @@ profile** (FLOPs / throughput / latency / VRAM).
   top-to-bottom (do the smoke cell first). Resumable across sessions.
 - **CLI:** `python -m byte_embed.run_lowresource --smoke` then `python -m byte_embed.run_lowresource`.
 
-### UCD-vector variant (tokenizer-free, *not bytes*)
-`ucd.py` / `run_ucd.py` explore a representation we have **not** tried before: instead of raw UTF-8
-bytes, the student reads **Unicode Character Database property vectors** per codepoint
-(`General_Category`, `Canonical_Combining_Class`, `Bidi_Class`, script/block, binary flags) plus a
-CANINE-style hashed-codepoint identity channel — fed to the **same ByT5 body** via `inputs_embeds`, so
-only the input representation changes. One position per character removes the UTF-8 multibyte tax, the
-input table stays tiny (cross-lingual feature sharing), and unseen codepoints still arrive with valid
-script/category structure. Reuses the **same cached SONAR targets** as the byte study (identical
-supervision).
-- **Colab A100:** `notebooks/ucdembed_lowresource_a100.ipynb` (sibling of the byte notebook).
-- **CLI:** `python -m byte_embed.run_ucd --smoke` then `python -m byte_embed.run_ucd`
-  (`--compare` also trains the byte + subword arms for a 3-way UCD/byte/subword table).
-
 ## Modules
 - `run_lowresource.py` — orchestrator: teacher cache → 6 students → eval + efficiency, incremental + resumable.
 - `teachers.py` — `SonarTeacher` (+ LaBSE fallback) and cached `precompute_targets`.

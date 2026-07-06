@@ -1,17 +1,16 @@
-"""STS-focused study: fine-tune byte OR UCD students on real graded STS and eval test-only.
+"""STS-focused study: fine-tune byte students on real graded STS and eval test-only.
 
-Tests whether each representation can do STS *when trained for it* (the fair test — our main runs use a
-retrieval-leaning distillation objective). 8 languages (6 low-resource + en/zh anchors), all with native
-graded train. CoSENT objective; per-language Spearman on the held-out test split; optional whitening.
+Tests whether the byte representation can do STS *when trained for it* (the fair test — our main runs
+use a retrieval-leaning distillation objective). 8 languages (6 low-resource + en/zh anchors), all with
+native graded train. CoSENT objective; per-language Spearman on the held-out test split; optional
+whitening.
 
 By default each student is **warm-started from its SONAR-distilled checkpoint** (strict=False, so the
-encoder/featurizer transfer even though the projection + pooling differ) — this gives a strong
-multilingual base and, for UCD, a *trained* featurizer instead of a cold one. Set init_ckpt=None to
-fine-tune the raw byt5/ucd base instead.
+encoder transfers even though the projection + pooling differ) — this gives a strong multilingual base.
+Set init_ckpt=None to fine-tune the raw byt5 base instead.
 
-  python -m byte_embed.run_sts --family byte            # byte STS run
-  python -m byte_embed.run_sts --family ucd             # UCD  STS run
-  python -m byte_embed.run_sts --family byte --smoke    # ~5-min self-test
+  python -m byte_embed.run_sts                          # byte STS run
+  python -m byte_embed.run_sts --smoke                  # ~5-min self-test
 """
 from __future__ import annotations
 
@@ -20,17 +19,12 @@ import json
 from pathlib import Path
 
 # default warm-start checkpoints (the SONAR-distilled runs). {size} is filled per size.
-_DEFAULT_INIT = {"byte": "checkpoints/byte-{size}_attn.pt",
-                 "ucd": "checkpoints/ucd-{size}_mean.pt"}
+_DEFAULT_INIT = {"byte": "checkpoints/byte-{size}_attn.pt"}
 
 
 def _build(family, size, pooling, out_dim=1024):
-    backbone = f"google/byt5-{size}"          # byte and ucd both reuse the ByT5 body
-    if family == "ucd":
-        from byte_embed.ucd import UCDStudent
-        return UCDStudent(backbone, out_dim=out_dim, pooling=pooling)
     from byte_embed.model import ByteStudent
-    return ByteStudent(backbone, out_dim=out_dim, pooling=pooling)
+    return ByteStudent(f"google/byt5-{size}", out_dim=out_dim, pooling=pooling)
 
 
 def run(family="byte", sizes=("small", "base"), pooling="mean", steps=2000, out=None,
@@ -111,7 +105,7 @@ def _summary(results):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--family", default="byte", choices=["byte", "ucd"])
+    ap.add_argument("--family", default="byte", choices=["byte"])
     ap.add_argument("--sizes", default="small,base")
     ap.add_argument("--pooling", default="mean", choices=["mean", "max", "attn"])
     ap.add_argument("--steps", type=int, default=2000)

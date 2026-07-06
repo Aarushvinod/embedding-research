@@ -17,19 +17,17 @@ Nothing to do — the new benchmarks are wired into the default eval, so any new
 1. **Open the notebook for those models** in Colab (a GPU helps encoding but an A100 is not required
    for re-eval; a T4 is fine):
    - byte / subword → `byteembed_lowresource_a100.ipynb`
-   - UCD → `ucdembed_lowresource_a100.ipynb`
    - matched-transformer → `matched_transformer_a100.ipynb`
 
 2. **Run the setup cells** (GPU check → clone+`git pull` → SONAR reachability → Drive mount). The
    `git pull` is what pulls the new benchmark code. **Point Drive at the same folder** that holds your
    `checkpoints/` and `results/` (the notebooks default to `/content/drive/MyDrive/byteembed_lowres`).
 
-3. **Run the re-eval cell** (step **7b** in the byte / UCD notebooks, step **5b** in the matched
+3. **Run the re-eval cell** (step **7b** in the byte notebook, step **5b** in the matched
    notebook). It calls, with the pooling that matches the run:
    ```python
    from byte_embed.reeval import reeval
    reeval('results/byte_lowresource_attn.json', pooling='attn')   # byte + subword (50k, attn)
-   reeval('results/ucd_lowresource.json',       pooling='mean')   # UCD
    reeval('results/matched.json',               pooling='mean')   # matched-transformer
    ```
    Use `qa_only=True` to add **only** the new QA-retrieval benchmarks and keep the existing
@@ -39,7 +37,7 @@ Nothing to do — the new benchmarks are wired into the default eval, so any new
    `IndicQA · Mr.TyDi · Amharic-PR · 2AIRTC · AfriCLIR (am/ha)`.
 
 ## Notes
-- **`pooling` must match how the model was trained**: byte/subword 50k attn → `'attn'`; UCD and
+- **`pooling` must match how the model was trained**: byte/subword 50k attn → `'attn'`;
   matched → `'mean'`. The re-eval reloads `checkpoints/{name}_{pooling}.pt` (or `matched_{name}_...`).
 - **First build streams a corpus** per new benchmark (2AIRTC ≈ 68 MB; AfriCLIR streams the am/ha
   Wikipedia corpora; IndicQA/Mr.TyDi are small). Pools are cached to `checkpoints/qa_*.json`, so every

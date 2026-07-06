@@ -5,7 +5,7 @@ segmented by model, in two styles:
   * grouped bar charts  -> figures/perlang/perlang_bar_<task>.png
   * model x language heatmaps (cleaner for 8 models x 9 langs) -> perlang_heat_<task>.png
 
-Reusable across runs (byte study, UCD study, ...):
+Reusable across runs (SONAR study, BGE-M3 retrieval study, ...):
   python make_perlang_figures.py results/byte_lowresource.json
   python make_perlang_figures.py <results.json> [outdir]
 """
@@ -35,11 +35,9 @@ LOW_RES = {"te", "ta", "mr", "am", "ha", "rw"}
 # model display order + a color scheme that encodes structure: byte = blues, subword = oranges
 # (light->dark = small->base->large), baselines = green/grey. Only models present are drawn.
 ORDER = ["byte-small", "byte-base", "byte-large",
-         "subword-small", "subword-base", "subword-large",
-         "ucd-small", "ucd-base", "ucd-large", "mE5-base", "LaBSE"]
+         "subword-small", "subword-base", "subword-large", "mE5-base", "LaBSE"]
 COLORS = {"byte-small": "#9ecae1", "byte-base": "#4292c6", "byte-large": "#08519c",
           "subword-small": "#fdae6b", "subword-base": "#f16913", "subword-large": "#a63603",
-          "ucd-small": "#a1d99b", "ucd-base": "#41ab5d", "ucd-large": "#006d2c",
           "mE5-base": "#9e9ac8", "LaBSE": "#bdbdbd"}
 MODELS = [m for m in ORDER if m in M and M[m].get("kind") != "baseline"]  # students only: byte vs subword
 

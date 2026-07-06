@@ -1,4 +1,4 @@
-"""Supervised STS fine-tuning for byte / UCD students: CoSENT objective + optional whitening +
+"""Supervised STS fine-tuning for byte students: CoSENT objective + optional whitening +
 test-only Spearman eval.
 
 CoSENT (Su, 2022) is the standard modern STS objective: it's a *rank* loss that, for every pair of
