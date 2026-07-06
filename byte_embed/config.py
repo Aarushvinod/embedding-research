@@ -32,7 +32,13 @@ FLORES_CODE = {"en": "eng_Latn", "tr": "tur_Latn", "sw": "swh_Latn", "bn": "ben_
 # weakened targets there, so byte-vs-subword stays internally fair; flag it when reporting.
 LOWRES_LANGS = ["te", "sw", "yo", "am", "ha"]    # Dravidian/Bantu/Niger-Congo/Semitic/Chadic
 HIGHRES_LANGS = ["en", "zh", "ar"]               # anchors (incl. two non-Latin scripts)
-STUDY_LANGS = LOWRES_LANGS + HIGHRES_LANGS       # the canonical 8
+STUDY_LANGS = LOWRES_LANGS + HIGHRES_LANGS       # the canonical 8 (trained AND evaluated)
+
+# 6th low-resource language: Somali (Joshi 1) — EVAL-ONLY / zero-shot. Its Wikipedia (~9k articles)
+# is far below the ~42k training floor, so it is never trained on; it is evaluated via Belebele +
+# FLORES (shallow) and CIRAL (deep, cross-lingual). Unseen-language eval is itself a tokenizer-free
+# selling point: byte models have no unseen-vocabulary problem.
+ZEROSHOT_LANGS = ["so"]
 
 N_PER_LANG = 15000   # training sentences per language (× 8 langs)
 MAX_BYTES = 256      # truncation length in BYTES (byte-level => longer than subword)

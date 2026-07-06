@@ -8,19 +8,25 @@ tokenizer remains the only manipulated variable.
 
 ## Languages (finalized 2026-07 via adversarially-verified deep research)
 
-5 low-resource (Joshi class 0–2) + 3 high-resource anchors; every language has a deep-retrieval
-benchmark with real human queries and public relevance labels:
+6 low-resource (Joshi class 0–2) + 3 high-resource anchors. **ONE deep benchmark per language** —
+the one with the most passages available (simplest to track; the alternatives stay wired for optional
+corroboration via `benchmarks=`):
 
-| Lang | Joshi | Deep retrieval | Axis | Notes |
+| Lang | Joshi | Deep retrieval (the one) | Axis | Notes |
 |---|---|---|---|---|
-| Telugu (te) | 1 | MIRACL dev (828q/518k psgs) + Mr.TyDi + IndicQA (secondary) | monolingual | |
-| Swahili (sw) | 2 | MIRACL dev (482q/132k) + Mr.TyDi | monolingual | new |
-| Yoruba (yo) | 2 | MIRACL dev (119q/49k, "surprise language") | monolingual | new; NOT in XLM-R (see caveat) |
-| Amharic (am) | 2 | 2AIRTC (240 topics, peer-reviewed) + Amharic-PR (community) | monolingual | first-party verified |
-| Hausa (ha) | 2 | CIRAL Test A (80q/1.4k judgments, 715k news psgs) | **cross-lingual** (en query → ha passage) — flagged | |
-| English (en) | 5 | MIRACL (799q/32.9M) + Mr.TyDi | monolingual | anchor |
-| Chinese (zh) | 5 | MIRACL (393q/4.9M) | monolingual | non-Latin anchor |
-| Arabic (ar) | 5 | MIRACL (2,896q/2.1M) + Mr.TyDi | monolingual | non-Latin anchor |
+| Telugu (te) | 1 | MIRACL dev (828q / 518k psgs) | monolingual | Mr.TyDi + IndicQA off-default |
+| Swahili (sw) | 2 | MIRACL dev (482q / 132k) | monolingual | new; Mr.TyDi off-default |
+| Yoruba (yo) | 2 | MIRACL dev (119q / 49k, "surprise language") | monolingual | new; NOT in XLM-R (see caveat) |
+| Amharic (am) | 2 | Amharic-PR (68,301 psgs) | monolingual | > 2AIRTC's 12,587; 2AIRTC off-default |
+| Hausa (ha) | 2 | CIRAL Test A (80q / 715k news psgs) | **cross-lingual** (en query → ha passage) — flagged | |
+| Somali (so) | 1 | CIRAL Test A (99q / ~1M news psgs) | **cross-lingual** — flagged | **ZERO-SHOT: eval-only, never trained** (wiki ~9k articles, below the training floor) |
+| English (en) | 5 | MIRACL (799q / 32.9M) | monolingual | anchor |
+| Chinese (zh) | 5 | MIRACL (393q / 4.9M) | monolingual | non-Latin anchor |
+| Arabic (ar) | 5 | MIRACL (2,896q / 2.1M) | monolingual | non-Latin anchor |
+
+Somali doubles as the **unseen-language test**: neither student trains on a single Somali sentence,
+so its Belebele/FLORES/CIRAL scores measure zero-shot generalization — a natural tokenizer-free
+selling point (bytes have no unseen-vocabulary problem).
 
 **Dropped:** Kinyarwanda (no deep-retrieval benchmark exists anywhere — AfriQA's gold passages are
 English/French pivot text, not Kinyarwanda), Tamil + Marathi (their only benchmark, IndicQA, has a
@@ -45,26 +51,39 @@ comparison stays internally fair — and both ByT5/mT5 saw yo in mC4 pretraining
 | Data | 8 languages, balanced max-min Wikipedia sentences (~42k/lang, ~336k total) |
 | Targets | BGE-M3, precomputed once, cached as `teachertargets_bge-m3_8langs_*` |
 | Pooling | `attn` for byte AND subword (fair) |
-| Checkpoints | `{name}_attn_bge-m3.pt` — per-teacher namespace, never resumes from SONAR checkpoints |
-| Baselines | mE5-base, LaBSE (same battery, same pools) |
+| Checkpoints | `{name}_attn_bge-m3.pt` — per-teacher namespace (+ `_b-{arm}` for boundary arms) |
+| Baselines | **BGE-M3 (the teacher — measures the ceiling per benchmark)**, mE5-base, LaBSE |
 
-## Evaluation (retrieval-only)
+## Evaluation (retrieval-only, one deep benchmark per language)
 
 | Benchmark | Pool | Languages | Axis / metric |
 |---|---|---|---|
-| Belebele | 488 | all 8 | shallow passage retrieval, nDCG@10 |
-| FLORES bitext | 1,012 | all 8 | cross-lingual sentence retrieval, P@1 |
+| Belebele | 488 | all 8 + so | shallow passage retrieval, nDCG@10 |
+| FLORES bitext | 1,012 | all 8 + so | cross-lingual sentence retrieval, P@1 |
 | MIRACL (dev) | 20k rerank pools | en zh ar te sw yo | deep monolingual, nDCG@10 + R@100 |
-| Mr.TyDi | 20k rerank pools | te sw | deep monolingual QA, nDCG@10 + R@100 |
-| 2AIRTC | 12.6k (full) | am | deep ad-hoc IR (peer-reviewed), nDCG@10 + R@100 |
-| Amharic-PR | 20k | am | deep monolingual (community), nDCG@10 + R@100 |
-| CIRAL Test A | 715k stream → pool | ha | **cross-lingual, flagged**, nDCG@10 + R@100 |
-| IndicQA | ~250 | te | small-pool secondary |
+| Amharic-PR | 20k | am | deep monolingual, nDCG@10 + R@100 |
+| CIRAL Test A | full-corpus stream → pool | ha, so (zero-shot) | **cross-lingual, flagged**, nDCG@10 + R@100 |
 
-SIB and STS are dropped (`eval_battery` computes them only on request via `tasks=`). AfriCLIRMatrix
-remains wired but off the default battery (superseded by CIRAL for ha; am has two monolingual sets).
-MIRACL evaluation must use dev (test qrels are held out); report CIs for yo (119 queries) and te's
-judgment-sparse dev (~2 judgments/query).
+SIB and STS are dropped (`eval_battery` computes them only on request via `tasks=`). Mr.TyDi,
+IndicQA, 2AIRTC, and AfriCLIRMatrix remain wired but off the default battery (optional
+corroboration). MIRACL evaluation must use dev (test qrels are held out); report CIs for yo (119
+queries) and te's judgment-sparse dev (~2 judgments/query).
+
+## Boundary-injection arms (the tokenization-mechanism probe; byte students only)
+
+`--boundary teacher|random` (or `run(..., boundary=...)`), each arm in its own results file:
+
+- **A (raw)** — the normal byte student (the main run).
+- **B (`teacher`)** — a 1-byte marker (U+001E) inserted wherever BGE-M3's tokenizer (XLM-R spm)
+  would split. Grants the byte model subword's segmentation INFORMATION with zero vocab table and
+  zero parameter change.
+- **C (`random`)** — the placebo: the SAME per-sentence marker count at random character positions
+  (deterministic per sentence). Controls for sequence-length / delimiter / register-token artifacts.
+
+Teacher targets stay clean; the transform applies to the student's training inputs AND all its eval
+inputs. Reading: B > C ≈ A → segmentation info genuinely helps; B ≈ C > A → any markers help
+(artifact — no credit to the tokenizer); B ≈ C ≈ A → byte needs nothing from segmentation.
+Sequencing: run B first (byte-small only, 50k); build C only if B > A materially.
 
 ## Predictions (written before running)
 

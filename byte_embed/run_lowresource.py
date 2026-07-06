@@ -54,15 +54,19 @@ def _save(results, out):
 def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_lang=42000,
         ckpt_dir="checkpoints", teacher_name="sonar", miracl_q=250, miracl_extra=20000,
         only=None, with_baselines=True, with_efficiency=True, pooling="mean", steps=None,
-        patience=0, min_delta=1e-3):
+        patience=0, min_delta=1e-3, boundary=None):
     """Train (a subset of) the 6 students. `only` = list of model names to train (None = all,
     [] = precompute-only). `with_baselines`/`with_efficiency` are turned OFF for parallel workers
     (the orchestrator does those once). Workers SKIP loading the teacher when targets are cached.
     `patience` (windows of no window-avg loss improvement > `min_delta` before stopping; 0 = off)
-    makes `steps` a cap — the realized step count lands in the results as `steps_run`."""
+    makes `steps` a cap — the realized step count lands in the results as `steps_run`.
+    `boundary` ('teacher'|'random') runs the boundary-injection arms: byte students only, markers
+    inserted into all student inputs (train AND eval); teacher targets stay clean. Use a separate
+    `out` file per arm. Zero-shot: ZEROSHOT_LANGS (Somali) are EVALUATED but never trained on."""
     import torch
 
-    from byte_embed.config import STUDY_LANGS
+    from byte_embed.boundaries import make_transform
+    from byte_embed.config import STUDY_LANGS, ZEROSHOT_LANGS
     from byte_embed.data import load_balanced_sentences
     from byte_embed.distill import distill
     from byte_embed.efficiency import fertility_table, profile_model
@@ -74,6 +78,7 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
                                      targets_exist)
 
     langs = ["am", "sw", "en"] if smoke else STUDY_LANGS
+    eval_langs = langs + ([] if smoke else ZEROSHOT_LANGS)   # Somali: eval-only (wiki too small to train)
     miracl_langs = (["te"] if smoke else ["en", "zh", "ar", "te", "sw", "yo"])   # the 6 of our 8 in MIRACL
     grid = _grid(steps)
     if smoke:
@@ -82,6 +87,10 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
                 ("subword-small", "google/mt5-small", 80, 16, True)]
     if only is not None:
         grid = [g for g in grid if g[0] in only]
+    transform = make_transform(boundary)                     # None for the raw arm
+    if transform is not None:
+        grid = [g for g in grid if "byt5" in g[1]]           # boundary arms are byte-only by design
+        print(f"=== boundary-injection arm '{boundary}': byte students only -> {[g[0] for g in grid]} ===")
 
     results = (json.loads(Path(out).read_text(encoding="utf-8"))
                if Path(out).exists() else {"langs": langs, "teacher": teacher_name})
@@ -105,7 +114,7 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
     # 3) efficiency / tokenization table (once; no training) --------------------------------------
     if with_efficiency and "efficiency" not in results:
         print("\n=== tokenization-efficiency table (FLORES-1012) ===")
-        results["efficiency"] = fertility_table(langs)
+        results["efficiency"] = fertility_table(eval_langs)
         _save(results, out)
 
     # 4) the 6 students ---------------------------------------------------------------------------
@@ -122,16 +131,18 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
             # checkpoint namespace includes the teacher for non-SONAR runs — otherwise the resume
             # logic would load the SONAR run's finished checkpoint and silently skip training.
             tsuf = "" if teacher_name == "sonar" else f"_{teacher_name}"
+            if boundary:
+                tsuf += f"_b-{boundary}"                     # per-arm checkpoint namespace
             cpath = str(Path(ckpt_dir) / f"{name}_{pooling}{tsuf}.pt") if ckpt else None
             hist = distill(student, None, sentences, device=device, steps=steps, batch=batch,
                            log_every=max(200, steps // 100), ckpt_path=cpath, targets=targets,
-                           patience=patience, min_delta=min_delta, **OBJ)
+                           patience=patience, min_delta=min_delta, input_transform=transform, **OBJ)
             steps_run = hist[-1]["step"] if hist else steps   # < steps when patience stopped early
 
-            def enc(xs, _s=student):
-                return _s.encode(xs, device=device)
+            def enc(xs, _s=student, _t=transform):           # each arm evals with its own transform
+                return _s.encode([_t(x) for x in xs] if _t else xs, device=device)
 
-            bm = eval_battery(enc, langs)
+            bm = eval_battery(enc, eval_langs)
             bm["miracl"] = eval_miracl_langs(enc, miracl_langs, n_queries=miracl_q,
                                              distractors=miracl_extra, cache_dir=ckpt_dir)
             bm["qa_retrieval"] = eval_qa_retrieval(enc, n_queries=(20 if smoke else miracl_q),
@@ -142,6 +153,7 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
                       transformer_params=params - vocab_params,
                       kind=("byte" if "byt5" in backbone else "subword"),
                       backbone=backbone, steps=steps, steps_run=steps_run,
+                      boundary=boundary,
                       peak_vram_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2))
             results["models"][name] = bm
             _save(results, out)
@@ -156,9 +168,10 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
             print(f"  [{name}] FAILED: {type(e).__name__}: {e}")
             torch.cuda.empty_cache()
 
-    # 5) reference baselines (lang-agnostic encoders that fit the eval interface) ------------------
+    # 5) reference baselines — incl. BGE-M3 itself (the teacher ceiling per benchmark) -------------
     from sentence_transformers import SentenceTransformer
-    baselines = [("mE5-base", "intfloat/multilingual-e5-base", "query: "),
+    baselines = [("BGE-M3", "BAAI/bge-m3", ""),              # the teacher: measures the ceiling
+                 ("mE5-base", "intfloat/multilingual-e5-base", "query: "),
                  ("LaBSE", "sentence-transformers/LaBSE", "")]
     if smoke or not with_baselines:        # parallel workers skip baselines; orchestrator runs them once
         baselines = []
@@ -173,7 +186,7 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
                 return _m.encode([_p + x for x in xs], normalize_embeddings=True,
                                  convert_to_numpy=True, show_progress_bar=False)
 
-            bm = eval_battery(benc, langs)
+            bm = eval_battery(benc, eval_langs)
             bm["miracl"] = eval_miracl_langs(benc, miracl_langs, n_queries=miracl_q,
                                              distractors=miracl_extra, cache_dir=ckpt_dir)
             bm["qa_retrieval"] = eval_qa_retrieval(benc, n_queries=miracl_q,
@@ -217,18 +230,16 @@ def _summary(results):
             return f"{x - y:+.3f}" if (x is not None and y is not None) else "-"
         print(f"  {size:6} Belebele {d('belebele_ndcg@10')}  FLORES {d('flores_p@1')}  STS {d('sts_spearman')}")
     if any(r.get("qa_retrieval") for r in M.values()):
-        print("\nRAG-RETRIEVAL — QA open-retrieval nDCG@10 (IndicQA te · Mr.TyDi te/sw · "
-              "Amharic-PR am · 2AIRTC am · CIRAL ha [cross-lingual]):")
+        print("\nDEEP QA-RETRIEVAL — nDCG@10 (Amharic-PR am · CIRAL ha + zero-shot so [cross-lingual]):")
         for name, r in M.items():
             qa = r.get("qa_retrieval")
             if qa:
-                iq = (qa.get("indicqa") or {}).get("ndcg@10_mean")
-                mt = (qa.get("mrtydi") or {}).get("ndcg@10_mean")
                 am = (qa.get("amharicpr") or {}).get("ndcg@10_mean")
-                a2 = (qa.get("2airtc") or {}).get("ndcg@10_mean")
-                ci = ((qa.get("ciral") or {}).get("per_lang") or {}).get("ha") or {}
-                print(f"  {name:20} IndicQA {_f(iq, 7)}  Mr.TyDi {_f(mt, 7)}  Amharic-PR {_f(am, 7)}  "
-                      f"2AIRTC {_f(a2, 7)}  CIRAL-ha {_f(ci.get('ndcg@10'), 7)}")
+                cl = (qa.get("ciral") or {}).get("per_lang") or {}
+                ci_ha = (cl.get("ha") or {}).get("ndcg@10")
+                ci_so = (cl.get("so") or {}).get("ndcg@10")
+                print(f"  {name:20} Amharic-PR {_f(am, 7)}  CIRAL-ha {_f(ci_ha, 7)}  "
+                      f"CIRAL-so {_f(ci_so, 7)}")
     eff = results.get("efficiency")
     if eff:
         print("\nTOKENIZATION (subword tax vs byte UTF-8 tax, vs English, on FLORES-1012):")
@@ -258,12 +269,14 @@ def main():
                     help="early-stop after N log-windows without loss improvement (0 = off, iso-step)")
     ap.add_argument("--min-delta", type=float, dest="min_delta", default=1e-3,
                     help="minimum window-avg loss improvement that resets the patience counter")
+    ap.add_argument("--boundary", default=None, choices=["teacher", "random"],
+                    help="boundary-injection arm (byte students only; use a separate --out per arm)")
     a = ap.parse_args()
     only = None if a.only is None else [x for x in a.only.split(",") if x]
     run(out=a.out, smoke=a.smoke, device=a.device, n_per_lang=a.n_per_lang,
         teacher_name=a.teacher_name, only=only, with_baselines=a.with_baselines,
         with_efficiency=a.with_efficiency, pooling=a.pooling, steps=a.steps,
-        patience=a.patience, min_delta=a.min_delta)
+        patience=a.patience, min_delta=a.min_delta, boundary=a.boundary)
 
 
 if __name__ == "__main__":

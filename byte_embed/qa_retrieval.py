@@ -26,12 +26,14 @@ Four dataset shapes are supported, all reduced to one scoring path (`_score_pool
     public deep-retrieval signal for Hausa (715k news passages; never its 10-query dev split).
     AfriCLIRMatrix (Ogundepo et al. 2022): kept available (am/ha), off the default battery.
 
-FINALIZED coverage (STUDY_LANGS te/sw/yo/am/ha + en/zh/ar): MIRACL (byte_embed/miracl.py) carries the
-monolingual deep axis for te/sw/yo/en/zh/ar; here Mr.TyDi corroborates te/sw, 2AIRTC + Amharic-PR
-carry am (monolingual), CIRAL carries ha (cross-lingual, flagged), IndicQA stays as a small-pool
-secondary for te. Belebele (eval_battery) covers all languages shallow. Dropped from the study: rw
-(no deep benchmark exists — AfriQA's gold passages are English/French text, not Kinyarwanda), ta/mr
-(IndicQA's ~250-doc pool is not deep).
+FINALIZED coverage — ONE deep benchmark per language (the one with the most passages available):
+MIRACL (byte_embed/miracl.py) carries te/sw/yo/en/zh/ar (49k-33M passages, monolingual); Amharic-PR
+carries am (68,301 passages > 2AIRTC's 12,587); CIRAL carries ha and the zero-shot eval-only Somali
+(715k / ~1M passages, cross-lingual, flagged). So the DEFAULT here is just ("amharicpr", "ciral") —
+Mr.TyDi, IndicQA, 2AIRTC, and AfriCLIRMatrix stay wired for optional corroboration via benchmarks=.
+Belebele (eval_battery) covers all languages shallow. Dropped from the study: rw (no deep benchmark
+exists — AfriQA's gold passages are English/French text, not Kinyarwanda), ta/mr (IndicQA's ~250-doc
+pool is not deep).
 
   python -m byte_embed.qa_retrieval --selftest      # tiny pool build for indicqa + amharicpr
 """
@@ -83,8 +85,8 @@ QA_CLIR = {
         "qrels_url":  _CIRAL_HF + "/ciral-{name}/qrels/qrels.ciral-v1.0-{code}-test-a.tsv",
         "corpus_url": "https://huggingface.co/datasets/CIRAL/ciral-corpus/resolve/main/"
                       "passages-v1.0/{name}_passages.jsonl",
-        "langs": {"ha": ("hausa", "ha")},       # sw/yo/so also exist; sw/yo have monolingual MIRACL
-        "did": "docid", "dtext": "text", "max_stream": 800000,   # ha corpus = 715k, full pass, cached
+        "langs": {"ha": ("hausa", "ha"), "so": ("somali", "so")},   # so = zero-shot eval-only lang
+        "did": "docid", "dtext": "text", "max_stream": 1100000,    # ha 715k / so ~1.0M, full pass, cached
     },
     "africlir": {
         "topics_url": _AFRICLIR_GH + "/queries/topics.africlirmatrix-v1.0.en.{code}.tsv",
@@ -396,7 +398,7 @@ def _score_pool(encode_fn, built):
 
 
 def eval_qa_retrieval(encode_fn,
-                      benchmarks=("indicqa", "mrtydi", "amharicpr", "2airtc", "ciral"),
+                      benchmarks=("amharicpr", "ciral"),
                       n_queries=250, distractors=20000, seed=0, cache_dir="checkpoints"):
     """Per-benchmark, per-language nDCG@10 / recall@100 (+ benchmark means). The RAG-retrieval axis.
     Handles mteb-layout benchmarks (`QA_BENCH`), flat query->passage ones (`QA_FLAT`), inverted-relevance

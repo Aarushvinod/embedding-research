@@ -16,7 +16,7 @@ from torch.optim import AdamW
 def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
             lr=2e-4, log_every=100, objective="cosine", temp=0.05,
             augment=False, queue_size=0, rel_weight=0.0, optimizer="adamw",
-            patience=0, min_delta=1e-3,
+            patience=0, min_delta=1e-3, input_transform=None,
             ckpt_path=None, ckpt_every=5000, targets=None):
     """augment=True feeds the student orthographically-noised input while the teacher targets
     CLEAN text — distilling orthographic INVARIANCE while contrastive keeps discriminativeness
@@ -78,6 +78,8 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
                 t_emb = teacher.encode(texts, as_tensor=True, device=device).clone()
         if augment:  # student sees noised input ~half the time; the clean teacher is the target
             texts = [random_augment(x, aug_rng) if aug_rng.random() < 0.5 else x for x in texts]
+        if input_transform is not None:  # boundary-injection arms etc.; teacher targets stay CLEAN
+            texts = [input_transform(x) for x in texts]
         with torch.autocast(device_type="cuda", dtype=amp_dtype):
             s_emb = student(texts, device=device)
             if objective == "mse":  # MSE on the (L2-normalized) embeddings

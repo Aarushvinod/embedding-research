@@ -79,8 +79,15 @@ def reeval(results_path, pooling, ckpt_dir="checkpoints", device="cuda", langs=N
         if qa_only and bm.get("qa_retrieval"):
             print(f"  [reeval] {name}: already has QA -> skip")
             continue
+        # boundary-arm models: per-arm checkpoint namespace + the arm's input transform at eval
+        b = bm.get("boundary")
+        mtsuf = tsuf + (f"_b-{b}" if b else "")
         try:
-            enc = _load_enc(name, bm, pooling, ckpt_dir, teacher_dim, device, tsuf=tsuf)
+            enc = _load_enc(name, bm, pooling, ckpt_dir, teacher_dim, device, tsuf=mtsuf)
+            if enc is not None and b:
+                from byte_embed.boundaries import make_transform
+                _t, _e = make_transform(b), enc
+                enc = lambda xs, _t=_t, _e=_e: _e([_t(x) for x in xs])  # noqa: E731
         except Exception as e:  # noqa: BLE001
             print(f"  [reeval] {name}: load failed {type(e).__name__}: {e}")
             continue
@@ -98,13 +105,11 @@ def reeval(results_path, pooling, ckpt_dir="checkpoints", device="cuda", langs=N
             continue
         Path(out).write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
         qa = bm["qa_retrieval"]
-        iq = (qa.get("indicqa") or {}).get("ndcg@10_mean")
-        mt = (qa.get("mrtydi") or {}).get("ndcg@10_mean")
         am = (qa.get("amharicpr") or {}).get("ndcg@10_mean")
-        a2 = (qa.get("2airtc") or {}).get("ndcg@10_mean")
-        ci = ((qa.get("ciral") or {}).get("per_lang") or {}).get("ha") or {}
-        print(f"  [reeval] {name}: saved | IndicQA={iq} Mr.TyDi={mt} AmharicPR={am} 2AIRTC={a2} "
-              f"CIRAL-ha={ci.get('ndcg@10')}")
+        cl = (qa.get("ciral") or {}).get("per_lang") or {}
+        print(f"  [reeval] {name}: saved | AmharicPR={am} "
+              f"CIRAL-ha={(cl.get('ha') or {}).get('ndcg@10')} "
+              f"CIRAL-so={(cl.get('so') or {}).get('ndcg@10')}")
         if "cuda" in str(device):
             torch.cuda.empty_cache()
 

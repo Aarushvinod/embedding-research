@@ -44,8 +44,10 @@ def _merge(out, names):
 
 def parallel(out="results/byte_lowresource.json", device="cuda", max_concurrent=3,
              n_per_lang=42000, teacher_name="sonar", pooling="mean", steps=None,
-             patience=0, min_delta=1e-3):
+             patience=0, min_delta=1e-3, boundary=None):
     rows = _grid(steps)                              # [(name, backbone, steps, batch, ckpt), ...]
+    if boundary:
+        rows = [r for r in rows if "byt5" in r[1]]   # boundary arms are byte-only
     names = [r[0] for r in rows]
     model_steps = {r[0]: r[2] for r in rows}         # per-model step count (size schedule)
 
@@ -68,6 +70,8 @@ def parallel(out="results/byte_lowresource.json", device="cuda", max_concurrent=
                    "--n-per-lang", str(n_per_lang), "--teacher", teacher_name, "--pooling", pooling,
                    "--steps", str(model_steps[n]),
                    "--patience", str(patience), "--min-delta", str(min_delta)]
+            if boundary:
+                cmd += ["--boundary", boundary]
             procs[n] = (subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT), logf)
             print(f"  launched {n}  (log -> {logf.name})")
         for n, (p, logf) in list(procs.items()):
