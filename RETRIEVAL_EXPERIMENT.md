@@ -66,13 +66,17 @@ comparison stays internally fair — and both ByT5/mT5 saw yo in mC4 pretraining
 
 ## Evaluation (retrieval-only, one deep benchmark per language)
 
-| Benchmark | Pool | Languages | Axis / metric |
+All benchmarks report the full statistic set — **nDCG@10, precision@10, recall@10, recall@100 (deep)
+/ recall@1 (Belebele), and MRR@10**. On single-relevant benchmarks (Belebele, Amharic-PR, AfriQA)
+precision@k is recall@k / k by construction — reported anyway for completeness.
+
+| Benchmark | Pool | Languages | Axis |
 |---|---|---|---|
-| Belebele | 488 | all 10 | shallow passage retrieval, nDCG@10 |
-| MIRACL (dev) | 20k rerank pools | en zh ar te bn sw yo | deep monolingual, nDCG@10 + R@100 |
-| Amharic-PR | 20k | am | deep monolingual, nDCG@10 + R@100 |
-| CIRAL Test A | full-corpus stream → pool | ha | **cross-lingual, flagged**, nDCG@10 + R@100 |
-| AfriQA | gold contexts + 20k en distractors | rw (deep) · ha/sw/yo (probe) | **cross-lingual REVERSE, flagged**, nDCG@10 + R@100 |
+| Belebele | 488 | all 10 | shallow passage retrieval |
+| MIRACL (dev) | 20k rerank pools | en zh ar te bn sw yo | deep monolingual |
+| Amharic-PR | 20k | am | deep monolingual |
+| CIRAL Test A | full-corpus stream → pool | ha | **cross-lingual, flagged** |
+| AfriQA | gold contexts + 20k en distractors | rw (deep) · ha/sw/yo (probe) | **cross-lingual REVERSE, flagged** |
 
 FLORES bitext, SIB, and STS are dropped from the default (`eval_battery` computes them only on
 request via `tasks=`). Mr.TyDi, IndicQA, 2AIRTC, and AfriCLIRMatrix remain wired but off the default

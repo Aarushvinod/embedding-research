@@ -77,9 +77,12 @@ def eval_sts(encode_fn, lang):
 
 # --------------------------------------------------------------------------- Belebele retrieval
 def _ndcg_recall(rank0, k=10):
-    """Single-relevant retrieval metrics from the 0-indexed rank of the gold doc."""
+    """Single-relevant retrieval metrics from the 0-indexed rank of the gold doc.
+    Returns (nDCG@k, recall@k, recall@1, MRR@k). With ONE gold: precision@k = recall@k / k and
+    precision@1 = recall@1 — both derived in eval_belebele rather than recomputed."""
     ndcg = (1.0 / np.log2(rank0 + 2.0)) if rank0 < k else 0.0   # IDCG = 1 (one relevant)
-    return ndcg, float(rank0 < k), float(rank0 == 0)            # nDCG@k, recall@k, recall@1
+    mrr = (1.0 / (rank0 + 1.0)) if rank0 < k else 0.0
+    return ndcg, float(rank0 < k), float(rank0 == 0), mrr
 
 
 def eval_belebele(encode_fn, lang, n_queries=None, seed=0):
@@ -109,10 +112,15 @@ def eval_belebele(encode_fn, lang, n_queries=None, seed=0):
     sims = Q @ P.T                                   # [nq, n_passages]
     # rank of the gold passage per query = #passages scoring strictly higher
     ranks = (sims > sims[np.arange(len(gold)), gold][:, None]).sum(1)
-    ndcg, rec10, rec1 = zip(*[_ndcg_recall(int(r)) for r in ranks])
-    return {"ndcg@10": round(float(np.mean(ndcg)), 4), "recall@10": round(float(np.mean(rec10)), 4),
-            "recall@1": round(float(np.mean(rec1)), 4), "n_queries": len(questions),
-            "n_passages": len(passages)}
+    ndcg, rec10, rec1, mrr = zip(*[_ndcg_recall(int(r)) for r in ranks])
+    r10 = float(np.mean(rec10))
+    r1 = float(np.mean(rec1))
+    return {"ndcg@10": round(float(np.mean(ndcg)), 4),
+            "precision@10": round(r10 / 10.0, 4),    # single gold: P@10 = R@10/10, P@1 = R@1
+            "precision@1": round(r1, 4),
+            "recall@10": round(r10, 4), "recall@1": round(r1, 4),
+            "mrr@10": round(float(np.mean(mrr)), 4),
+            "n_queries": len(questions), "n_passages": len(passages)}
 
 
 # --------------------------------------------------------------------------- FLORES bitext
@@ -176,6 +184,8 @@ def eval_battery(encode_fn, langs, tasks=("belebele",)):
         res["means"]["sib"] = _mean(res["sib"])
     if "belebele" in tasks:
         res["means"]["belebele_ndcg@10"] = _mean(res["belebele"], "ndcg@10")
+        res["means"]["belebele_recall@10"] = _mean(res["belebele"], "recall@10")
+        res["means"]["belebele_mrr@10"] = _mean(res["belebele"], "mrr@10")
     if "flores" in tasks:
         res["means"]["flores_p@1"] = _mean(res["flores_bitext"], "p@1")
     if "sts" in tasks:

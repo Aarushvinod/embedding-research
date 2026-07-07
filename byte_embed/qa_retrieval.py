@@ -446,7 +446,8 @@ def _build_pool_afriqa(spec, our_lang, key, n_queries, distractors, seed, cache_
 
 
 def _score_pool(encode_fn, built):
-    """Encode queries + pool, return nDCG@10 / recall@100 over the (queries, rel, pool) tuple."""
+    """Encode queries + pool, return nDCG@10 / precision@10 / recall@10 / recall@100 / MRR@10 over
+    the (queries, rel, pool) tuple. On single-relevant benchmarks precision@10 = recall@10 / 10."""
     from common.eval import l2norm
 
     queries, rel, pool_id, pool_text = built
@@ -454,7 +455,7 @@ def _score_pool(encode_fn, built):
     Q = l2norm(encode_fn([queries[qid] for qid in qids]))
     P = l2norm(encode_fn(pool_text))
     docid = np.array(pool_id)
-    ndcgs, recalls = [], []
+    ndcgs, recalls, rec10s, prec10s, mrrs = [], [], [], [], []
     for k, qid in enumerate(qids):
         r = rel[qid]
         if not r:                                            # no relevant doc in pool -> skip (no div/0)
@@ -462,10 +463,19 @@ def _score_pool(encode_fn, built):
         ranked = docid[np.argsort(-(Q[k] @ P.T))]
         rr = np.fromiter((1.0 if d in r else 0.0 for d in ranked), float, len(ranked))
         ndcgs.append(_ndcg_at_k(rr, 10))
+        top10 = float(rr[:10].sum())
+        prec10s.append(top10 / 10.0)
+        rec10s.append(top10 / len(r))
         recalls.append(float(rr[:100].sum()) / len(r))
+        hit = np.flatnonzero(rr[:10])
+        mrrs.append(1.0 / (hit[0] + 1) if len(hit) else 0.0)
     if not ndcgs:
         return None
-    return {"ndcg@10": round(float(np.mean(ndcgs)), 4), "recall@100": round(float(np.mean(recalls)), 4),
+    return {"ndcg@10": round(float(np.mean(ndcgs)), 4),
+            "precision@10": round(float(np.mean(prec10s)), 4),
+            "recall@10": round(float(np.mean(rec10s)), 4),
+            "mrr@10": round(float(np.mean(mrrs)), 4),
+            "recall@100": round(float(np.mean(recalls)), 4),
             "n_queries": len(ndcgs), "pool": len(pool_text)}
 
 
