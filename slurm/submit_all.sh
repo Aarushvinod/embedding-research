@@ -19,18 +19,20 @@ ARM_MODELS=(byte-small byte-base byte-large)
 #   GRES: default 'gpu:1' takes any free GPU; pin a type with GRES=gpu:rtxa6000:1 / gpu:a100:1.
 #   QoS: huge-long is CLIP's long-job QoS (check exact limits on-cluster with `show_qos`);
 #        the standard 'default' QoS caps mem at 32G, below train_model.sbatch's 48G request.
-PARTITION="${PARTITION-clip}"
-ACCOUNT="${ACCOUNT-clip}"
-QOS="${QOS-huge-long}"
-GRES="${GRES-gpu:rtxa6000:1}"       # pinned to the 48GB A6000s; loosen with GRES=gpu:1
-CONSTRAINT="${CONSTRAINT-Ampere}"   # any modern clip card; excludes Pascal/Turing (see train_model.sbatch)
-# H100/H200s live on CML/Vulcan nodes, NOT the clip partition — but scavenger's node list covers
-# them (verified: cml[30-36] + vulcan46 are in scontrol show partition scavenger). Preemptible;
-# --requeue + 5k-step checkpoints make preemption cheap.
-#   ARMS_VIA_SCAVENGER=1  -> main grid on clip (SFLAGS above), boundary arms on scavenger Hopper.
-#   Or route EVERYTHING there: PARTITION=scavenger ACCOUNT=scavenger QOS=scavenger \
-#     CONSTRAINT=Hopper GRES=gpu:1 bash slurm/submit_all.sh
-ARMS_VIA_SCAVENGER="${ARMS_VIA_SCAVENGER-0}"
+# DEFAULT TARGET = RTX 6000 Ada (48GB, cbcb28/29 only) -> reachable for CLIP members via the
+# preemptible scavenger tier (verified in scavenger's node list; --requeue + 5k-step checkpoints
+# make preemption cost <= 5k steps). Alternatives:
+#   CLIP A6000s (non-preemptible): PARTITION=clip ACCOUNT=clip QOS=huge-long \
+#     GRES=gpu:rtxa6000:1 bash slurm/submit_all.sh
+#   Any Ada 48GB card (adds the L40S pool, same AD102 silicon -> much more capacity):
+#     GRES=gpu:1 CONSTRAINT=Ada bash slurm/submit_all.sh
+#   Hopper H100/H200: GRES=gpu:1 CONSTRAINT=Hopper bash slurm/submit_all.sh
+PARTITION="${PARTITION-scavenger}"
+ACCOUNT="${ACCOUNT-scavenger}"
+QOS="${QOS-scavenger}"
+GRES="${GRES-gpu:rtx6000ada:1}"
+CONSTRAINT="${CONSTRAINT-}"         # typed gres pins the card; set CONSTRAINT=Ada/Hopper with GRES=gpu:1
+ARMS_VIA_SCAVENGER="${ARMS_VIA_SCAVENGER-0}"   # legacy split flag; redundant when everything is scavenger
 SCAV_FLAGS=(--partition=scavenger --account=scavenger --qos=scavenger
             --constraint=Hopper --gres=gpu:1)
 SFLAGS=()

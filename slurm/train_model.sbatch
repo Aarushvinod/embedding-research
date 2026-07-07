@@ -7,20 +7,19 @@
 #        sbatch train_model.sbatch byte-base   results/retrieval_bgem3_bteacher.json teacher
 #
 #SBATCH --job-name=byteembed
-#SBATCH --gres=gpu:rtxa6000:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --time=36:00:00
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --requeue
-# Defaults = UMD Nexus / CLIP lab (override on the command line or via submit_all.sh env vars).
-# NOTE: 48G mem exceeds the 'default' QoS cap (32G) -> huge-long (or medium + lower --mem).
-# --constraint=Ampere takes ANY modern clip card (rtxa6000/rtx3090/rtxa5000/rtxa4000, all bf16,
-# all >= 16GB) and excludes the Pascal/Turing nodes (titanxp/1080ti/2080ti: slow, <= 12GB, no bf16).
-#SBATCH --partition=clip
-#SBATCH --account=clip
-#SBATCH --qos=huge-long
-#SBATCH --constraint=Ampere
+# Defaults = RTX 6000 Ada (48GB) — those live on cbcb28/29 only, so the route for CLIP members is
+# the preemptible scavenger tier (--requeue + 5k-step checkpoints make preemption cost <= 5k steps).
+# CLIP-partition fallback (non-preemptible A6000s):
+#   sbatch --partition=clip --account=clip --qos=huge-long --gres=gpu:rtxa6000:1 slurm/train_model.sbatch ...
+#SBATCH --partition=scavenger
+#SBATCH --account=scavenger
+#SBATCH --qos=scavenger
+#SBATCH --gres=gpu:rtx6000ada:1
 
 set -euo pipefail
 MODEL="$1"
