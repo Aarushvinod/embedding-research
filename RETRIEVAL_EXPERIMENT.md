@@ -56,8 +56,8 @@ comparison stays internally fair — and both ByT5/mT5 saw yo in mC4 pretraining
 | Students | `google/byt5-{small,base,large}` vs `google/mt5-{small,base,large}` (encoder-only + attn pool + 1024-d head) |
 | Teacher | **BGE-M3** (`BAAI/bge-m3`, retrieval-trained, 1024-d); `me5-large` wired as the ablation teacher |
 | Objective | **Retrieval-only: pure InfoNCE** (τ=0.05, MoCo queue 8192) — `objective='contrastive'`, `rel_weight=0` (the alignment add-on and the STS-motivated relational term are dropped) |
-| Optimizer | AdamW lr 2e-4, batch 64, **100k steps for every model (iso-step)**, bf16 |
-| Early stop | `patience` windows without window-avg loss improving > `min_delta`. **Default 0 = off** (exact iso-step). If enabled, `steps` is a cap; realized `steps_run` is saved and must be reported |
+| Optimizer | AdamW lr 2e-4, batch 64, **100k-step CAP for every model (iso-cap)**, bf16 |
+| Early stop | **ENABLED: patience=10 × 1,000-step windows, min_delta=1e-3** — stop when 10k consecutive steps fail to improve the windowed loss; identical rule for every model. Realized `steps_run` is saved per model and MUST be reported alongside scores (models may stop at different steps — the cap and the stopping rule, not the step count, are held equal) |
 | Data | 10 languages, balanced max-min Wikipedia sentences (~42k/lang, ~420k total) |
 | Targets | BGE-M3, precomputed once, cached per language-LIST tag (`teachertargets_bge-m3_te-bn-sw-..._42000`) |
 | Pooling | `attn` for byte AND subword (fair) |
