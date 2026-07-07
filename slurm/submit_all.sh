@@ -24,11 +24,15 @@ ACCOUNT="${ACCOUNT-clip}"
 QOS="${QOS-huge-long}"
 GRES="${GRES-gpu:rtxa6000:1}"       # pinned to the 48GB A6000s; loosen with GRES=gpu:1
 CONSTRAINT="${CONSTRAINT-Ampere}"   # any modern clip card; excludes Pascal/Turing (see train_model.sbatch)
-# H100/H200s live on CML/Vulcan nodes, NOT the clip partition. The route is the preemptible
-# scavenger tier (auto-requeue + 5k-step checkpoints make preemption cheap):
-#   PARTITION=scavenger ACCOUNT=scavenger QOS=scavenger CONSTRAINT=Hopper GRES=gpu:1 \
-#     bash slurm/submit_all.sh
-# (verify scavenger's node coverage first: scontrol show partition scavenger)
+# H100/H200s live on CML/Vulcan nodes, NOT the clip partition — but scavenger's node list covers
+# them (verified: cml[30-36] + vulcan46 are in scontrol show partition scavenger). Preemptible;
+# --requeue + 5k-step checkpoints make preemption cheap.
+#   ARMS_VIA_SCAVENGER=1  -> main grid on clip (SFLAGS above), boundary arms on scavenger Hopper.
+#   Or route EVERYTHING there: PARTITION=scavenger ACCOUNT=scavenger QOS=scavenger \
+#     CONSTRAINT=Hopper GRES=gpu:1 bash slurm/submit_all.sh
+ARMS_VIA_SCAVENGER="${ARMS_VIA_SCAVENGER-0}"
+SCAV_FLAGS=(--partition=scavenger --account=scavenger --qos=scavenger
+            --constraint=Hopper --gres=gpu:1)
 SFLAGS=()
 [ -n "$PARTITION" ]  && SFLAGS+=(--partition="$PARTITION")
 [ -n "$ACCOUNT" ]    && SFLAGS+=(--account="$ACCOUNT")
@@ -51,13 +55,19 @@ for m in "${MAIN_MODELS[@]}"; do
   MAIN_IDS+=("$jid"); echo "main $m: $jid"
 done
 
-# 3) boundary arms — 3 byte sizes per arm, separate results file per arm
+# 3) boundary arms — 3 byte sizes per arm, separate results file per arm.
+#    ARMS_VIA_SCAVENGER=1 routes these to preemptible Hopper (H100/H200) nodes.
 declare -A ARM_IDS
 for arm in teacher random; do
   out="results/retrieval_bgem3_b${arm}.json"
   ids=()
   for m in "${ARM_MODELS[@]}"; do
-    jid=$(sb --dependency=afterok:"$PRE" slurm/train_model.sbatch "$m" "$out" "$arm")
+    if [ "$ARMS_VIA_SCAVENGER" = 1 ]; then
+      jid=$(sbatch --parsable "${SCAV_FLAGS[@]}" --dependency=afterok:"$PRE" \
+            slurm/train_model.sbatch "$m" "$out" "$arm")
+    else
+      jid=$(sb --dependency=afterok:"$PRE" slurm/train_model.sbatch "$m" "$out" "$arm")
+    fi
     ids+=("$jid"); echo "arm-$arm $m: $jid"
   done
   ARM_IDS[$arm]=$(IFS=:; echo "${ids[*]}")
