@@ -9,7 +9,7 @@
 #SBATCH --job-name=byteembed
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
-#SBATCH --time=36:00:00
+#SBATCH --time=48:00:00
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --requeue
 # Defaults = RTX 6000 Ada (48GB) — those live on cbcb28/29 only, so the route for CLIP members is
@@ -35,7 +35,7 @@ echo "node=$(hostname)  model=$MODEL  boundary=${BOUNDARY:-none}"
 
 TEACHER="bge-m3"
 POOLING="attn"
-STEPS=50000
+STEPS="${STEPS-100000}"    # iso-step for every model; env-overridable
 
 PART="${OUT%.json}_part_${MODEL}.json"
 EXTRA=()

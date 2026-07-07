@@ -10,7 +10,8 @@
 set -euo pipefail
 
 MAIN_OUT="results/retrieval_bgem3.json"
-TEACHER="bge-m3"; POOLING="attn"; STEPS=50000
+TEACHER="bge-m3"; POOLING="attn"
+export STEPS="${STEPS-100000}"    # exported so train_model.sbatch inherits it
 MAIN_MODELS=(byte-small subword-small byte-base subword-base byte-large subword-large)
 ARM_MODELS=(byte-small byte-base byte-large)
 
