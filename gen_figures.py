@@ -1,7 +1,7 @@
 """Generate the curated PAPER figures (PNGs in figures/) from the run JSONs.
 
-GRAFT numbers are the curated paper subset (stable, from RESULTS.md); ByteEmbed numbers are read
-from results/byte_paper.json (run_paper.py). Run after the paper experiment completes:
+ByteEmbed numbers are read from results/byte_paper.json (run_paper.py). Run after the paper
+experiment completes:
   python gen_figures.py
 """
 from __future__ import annotations
@@ -16,31 +16,6 @@ import matplotlib.pyplot as plt  # noqa: E402
 FIG = Path("figures")
 FIG.mkdir(exist_ok=True)
 plt.rcParams.update({"font.size": 11, "figure.dpi": 140, "savefig.bbox": "tight"})
-
-# ---- curated GRAFT results (paper subset, from RESULTS.md) -------------------------------
-GRAFT_RECOVERY = {  # lang: (recovery%, tier)
-    "ca": (78, "high"), "de": (69, "high"), "id": (69, "high"), "ru": (53, "high"),
-    "bg": (61, "high"), "ar": (49, "high"), "bn": (46, "high"), "el": (47, "high"),
-    "hi": (43, "high"), "he": (43, "high"),
-    "tr": (55, "mid"), "fi": (62, "mid"), "vi": (39, "low"), "uk": (26, "low"),
-    "ur": (13, "low"), "ne": (16, "low"), "mr": (23, "low"), "am": (3, "tail"),
-    "ka": (3, "tail"),
-}
-
-
-def fig_graft_recovery():
-    items = sorted(GRAFT_RECOVERY.items(), key=lambda kv: -kv[1][0])
-    colors = {"high": "#2a7", "mid": "#59f", "low": "#e94", "tail": "#c33"}
-    fig, ax = plt.subplots(figsize=(8, 3.2))
-    ax.bar([k for k, _ in items], [v[0] for _, v in items],
-           color=[colors[v[1]] for _, v in items])
-    ax.axhline(50, ls="--", c="#999", lw=0.8)
-    ax.set_ylabel("recovery of trained\nmultilingual model (%)")
-    ax.set_title("GRAFT: bitext-free, training-free extension is resource-bounded, not script-bounded")
-    handles = [plt.Rectangle((0, 0), 1, 1, color=c) for c in colors.values()]
-    ax.legend(handles, [f"{k}-resource" for k in colors], ncol=4, fontsize=9, loc="upper right")
-    fig.savefig(FIG / "fig1_graft_recovery.png")
-    plt.close(fig)
 
 
 def _load():
@@ -339,8 +314,6 @@ def main_lowres():
 
 
 def main():
-    fig_graft_recovery()
-    print("fig1 (GRAFT recovery) written")
     R = _load()
     if R is None:
         print("results/byte_paper.json not found — ByteEmbed figures skipped")

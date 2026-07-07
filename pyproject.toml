@@ -5,8 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "embedding-research"
 version = "0.0.1"
-description = "Feasibility experiments: GATE-GRAFT (gated cross-lingual grafting) and ByteEmbed (byte-level retriever)"
+description = "ByteEmbed: byte-level vs subword tokenizer-free multilingual retrieval (BGE-M3 distillation)"
 requires-python = ">=3.11"
 
 [tool.setuptools]
-packages = ["common", "gate_graft", "byte_embed"]
+packages = ["common", "byte_embed"]

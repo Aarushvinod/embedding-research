@@ -1,76 +1,61 @@
-# embedding-research
+# embedding-research — ByteEmbed
 
-Two embedding research threads on the **subword bottleneck** in multilingual sentence embeddings:
+**Byte-level vs subword tokenizer-free multilingual sentence embeddings**, distilled from a frozen
+retrieval teacher (**BGE-M3**) and evaluated as retrievers for low-resource-language question
+answering. The clean question: at matched compute, is removing the ~250k subword vocabulary table a
+better **parameter allocation** for low-resource retrieval? The byte student (ByT5 encoder) and the
+subword student (mT5 encoder) share the teacher, targets, data, recipe, and evaluation — the
+tokenizer is the only manipulated variable.
 
-1. **ByteEmbed** (`byte_embed/`) — *eliminate* the vocabulary: a tokenizer-free **byte-level** (ByT5)
-   student distilled from a frozen **SONAR** teacher, compared head-to-head with an identically-trained
-   **subword** (mT5) student on **low-resource** languages. The clean question: at matched compute, is
-   removing the 250k vocab table a better **parameter allocation** for low-resource retrieval?
-   *Training-heavy — runs on Colab A100.*
-2. **GATE-GRAFT** (`gate_graft/`) — *extend* the vocabulary: bitext-free cross-lingual alignment of a
-   frozen embedder via Gromov–Wasserstein structure-matching + a per-token reliability gate.
-   *Runs fully on a laptop (no training).* Kept in its own folder for reuse.
-
-## Results (start here)
-- **`PAPER.md`** — the curated, paper-ready narrative for both threads + honest scope.
-- **`byte_embed/RESULTS.md`** — the ByteEmbed study design, *validated dataset sizes*, the measured
-  tokenization-tax numbers, and prior (superseded) feasibility results.
-- **`RESULTS.md`** — GRAFT detailed/reference results + audit.
+## Start here
+- **`RETRIEVAL_EXPERIMENT.md`** — the locked experimental design: the 10-language set (7 lower-resource
+  + 3 anchors, deep-research-verified), the retrieval-only InfoNCE objective, the 12-model grid
+  (byte/subword × small/base/large + boundary arms), the eval battery, and how to run it.
+- **`byte_embed/README.md`** — module map and the code-level how-to.
+- **`byte_embed/RESULTS.md`** — study design, validated dataset sizes, measured tokenization-tax.
+- **`byte_embed/NOVELTY.md`** — citation-grounded positioning vs prior work.
 - **`figures/`** — figures (PNG); regenerate with `python gen_figures.py`. Raw run JSON is under
   `results/` (gitignored).
 
-**Headline.** GRAFT recovers 43–85% of a trained multilingual model bitext-free but is resource-bounded.
-ByteEmbed is re-scoped to a clean SONAR-teacher low-resource study (results pending); its motivation is
-**parameter allocation, not lower cost** — byte's UTF-8 sequence cost is actually *higher* than subword
-for non-Latin scripts (see `PAPER.md` Part III).
-
 ## Layout
 ```
-PAPER.md            curated paper-ready narrative (both threads) — START HERE
-RESULTS.md          GRAFT detailed/reference results + audit
-gen_figures.py      builds figures/ from results/*.json
-figures/            figures (PNG)
-common/             shared eval (SIB, STS, BLI, CSLS) + GRAFT data loaders (fastText, MUSE)
-byte_embed/         the SONAR low-resource byte-vs-subword study (+ RESULTS.md, README.md)
-  run_lowresource.py  orchestrator   teachers.py  SONAR(+LaBSE)   eval_mteb.py  uniform battery
-  efficiency.py  tokenization tax    distill.py / model.py / data.py / miracl.py / config.py
-  robustness.py  orthographic perturbations (deferred; kept for a follow-up run)
-gate_graft/         GW/anchored alignment + reliability gate + graft + 21-lang study (LOCAL, no training)
-notebooks/          byteembed_lowresource_a100.ipynb (the A100 runner)
-scripts/            check_env.py, download_data.py
-data/ results/      downloaded data / raw run JSON (gitignored)
+RETRIEVAL_EXPERIMENT.md   locked design for the byte-vs-subword retrieval study — START HERE
+gen_figures.py            builds figures/ from results/*.json
+common/                   shared eval helpers (l2norm + optional SIB/STS MTEB probes)
+byte_embed/               the study (+ README.md, RESULTS.md, NOVELTY.md)
+  run_lowresource.py  orchestrator      teachers.py  BGE-M3 / mE5 retrieval teachers
+  distill.py          InfoNCE + patience distillation      model.py  byte/subword students
+  data.py  balanced Wikipedia sampler   config.py  language sets
+  miracl.py / qa_retrieval.py  deep retrieval evals (pool + full-corpus)
+  eval_mteb.py  Belebele battery        boundaries.py  boundary-injection arms
+  full_eval.py  post-training full-corpus final evaluation
+  reeval.py  additive re-evaluation of finished checkpoints
+notebooks/                byteembed_retrieval_a100.ipynb (the runner) + specialization notebooks
+slurm/                    submit_all.sh (training) · submit_full_eval.sh (final eval) · train_model.sbatch
+results/                  raw run JSON (gitignored)
 ```
 
-## Quick start
-
-### ByteEmbed (Colab A100)
-Open `notebooks/byteembed_lowresource_a100.ipynb` in Colab, set runtime = A100, run top-to-bottom (do
-the smoke cell first; it confirms SONAR-vs-LaBSE and validates the whole pipeline). Resumable across
-sessions. CLI equivalent:
+## Quick start (Colab A100 / cloud GPU)
+Open `notebooks/byteembed_retrieval_a100.ipynb`, set runtime = A100, run top-to-bottom (do the smoke
+cell first — it validates the BGE-M3 teacher and the whole pipeline). Resumable across sessions.
+CLI equivalent:
 ```bash
 pip install -r requirements-cloud.txt && pip install -e .
 python -m byte_embed.run_lowresource --smoke      # ~5-min self-test
-python -m byte_embed.run_lowresource              # the full study (resumable)
+python -m byte_embed.run_lowresource --teacher bge-m3 --pooling attn --steps 100000 \
+    --out results/retrieval_bgem3.json            # the full study (resumable)
 ```
 
-### GATE-GRAFT (local — laptop is plenty)
+## SLURM
 ```bash
-python -m venv .venv && .venv\Scripts\activate      # Windows
-pip install -r requirements-local.txt && pip install -e .
-python scripts/check_env.py
-python -m gate_graft.run_feasibility --langs ca tr bn eu --k 2000
+bash slurm/submit_all.sh          # 1 precompute -> 12 dependency-gated trainings -> merges
+bash slurm/submit_full_eval.sh    # after training: full-corpus final eval, one job per model
 ```
-Inference + CPU optimal transport only. ~1 GB VRAM, minutes/language.
-
-## Hardware notes
-- Author machine: RTX 5070 Ti **Laptop** GPU (12 GB, Blackwell/sm_120). GATE-GRAFT runs here; ByteEmbed
-  training targets a Colab A100 (80 GB).
-- **Blackwell caveat:** local GPU work needs PyTorch for CUDA 12.8+ (cu128); see `requirements-cloud.txt`.
-  Colab/cloud images handle this.
+Same per-model part-file convention as the notebook, so Colab sessions and SLURM jobs are
+interchangeable mid-study. See `RETRIEVAL_EXPERIMENT.md` → "How to run" for multi-session
+partitioning and the cluster-flag env vars (partition/account/qos/gres).
 
 ## Status
-- **GATE-GRAFT:** 21-language study complete (`PAPER.md` / `RESULTS.md`); reproduce with
-  `python -m gate_graft.run_matrix`.
-- **ByteEmbed:** the SONAR low-resource study is **implemented and locally validated** (loaders, exact
-  dataset sizes, the eval→figures contract); the 6-model A100 run is **pending**. Prior mE5-teacher
-  feasibility results are preserved in `byte_embed/RESULTS.md` and marked superseded.
+The 12-model study runs on the UMD Nexus (CLIP) cluster / Colab A100. Training uses a retrieval-only
+InfoNCE objective distilled from BGE-M3; the reported numbers come from the post-training full-corpus
+evaluation (`full_eval.py`). Predictions are pre-registered in `RETRIEVAL_EXPERIMENT.md`.
