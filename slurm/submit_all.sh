@@ -14,15 +14,20 @@ TEACHER="bge-m3"; POOLING="attn"; STEPS=50000
 MAIN_MODELS=(byte-small subword-small byte-base subword-base byte-large subword-large)
 ARM_MODELS=(byte-small byte-base byte-large)
 
-# Cluster flags via env — command-line sbatch flags override the script headers. Examples:
-#   UMD Nexus / CLIP lab:  PARTITION=clip ACCOUNT=clip QOS=huge-long GRES=gpu:rtxa6000:1 \
-#                          bash slurm/submit_all.sh
-#   (check QoS limits on the cluster with `show_qos`; default QoS caps mem at 32G < our 48G request)
+# Cluster flags — DEFAULT = UMD Nexus / CLIP lab. Override via env, or set empty to omit a flag
+# entirely (e.g. PARTITION= ACCOUNT= QOS= bash slurm/submit_all.sh on a different cluster).
+#   GRES: default 'gpu:1' takes any free GPU; pin a type with GRES=gpu:rtxa6000:1 / gpu:a100:1.
+#   QoS: huge-long is CLIP's long-job QoS (check exact limits on-cluster with `show_qos`);
+#        the standard 'default' QoS caps mem at 32G, below train_model.sbatch's 48G request.
+PARTITION="${PARTITION-clip}"
+ACCOUNT="${ACCOUNT-clip}"
+QOS="${QOS-huge-long}"
+GRES="${GRES-gpu:1}"
 SFLAGS=()
-[ -n "${PARTITION:-}" ] && SFLAGS+=(--partition="$PARTITION")
-[ -n "${ACCOUNT:-}" ]   && SFLAGS+=(--account="$ACCOUNT")
-[ -n "${QOS:-}" ]       && SFLAGS+=(--qos="$QOS")
-[ -n "${GRES:-}" ]      && SFLAGS+=(--gres="$GRES")
+[ -n "$PARTITION" ] && SFLAGS+=(--partition="$PARTITION")
+[ -n "$ACCOUNT" ]   && SFLAGS+=(--account="$ACCOUNT")
+[ -n "$QOS" ]       && SFLAGS+=(--qos="$QOS")
+[ -n "$GRES" ]      && SFLAGS+=(--gres="$GRES")
 
 sb() { sbatch --parsable "${SFLAGS[@]}" "$@"; }
 

@@ -12,7 +12,11 @@
 #SBATCH --mem=48G
 #SBATCH --time=36:00:00
 #SBATCH --output=slurm-%x-%j.out
-# Set your site specifics: #SBATCH --partition=... / --account=...
+# Defaults = UMD Nexus / CLIP lab (override on the command line or via submit_all.sh env vars).
+# NOTE: 48G mem exceeds the 'default' QoS cap (32G) -> huge-long (or medium + lower --mem).
+#SBATCH --partition=clip
+#SBATCH --account=clip
+#SBATCH --qos=huge-long
 
 set -euo pipefail
 MODEL="$1"
