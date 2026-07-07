@@ -45,7 +45,7 @@ from pathlib import Path
 
 import numpy as np
 
-from byte_embed.miracl import _ndcg_at_k
+from byte_embed.miracl import _encode_chunked, _ndcg_at_k
 
 # mteb-layout benchmarks: name -> (hf path, queries/qrels split, {our_lang: dataset_lang_config})
 QA_BENCH = {
@@ -453,7 +453,7 @@ def _score_pool(encode_fn, built):
     queries, rel, pool_id, pool_text = built
     qids = list(queries)
     Q = l2norm(encode_fn([queries[qid] for qid in qids]))
-    P = l2norm(encode_fn(pool_text))
+    P = l2norm(_encode_chunked(encode_fn, pool_text))        # chunked + progress for big pools
     docid = np.array(pool_id)
     ndcgs, recalls, rec10s, prec10s, mrrs = [], [], [], [], []
     for k, qid in enumerate(qids):
@@ -481,7 +481,8 @@ def _score_pool(encode_fn, built):
 
 def eval_qa_retrieval(encode_fn,
                       benchmarks=("amharicpr", "ciral", "afriqa"),
-                      n_queries=250, distractors=20000, seed=0, cache_dir="checkpoints"):
+                      n_queries=250, distractors=20000, seed=0, cache_dir="checkpoints",
+                      max_stream=None):
     """Per-benchmark, per-language nDCG@10 / recall@100 (+ benchmark means). The RAG-retrieval axis.
     Handles mteb-layout benchmarks (`QA_BENCH`), flat query->passage ones (`QA_FLAT`), inverted-relevance
     collections (`QA_INV`, e.g. the formal Amharic 2AIRTC), and cross-lingual IR (`QA_CLIR`, AfriCLIRMatrix
@@ -500,9 +501,10 @@ def eval_qa_retrieval(encode_fn,
         per = {}
         if bench in QA_BENCH:
             path, split, langmap = QA_BENCH[bench]
+            ms = {} if max_stream is None else {"max_stream": max_stream}
             for our_lang, cfg in langmap.items():
                 per[our_lang] = safe(f"{bench}:{our_lang}", lambda c=cfg, l=our_lang: _build_pool(
-                    path, c, split, f"{bench}_{l}", n_queries, distractors, seed, cache_dir))
+                    path, c, split, f"{bench}_{l}", n_queries, distractors, seed, cache_dir, **ms))
         elif bench in QA_FLAT:
             spec = QA_FLAT[bench]
             for our_lang in spec["langs"]:

@@ -83,6 +83,21 @@ request via `tasks=`). Mr.TyDi, IndicQA, 2AIRTC, and AfriCLIRMatrix remain wired
 battery (optional corroboration). MIRACL evaluation must use dev (test qrels are held out); report
 CIs for yo (119 queries) and te's judgment-sparse dev (~2 judgments/query).
 
+## Full-corpus FINAL evaluation (post-training; the reported numbers)
+
+The 20k rerank pools above are the cheap training-time signal; the paper's headline numbers come
+from the FULL-CORPUS pass (`byte_embed/full_eval.py`, dispatched by `slurm/submit_full_eval.sh`
+after all trainings finish — one job per model + the BGE-M3 baseline + a merge job):
+
+- **MIRACL at TRUE full corpus for the thesis languages** — te 518k, bn 297k, sw 132k, yo 49k
+  passages — and 500k-capped pools for the anchors (en 33M / zh 4.9M / ar 2.1M are evaluation-
+  compute prohibitive at full size and carry no thesis claims). ALL dev queries. This matches the
+  official MIRACL protocol for the full-corpus languages -> externally comparable numbers.
+- **Deep QA at full corpus, all queries**: Amharic-PR 68k, 2AIRTC 12.6k, Mr.TyDi te/sw 548k/137k
+  (public TEST labels — the held-out corroborator), IndicQA te, CIRAL-ha 715k. AfriQA at 100k
+  English distractors (constructed pool; no native corpus).
+- Full-corpus scores are LOWER than pool scores by construction — never compare across settings.
+
 ## Boundary-injection arms (the tokenization-mechanism probe; byte students only)
 
 `--boundary teacher|random` (or `run(..., boundary=...)`), each arm in its own results file:

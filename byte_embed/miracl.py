@@ -39,10 +39,31 @@ def _ndcg_at_k(ranked_rel, k):
     return _dcg(ranked_rel[:k]) / ideal if ideal > 0 else 0.0
 
 
-def _build_pool(lang, n_queries, distractors, seed, cache_dir):
+def _encode_chunked(encode_fn, texts, chunk=8192, label=""):
+    """Encode a large text list in chunks with progress prints (multi-hour full-corpus encodes would
+    otherwise be silent in the job log). Small lists go through in one call."""
+    if len(texts) <= 20000:
+        return encode_fn(texts)
+    parts = []
+    for i in range(0, len(texts), chunk):
+        parts.append(encode_fn(texts[i:i + chunk]))
+        done = min(i + chunk, len(texts))
+        if done // 100000 != i // 100000 or done == len(texts):
+            print(f"    [encode{' ' + label if label else ''}] {done}/{len(texts)}")
+    return np.concatenate(parts, axis=0)
+
+
+def _build_pool(lang, n_queries, distractors, seed, cache_dir, full=False, corpus_cap=None):
     """Stream the corpus ONCE; return (queries{qid:text}, rel{qid:[docids-in-pool]}, pool_id, pool_text).
-    Cached to disk so every model in a run reuses it. Returns None if the language is unavailable."""
-    cache = Path(cache_dir) / f"miracl_{lang}_{n_queries}q_{distractors}d_{seed}.json"
+    Cached to disk so every model in a run reuses it. Returns None if the language is unavailable.
+
+    Legacy mode (full=False): pool = sampled queries' relevant passages + `distractors` corpus passages.
+    FULL-CORPUS mode (full=True): pool = the ENTIRE corpus (or the first `corpus_cap` passages, plus
+    every relevant passage for the evaluated queries so qrels stay valid — the anchor-language cap).
+    n_queries=None -> ALL dev queries with relevance (the official-protocol setting)."""
+    tag = (f"full{corpus_cap or 'all'}_{n_queries or 'all'}q" if full
+           else f"{n_queries}q_{distractors}d")
+    cache = Path(cache_dir) / f"miracl_{lang}_{tag}_{seed}.json"
     if cache.exists():
         d = json.loads(cache.read_text(encoding="utf-8"))
         return d["queries"], {k: set(v) for k, v in d["rel"].items()}, d["pool_id"], d["pool_text"]
@@ -63,20 +84,28 @@ def _build_pool(lang, n_queries, distractors, seed, cache_dir):
     rng = np.random.default_rng(seed)
     qids = [qid for qid in qid2text if qid in rel]
     rng.shuffle(qids)
-    qids = qids[:n_queries]
+    if n_queries:
+        qids = qids[:n_queries]
     if not qids:
         return None
     needed = set().union(*(rel[qid] for qid in qids))
 
-    id2text, distract = {}, []
+    id2text, distract, seen = {}, [], 0
+    cap = None if not full else corpus_cap                    # full+no-cap -> whole corpus
+    want_distract = float("inf") if full and cap is None else (cap if full else distractors)
     for d in load_dataset(_DS, f"{lang}-corpus", split="dev", streaming=True):
+        seen += 1
         did = str(d["_id"])
+        txt = (str(d.get("title") or "") + " " + str(d.get("text") or "")).strip()
         if did in needed and did not in id2text:
-            id2text[did] = (str(d.get("title") or "") + " " + str(d.get("text") or "")).strip()
-        elif len(distract) < distractors:
-            distract.append((did, (str(d.get("title") or "") + " " + str(d.get("text") or "")).strip()))
-        if len(id2text) == len(needed) and len(distract) >= distractors:
+            id2text[did] = txt
+        elif len(distract) < want_distract:
+            distract.append((did, txt))
+        if len(id2text) == len(needed) and len(distract) >= want_distract:
             break
+        if full and seen % 1_000_000 == 0:
+            print(f"    [miracl {lang}] streamed {seen} corpus rows "
+                  f"({len(id2text)}/{len(needed)} relevant found)")
 
     found = set(id2text)
     queries = {qid: qid2text[qid] for qid in qids if rel[qid] & found}
@@ -91,11 +120,15 @@ def _build_pool(lang, n_queries, distractors, seed, cache_dir):
     return queries, {k: set(v) for k, v in rel.items()}, pool_id, pool_text
 
 
-def eval_miracl(encode_fn, lang, n_queries=200, distractors=20000, seed=0, cache_dir="checkpoints"):
-    """Rank each query's relevant passages against a relevant+distractor pool; nDCG@10/recall@100/MRR@10."""
+def eval_miracl(encode_fn, lang, n_queries=200, distractors=20000, seed=0, cache_dir="checkpoints",
+                full=False, corpus_cap=None):
+    """Rank each query's relevant passages against the pool; nDCG@10/P@10/R@10/R@100/MRR@10.
+    full=True -> FULL-CORPUS retrieval (optionally capped at corpus_cap passages for the anchor
+    languages) over ALL dev queries when n_queries=None — the literature-comparable protocol."""
     from common.eval import l2norm
 
-    built = _build_pool(lang, n_queries, distractors, seed, cache_dir)
+    built = _build_pool(lang, n_queries, distractors, seed, cache_dir,
+                        full=full, corpus_cap=corpus_cap)
     if not built:
         return None
     queries, rel, pool_id, pool_text = built
@@ -104,7 +137,7 @@ def eval_miracl(encode_fn, lang, n_queries=200, distractors=20000, seed=0, cache
         return None
 
     Q = l2norm(encode_fn([queries[qid] for qid in qids]))
-    P = l2norm(encode_fn(pool_text))
+    P = l2norm(_encode_chunked(encode_fn, pool_text, label=f"miracl-{lang}"))
     docid = np.array(pool_id)
     ndcgs, recalls, rec10s, prec10s, mrrs = [], [], [], [], []
     for k, qid in enumerate(qids):
@@ -126,12 +159,15 @@ def eval_miracl(encode_fn, lang, n_queries=200, distractors=20000, seed=0, cache
 
 
 def eval_miracl_langs(encode_fn, langs=None, n_queries=200, distractors=20000, seed=0,
-                      cache_dir="checkpoints"):
+                      cache_dir="checkpoints", full=False, corpus_caps=None):
+    """corpus_caps (with full=True): {lang: cap-or-None}; a language absent from the dict (or mapped
+    to None) uses its ENTIRE corpus; a cap keeps the pool to ~cap passages (anchor languages)."""
     langs = langs or DEFAULT_EVAL
     per = {}
     for lang in langs:
         m = eval_miracl(encode_fn, lang, n_queries=n_queries, distractors=distractors, seed=seed,
-                        cache_dir=cache_dir)
+                        cache_dir=cache_dir, full=full,
+                        corpus_cap=(corpus_caps or {}).get(lang))
         per[lang] = m
         if m:
             print(f"  [miracl] {lang}: nDCG@10={m['ndcg@10']} recall@100={m['recall@100']} "
