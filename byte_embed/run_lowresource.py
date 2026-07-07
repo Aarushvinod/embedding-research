@@ -135,6 +135,9 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
             tsuf = "" if teacher_name == "sonar" else f"_{teacher_name}"
             if boundary:
                 tsuf += f"_b-{boundary}"                     # per-arm checkpoint namespace
+            if smoke:
+                tsuf += "_smoke"     # NEVER share names with real checkpoints — the real run would
+                                     # otherwise resume from the smoke's 80 toy steps
             cpath = str(Path(ckpt_dir) / f"{name}_{pooling}{tsuf}.pt") if ckpt else None
             hist = distill(student, None, sentences, device=device, steps=steps, batch=batch,
                            log_every=max(200, steps // 100), ckpt_path=cpath, targets=targets,

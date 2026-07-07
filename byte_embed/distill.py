@@ -131,4 +131,8 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
         if ckpt_path and (step % ckpt_every == 0 or step == steps):  # disconnect-safe checkpoint
             torch.save({"step": step, "model": student.state_dict(), "opt": opt.state_dict()},
                        ckpt_path)
+    # make history's last entry the ACTUAL last step run — callers read steps_run from it, and when
+    # steps < log_every (smoke) or steps isn't a log multiple, the last log point undershoots.
+    if history and history[-1]["step"] != step:
+        history.append({"step": step, "loss": float(loss.item())})
     return history
