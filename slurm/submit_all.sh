@@ -23,11 +23,13 @@ PARTITION="${PARTITION-clip}"
 ACCOUNT="${ACCOUNT-clip}"
 QOS="${QOS-huge-long}"
 GRES="${GRES-gpu:1}"
+CONSTRAINT="${CONSTRAINT-Ampere}"   # any modern clip card; excludes Pascal/Turing (see train_model.sbatch)
 SFLAGS=()
-[ -n "$PARTITION" ] && SFLAGS+=(--partition="$PARTITION")
-[ -n "$ACCOUNT" ]   && SFLAGS+=(--account="$ACCOUNT")
-[ -n "$QOS" ]       && SFLAGS+=(--qos="$QOS")
-[ -n "$GRES" ]      && SFLAGS+=(--gres="$GRES")
+[ -n "$PARTITION" ]  && SFLAGS+=(--partition="$PARTITION")
+[ -n "$ACCOUNT" ]    && SFLAGS+=(--account="$ACCOUNT")
+[ -n "$QOS" ]        && SFLAGS+=(--qos="$QOS")
+[ -n "$GRES" ]       && SFLAGS+=(--gres="$GRES")
+[ -n "$CONSTRAINT" ] && SFLAGS+=(--constraint="$CONSTRAINT")
 
 sb() { sbatch --parsable "${SFLAGS[@]}" "$@"; }
 

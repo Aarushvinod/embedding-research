@@ -14,9 +14,12 @@
 #SBATCH --output=slurm-%x-%j.out
 # Defaults = UMD Nexus / CLIP lab (override on the command line or via submit_all.sh env vars).
 # NOTE: 48G mem exceeds the 'default' QoS cap (32G) -> huge-long (or medium + lower --mem).
+# --constraint=Ampere takes ANY modern clip card (rtxa6000/rtx3090/rtxa5000/rtxa4000, all bf16,
+# all >= 16GB) and excludes the Pascal/Turing nodes (titanxp/1080ti/2080ti: slow, <= 12GB, no bf16).
 #SBATCH --partition=clip
 #SBATCH --account=clip
 #SBATCH --qos=huge-long
+#SBATCH --constraint=Ampere
 
 set -euo pipefail
 MODEL="$1"
