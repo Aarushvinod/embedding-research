@@ -23,6 +23,13 @@ MODEL="$1"
 OUT="$2"
 BOUNDARY="${3:-}"
 
+# Record the allocated hardware at the top of the log — with untyped --gres=gpu:1 the scheduler may
+# hand you anything from a 1080Ti to an H100, and throughput differs ~10x. Pin a class of card via
+# e.g. sbatch --gres=gpu:rtxa6000:1, or (where node features are defined) accept several fast types:
+#   sbatch --constraint="rtxa6000|rtx6000ada|a100" --gres=gpu:1 ...
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+echo "node=$(hostname)  model=$MODEL  boundary=${BOUNDARY:-none}"
+
 TEACHER="bge-m3"
 POOLING="attn"
 STEPS=50000
