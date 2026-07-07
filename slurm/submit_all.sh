@@ -14,7 +14,17 @@ TEACHER="bge-m3"; POOLING="attn"; STEPS=50000
 MAIN_MODELS=(byte-small subword-small byte-base subword-base byte-large subword-large)
 ARM_MODELS=(byte-small byte-base byte-large)
 
-sb() { sbatch --parsable "$@"; }
+# Cluster flags via env — command-line sbatch flags override the script headers. Examples:
+#   UMD Nexus / CLIP lab:  PARTITION=clip ACCOUNT=clip QOS=huge-long GRES=gpu:rtxa6000:1 \
+#                          bash slurm/submit_all.sh
+#   (check QoS limits on the cluster with `show_qos`; default QoS caps mem at 32G < our 48G request)
+SFLAGS=()
+[ -n "${PARTITION:-}" ] && SFLAGS+=(--partition="$PARTITION")
+[ -n "${ACCOUNT:-}" ]   && SFLAGS+=(--account="$ACCOUNT")
+[ -n "${QOS:-}" ]       && SFLAGS+=(--qos="$QOS")
+[ -n "${GRES:-}" ]      && SFLAGS+=(--gres="$GRES")
+
+sb() { sbatch --parsable "${SFLAGS[@]}" "$@"; }
 
 # 1) precompute (data + teacher targets + efficiency) — everything else depends on it
 PRE=$(sb --job-name=be-precompute --gres=gpu:1 --time=04:00:00 --wrap \
