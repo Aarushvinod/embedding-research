@@ -35,7 +35,8 @@ echo "node=$(hostname)  model=$MODEL  boundary=${BOUNDARY:-none}"
 
 TEACHER="bge-m3"
 POOLING="attn"
-STEPS="${STEPS-100000}"    # iso-step for every model; env-overridable
+STEPS="${STEPS-100000}"        # the CAP (patience can stop earlier); env-overridable
+PATIENCE="${PATIENCE-10}"      # stop after 10 x 1000-step windows w/o loss improvement (0 = off)
 
 PART="${OUT%.json}_part_${MODEL}.json"
 EXTRA=()
@@ -43,5 +44,5 @@ EXTRA=()
 
 srun python -u -m byte_embed.run_lowresource \
     --only "$MODEL" --out "$PART" \
-    --teacher "$TEACHER" --pooling "$POOLING" --steps "$STEPS" \
+    --teacher "$TEACHER" --pooling "$POOLING" --steps "$STEPS" --patience "$PATIENCE" \
     --no-baselines --no-efficiency "${EXTRA[@]}"
