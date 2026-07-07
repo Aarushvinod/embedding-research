@@ -7,11 +7,12 @@
 #        sbatch train_model.sbatch byte-base   results/retrieval_bgem3_bteacher.json teacher
 #
 #SBATCH --job-name=byteembed
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:rtxa6000:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=48G
 #SBATCH --time=36:00:00
 #SBATCH --output=slurm-%x-%j.out
+#SBATCH --requeue
 # Defaults = UMD Nexus / CLIP lab (override on the command line or via submit_all.sh env vars).
 # NOTE: 48G mem exceeds the 'default' QoS cap (32G) -> huge-long (or medium + lower --mem).
 # --constraint=Ampere takes ANY modern clip card (rtxa6000/rtx3090/rtxa5000/rtxa4000, all bf16,

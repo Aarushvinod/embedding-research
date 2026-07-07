@@ -22,8 +22,13 @@ ARM_MODELS=(byte-small byte-base byte-large)
 PARTITION="${PARTITION-clip}"
 ACCOUNT="${ACCOUNT-clip}"
 QOS="${QOS-huge-long}"
-GRES="${GRES-gpu:1}"
+GRES="${GRES-gpu:rtxa6000:1}"       # pinned to the 48GB A6000s; loosen with GRES=gpu:1
 CONSTRAINT="${CONSTRAINT-Ampere}"   # any modern clip card; excludes Pascal/Turing (see train_model.sbatch)
+# H100/H200s live on CML/Vulcan nodes, NOT the clip partition. The route is the preemptible
+# scavenger tier (auto-requeue + 5k-step checkpoints make preemption cheap):
+#   PARTITION=scavenger ACCOUNT=scavenger QOS=scavenger CONSTRAINT=Hopper GRES=gpu:1 \
+#     bash slurm/submit_all.sh
+# (verify scavenger's node coverage first: scontrol show partition scavenger)
 SFLAGS=()
 [ -n "$PARTITION" ]  && SFLAGS+=(--partition="$PARTITION")
 [ -n "$ACCOUNT" ]    && SFLAGS+=(--account="$ACCOUNT")
