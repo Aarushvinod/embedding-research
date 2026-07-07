@@ -97,8 +97,9 @@ CIs for yo (119 queries) and te's judgment-sparse dev (~2 judgments/query).
 Teacher targets stay clean; the transform applies to the student's training inputs AND all its eval
 inputs. Reading: B > C ≈ A → segmentation info genuinely helps; B ≈ C > A → any markers help
 (artifact — no credit to the tokenizer); B ≈ C ≈ A → byte needs nothing from segmentation.
-**BOTH arms run** in the notebook (byte-small each, 50k, back to back, resumable); the notebook cell
-prints the three-arm comparison table (A = the main run's byte-small).
+**BOTH arms run at ALL THREE byte sizes** (6 boundary models; 12 trained students in total across
+the study), each arm in its own results file + `_b-{arm}` checkpoint namespace; the notebook prints
+the per-size three-arm comparison table (A = the main run's byte students).
 
 ## AfriQA reverse cross-lingual benchmark (on the default battery)
 
@@ -119,11 +120,22 @@ prints the per-language table.
 3. byte-small vs subword-large: byte-small stays ahead on deep retrieval (the cross-size headline).
 4. yo scores land low for both students (teacher coverage), with the byte−subword gap still positive.
 
-## How to run
+## How to run (single session, multi-session, or SLURM)
 
-Colab: `notebooks/byteembed_retrieval_a100.ipynb` top-to-bottom (smoke → parallel run → baselines).
-CLI: `python -m byte_embed.run_lowresource --teacher bge-m3 --pooling attn --steps 50000 --out results/retrieval_bgem3.json`
+**Colab, one session:** `notebooks/byteembed_retrieval_a100.ipynb` top-to-bottom.
 
-Results land in `results/retrieval_bgem3.json`. The first eval builds the retrieval pools (CIRAL
-streams its 715k-passage corpus once — the big one-time download; everything caches to
-`checkpoints/qa_*.json` and is reused by every later model).
+**Colab, several sessions in parallel** (shared Drive folder): every training cell exposes
+`SESSION_MODELS` / `ARM_MODELS` + `MAX_CONCURRENT` + `RUN_BASELINES` knobs — give each session a
+DISJOINT model list (part-files and checkpoints are per-model, so they never collide). Two rules:
+(1) start one session alone until its log prints `reusing cached targets` (the one-time teacher
+pass), then start the rest; (2) `RUN_BASELINES=True` in exactly one session. Example 3-session split:
+byte-large+subword-large / the four small+base / both boundary arms.
+
+**SLURM:** `bash slurm/submit_all.sh` from the repo root — 1 precompute job → 12 dependency-gated
+training jobs (one model each, `slurm/train_model.sbatch`) → 3 merge jobs (the main merge also scores
+the teacher baseline). Same part-file convention as `run_parallel`, so Colab sessions and SLURM jobs
+are interchangeable mid-study.
+
+Results land in `results/retrieval_bgem3.json` (+ `_bteacher` / `_brandom` for the arms). The first
+eval builds the retrieval pools (CIRAL streams its 715k-passage corpus once — the big one-time
+download; everything caches to `checkpoints/qa_*.json` and is reused by every later model).

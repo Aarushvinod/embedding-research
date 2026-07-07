@@ -1,19 +1,28 @@
-"""Concurrent multi-model trainer for a big-VRAM GPU (e.g. the 96 GB RTX PRO 6000 Blackwell).
+"""Concurrent multi-model trainer — within one machine AND across sessions/jobs.
 
-Trains the 6 students (byt5/mt5 × small/base/large) as CONCURRENT SUBPROCESSES to use the GPU's
-headroom instead of one-at-a-time. Flow:
-  1. precompute ONCE (balanced data + cached SONAR targets + efficiency table) — sequential;
-  2. launch the students as `--only` subprocesses, <= `max_concurrent` at a time (VRAM bound), each
-     reading the CACHED targets (so no SONAR reload) and writing its own results part-file;
-  3. merge the part-files, run the baselines once, print the summary.
+Trains students as CONCURRENT SUBPROCESSES (<= `max_concurrent` at a time, VRAM-bound) with the flow:
+  1. precompute ONCE (balanced data + cached teacher targets + efficiency table) — sequential;
+  2. launch each pending student as an `--only` subprocess, each reading the CACHED targets and
+     writing its own results part-file (`{out}_part_{model}.json`);
+  3. merge the part-files; optionally run the teacher baseline + summary.
 
-Honest speedup note: on a SINGLE GPU, concurrency helps most for the small/base students (they
-underutilize the device); the two large students are compute-bound, so concurrency overlaps rather
-than multiplies. Resumable: models already in the merged results (or with a finished part-file) are
-skipped, so a killed/disconnected run just re-launches the unfinished ones.
+MULTI-SESSION / MULTI-JOB partitioning (Colab sessions or SLURM jobs sharing one Drive/filesystem):
+  * `only=[...]`   — train exactly these models in THIS session/job (None = the full grid).
+  * `with_baselines=False` — skip the final baseline pass; run it in exactly ONE session (the last),
+    or via a final `parallel(only=[], with_baselines=True)` call once every part-file exists.
+  * Part-files and checkpoints are per-model (and per-boundary-arm via the `_b-{arm}` checkpoint
+    namespace + separate `out`), so sessions training DISJOINT model lists never collide.
+  * Sequencing rule: start session 1 alone until it logs "reusing cached targets" (the teacher
+    precompute), THEN start the others — this avoids two sessions racing the teacher pass.
+  * Boundary arms: pass boundary='teacher'|'random' (byte models only; use a separate --out per arm).
 
-  python -m byte_embed.run_parallel                      # all 6, <=3 concurrent
-  python -m byte_embed.run_parallel --max-concurrent 4   # push the 96 GB card harder
+Resumable: models already in the merged results (or with a finished part-file) are skipped, so a
+killed/disconnected session just re-runs the same cell/command.
+
+  python -m byte_embed.run_parallel --teacher bge-m3 --pooling attn --steps 50000 \
+         --out results/retrieval_bgem3.json --only byte-large,subword-large --no-baselines
+  python -m byte_embed.run_parallel --teacher bge-m3 --pooling attn --steps 50000 \
+         --out results/retrieval_bgem3_bteacher.json --boundary teacher
 """
 from __future__ import annotations
 
@@ -44,21 +53,30 @@ def _merge(out, names):
 
 def parallel(out="results/byte_lowresource.json", device="cuda", max_concurrent=3,
              n_per_lang=42000, teacher_name="sonar", pooling="mean", steps=None,
-             patience=0, min_delta=1e-3, boundary=None):
+             patience=0, min_delta=1e-3, boundary=None, only=None, with_baselines=True):
+    """`only` = the models THIS session trains (None = full grid; [] = merge/baseline-only pass).
+    `with_baselines=False` for all but one session when partitioning across sessions/jobs."""
     rows = _grid(steps)                              # [(name, backbone, steps, batch, ckpt), ...]
     if boundary:
         rows = [r for r in rows if "byt5" in r[1]]   # boundary arms are byte-only
+    all_names = [r[0] for r in rows]                 # merge scope: the whole (arm-filtered) grid
+    if only is not None:
+        unknown = [n for n in only if n not in all_names]
+        if unknown:
+            raise ValueError(f"unknown model names {unknown}; valid: {all_names}")
+        rows = [r for r in rows if r[0] in only]
     names = [r[0] for r in rows]
     model_steps = {r[0]: r[2] for r in rows}         # per-model step count (size schedule)
 
-    # 1) precompute ONCE: balanced data + SONAR targets (cached) + efficiency — no models/baselines
+    # 1) precompute ONCE: balanced data + teacher targets (cached) + efficiency — no models/baselines
     print("=== [parallel] precompute: balanced data + teacher targets + efficiency table ===")
     run(out=out, device=device, n_per_lang=n_per_lang, teacher_name=teacher_name,
         only=[], with_baselines=False, with_efficiency=True)
 
-    done = set(_merge(out, names).get("models", {}))     # pick up any finished part-files on resume
+    done = set(_merge(out, all_names).get("models", {}))  # pick up any finished part-files on resume
     pending = [n for n in names if n not in done]
-    print(f"=== [parallel] to train: {pending or '(all done)'}  (<= {max_concurrent} at a time) ===")
+    print(f"=== [parallel] this session trains: {pending or '(nothing pending)'}  "
+          f"(<= {max_concurrent} at a time; grid = {all_names}) ===")
 
     procs, logdir = {}, Path(out).parent
     while pending or procs:
@@ -79,13 +97,17 @@ def parallel(out="results/byte_lowresource.json", device="cuda", max_concurrent=
                 logf.close()
                 print(f"  {n} finished (returncode {p.returncode})")
                 del procs[n]
-        time.sleep(15)
+        if pending or procs:
+            time.sleep(15)
 
-    # 3) merge all part-files -> baselines once -> summary
-    _merge(out, names)
-    print("=== [parallel] merged all students; running baselines + summary ===")
+    # 3) merge all part-files -> (optionally) teacher baseline -> summary
+    _merge(out, all_names)
+    if with_baselines:
+        print("=== [parallel] merged; running the teacher baseline + summary ===")
+    else:
+        print("=== [parallel] merged (baselines skipped — run them in exactly one session) ===")
     run(out=out, device=device, n_per_lang=n_per_lang, teacher_name=teacher_name,
-        only=[], with_baselines=True, with_efficiency=False)
+        only=[], with_baselines=with_baselines, with_efficiency=False)
     print(f"\nSaved -> {out}")
 
 
@@ -102,10 +124,19 @@ def main():
     ap.add_argument("--patience", type=int, default=0,
                     help="early-stop after N log-windows without loss improvement (0 = off)")
     ap.add_argument("--min-delta", type=float, dest="min_delta", default=1e-3)
+    ap.add_argument("--boundary", default=None, choices=["teacher", "random"],
+                    help="boundary-injection arm (byte models only; separate --out per arm)")
+    ap.add_argument("--only", default=None,
+                    help="comma-separated model names THIS session/job trains (default: full grid; "
+                         "empty string = merge/baseline-only pass)")
+    ap.add_argument("--no-baselines", dest="with_baselines", action="store_false",
+                    help="skip the final teacher-baseline pass (run it in exactly one session)")
     a = ap.parse_args()
+    only = None if a.only is None else [x for x in a.only.split(",") if x]
     parallel(out=a.out, device=a.device, max_concurrent=a.max_concurrent,
              n_per_lang=a.n_per_lang, teacher_name=a.teacher_name, pooling=a.pooling, steps=a.steps,
-             patience=a.patience, min_delta=a.min_delta)
+             patience=a.patience, min_delta=a.min_delta, boundary=a.boundary,
+             only=only, with_baselines=a.with_baselines)
 
 
 if __name__ == "__main__":
