@@ -70,6 +70,14 @@ All benchmarks report the full statistic set — **nDCG@10, precision@10, recall
 / recall@1 (Belebele), and MRR@10**. On single-relevant benchmarks (Belebele, Amharic-PR, AfriQA)
 precision@k is recall@k / k by construction — reported anyway for completeness.
 
+**Significance — paired bootstrap.** Every scorer emits per-query nDCG@10 (the `per_query` key). Since
+byte and subword score the SAME queries on the SAME pools, `byte_embed/stats.py` pairs by query id and
+runs a paired bootstrap (10k resamples of query ids; Koehn 2004) for each (benchmark, language) cell,
+reporting the byte−subword Δ, its 95% CI, and a two-sided p-value — the right test when margins are
+small and the two systems' per-query scores are correlated. `full_eval.py --merge` prints this table
+automatically (byte-vs-subword at each size, plus boundary B/C vs A); `python -m byte_embed.stats`
+runs it standalone. A win is only claimed where the CI excludes 0.
+
 | Benchmark | Pool | Languages | Axis |
 |---|---|---|---|
 | Belebele | 488 | all 10 | shallow passage retrieval |

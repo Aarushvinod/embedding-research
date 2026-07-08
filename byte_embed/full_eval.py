@@ -132,6 +132,15 @@ def merge(out="results/full_eval.json"):
               + g((qa.get("ciral") or {}).get("per_lang", {}).get("ha"))
               + g((qa.get("mrtydi") or {}).get("per_lang", {}).get("te"))
               + g((af.get("per_lang") or {}).get("rw")))
+
+    # paired-bootstrap significance: byte vs subword at each size (+ boundary arms) from the parts
+    try:
+        from byte_embed.stats import report_arms, report_bytevssub
+        print("\n" + "=" * 78 + "\nPAIRED-BOOTSTRAP SIGNIFICANCE (per-query nDCG@10; * = 95% CI excludes 0)")
+        report_bytevssub()
+        report_arms()
+    except Exception as e:  # noqa: BLE001 — the table already printed; stats is a bonus
+        print(f"[stats] paired bootstrap skipped: {type(e).__name__}: {e}")
     return merged
 
 

@@ -139,12 +139,14 @@ def eval_miracl(encode_fn, lang, n_queries=200, distractors=20000, seed=0, cache
     Q = l2norm(encode_fn([queries[qid] for qid in qids]))
     P = l2norm(_encode_chunked(encode_fn, pool_text, label=f"miracl-{lang}"))
     docid = np.array(pool_id)
-    ndcgs, recalls, rec10s, prec10s, mrrs = [], [], [], [], []
+    ndcgs, recalls, rec10s, prec10s, mrrs, per_query = [], [], [], [], [], {}
     for k, qid in enumerate(qids):
         r = rel[qid]
         ranked = docid[np.argsort(-(Q[k] @ P.T))]
         ranked_rel = np.fromiter((1.0 if d in r else 0.0 for d in ranked), float, len(ranked))
-        ndcgs.append(_ndcg_at_k(ranked_rel, 10))
+        nd = _ndcg_at_k(ranked_rel, 10)
+        ndcgs.append(nd)
+        per_query[qid] = round(float(nd), 4)                 # for paired-bootstrap significance
         top10 = float(ranked_rel[:10].sum())
         prec10s.append(top10 / 10.0)
         rec10s.append(top10 / len(r))
@@ -155,7 +157,8 @@ def eval_miracl(encode_fn, lang, n_queries=200, distractors=20000, seed=0, cache
             "precision@10": round(float(np.mean(prec10s)), 4),
             "recall@10": round(float(np.mean(rec10s)), 4),
             "recall@100": round(float(np.mean(recalls)), 4),
-            "mrr@10": round(float(np.mean(mrrs)), 4), "n_queries": len(qids), "pool": len(pool_text)}
+            "mrr@10": round(float(np.mean(mrrs)), 4), "n_queries": len(qids), "pool": len(pool_text),
+            "per_query": per_query}
 
 
 def eval_miracl_langs(encode_fn, langs=None, n_queries=200, distractors=20000, seed=0,

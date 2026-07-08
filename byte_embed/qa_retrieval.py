@@ -455,14 +455,16 @@ def _score_pool(encode_fn, built):
     Q = l2norm(encode_fn([queries[qid] for qid in qids]))
     P = l2norm(_encode_chunked(encode_fn, pool_text))        # chunked + progress for big pools
     docid = np.array(pool_id)
-    ndcgs, recalls, rec10s, prec10s, mrrs = [], [], [], [], []
+    ndcgs, recalls, rec10s, prec10s, mrrs, per_query = [], [], [], [], [], {}
     for k, qid in enumerate(qids):
         r = rel[qid]
         if not r:                                            # no relevant doc in pool -> skip (no div/0)
             continue
         ranked = docid[np.argsort(-(Q[k] @ P.T))]
         rr = np.fromiter((1.0 if d in r else 0.0 for d in ranked), float, len(ranked))
-        ndcgs.append(_ndcg_at_k(rr, 10))
+        nd = _ndcg_at_k(rr, 10)
+        ndcgs.append(nd)
+        per_query[str(qid)] = round(float(nd), 4)            # for paired-bootstrap significance
         top10 = float(rr[:10].sum())
         prec10s.append(top10 / 10.0)
         rec10s.append(top10 / len(r))
@@ -476,7 +478,7 @@ def _score_pool(encode_fn, built):
             "recall@10": round(float(np.mean(rec10s)), 4),
             "mrr@10": round(float(np.mean(mrrs)), 4),
             "recall@100": round(float(np.mean(recalls)), 4),
-            "n_queries": len(ndcgs), "pool": len(pool_text)}
+            "n_queries": len(ndcgs), "pool": len(pool_text), "per_query": per_query}
 
 
 def eval_qa_retrieval(encode_fn,

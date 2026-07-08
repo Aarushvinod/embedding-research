@@ -115,12 +115,14 @@ def eval_belebele(encode_fn, lang, n_queries=None, seed=0):
     ndcg, rec10, rec1, mrr = zip(*[_ndcg_recall(int(r)) for r in ranks])
     r10 = float(np.mean(rec10))
     r1 = float(np.mean(rec1))
+    # per-query nDCG keyed by position in the (identical-across-models) question list -> paired bootstrap
+    per_query = {f"q{i}": round(float(ndcg[i]), 4) for i in range(len(ranks))}
     return {"ndcg@10": round(float(np.mean(ndcg)), 4),
             "precision@10": round(r10 / 10.0, 4),    # single gold: P@10 = R@10/10, P@1 = R@1
             "precision@1": round(r1, 4),
             "recall@10": round(r10, 4), "recall@1": round(r1, 4),
             "mrr@10": round(float(np.mean(mrr)), 4),
-            "n_queries": len(questions), "n_passages": len(passages)}
+            "n_queries": len(questions), "n_passages": len(passages), "per_query": per_query}
 
 
 # --------------------------------------------------------------------------- FLORES bitext
