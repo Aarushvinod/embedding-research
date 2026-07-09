@@ -65,8 +65,11 @@ def _build_pool(lang, n_queries, distractors, seed, cache_dir, full=False, corpu
            else f"{n_queries}q_{distractors}d")
     cache = Path(cache_dir) / f"miracl_{lang}_{tag}_{seed}.json"
     if cache.exists():
-        d = json.loads(cache.read_text(encoding="utf-8"))
-        return d["queries"], {k: set(v) for k, v in d["rel"].items()}, d["pool_id"], d["pool_text"]
+        try:
+            d = json.loads(cache.read_text(encoding="utf-8"))
+            return d["queries"], {k: set(v) for k, v in d["rel"].items()}, d["pool_id"], d["pool_text"]
+        except (json.JSONDecodeError, KeyError):        # preempted write left a partial file -> rebuild
+            print(f"  [miracl] corrupt pool cache {cache.name} -> rebuilding")
 
     from datasets import load_dataset
     try:
@@ -99,8 +102,8 @@ def _build_pool(lang, n_queries, distractors, seed, cache_dir, full=False, corpu
         txt = (str(d.get("title") or "") + " " + str(d.get("text") or "")).strip()
         if did in needed and did not in id2text:
             id2text[did] = txt
-        elif len(distract) < want_distract:
-            distract.append((did, txt))
+        elif did not in needed and len(distract) < want_distract:  # never re-add a relevant id as a
+            distract.append((did, txt))                            # distractor (dup _id -> recall>1)
         if len(id2text) == len(needed) and len(distract) >= want_distract:
             break
         if full and seen % 1_000_000 == 0:
@@ -114,9 +117,11 @@ def _build_pool(lang, n_queries, distractors, seed, cache_dir, full=False, corpu
     pool_text = list(id2text.values()) + [t for _, t in distract]
 
     Path(cache_dir).mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps({"queries": queries, "rel": rel,
-                                 "pool_id": pool_id, "pool_text": pool_text}, ensure_ascii=False),
-                     encoding="utf-8")
+    tmp = cache.with_name(cache.name + ".tmp")           # atomic write: a scavenger preemption mid-write
+    tmp.write_text(json.dumps({"queries": queries, "rel": rel,                    # never leaves a corrupt
+                               "pool_id": pool_id, "pool_text": pool_text}, ensure_ascii=False),  # cache
+                   encoding="utf-8")
+    tmp.replace(cache)
     return queries, {k: set(v) for k, v in rel.items()}, pool_id, pool_text
 
 

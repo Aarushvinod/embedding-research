@@ -17,7 +17,7 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
             lr=2e-4, log_every=100, objective="cosine", temp=0.05,
             augment=False, queue_size=0, rel_weight=0.0, optimizer="adamw",
             patience=0, min_delta=1e-3, input_transform=None,
-            ckpt_path=None, ckpt_every=5000, targets=None):
+            ckpt_path=None, ckpt_every=5000, targets=None, seed=0):
     """augment=True feeds the student orthographically-noised input while the teacher targets
     CLEAN text — distilling orthographic INVARIANCE while contrastive keeps discriminativeness
     (the robustness↔retrieval tradeoff-breaker). queue_size>0 keeps a MoCo-style FIFO of past
@@ -36,6 +36,12 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
     and subword students train against the SAME cached vectors (one teacher pass, identical
     supervision). `teacher` may be None in that case."""
     import collections
+
+    # FAIRNESS/REPRODUCIBILITY: fix the minibatch order (random.sample below) and any torch RNG so the
+    # byte and subword runs see the identical data-order stream — otherwise each subprocess auto-seeds
+    # from OS entropy and the byte-subword gap carries uncontrolled seed noise.
+    random.seed(seed)
+    torch.manual_seed(seed)
 
     if optimizer == "adafactor":
         # Adafactor (native T5/ByT5 optimizer) keeps FACTORED second moments -> ~50 MB of state vs

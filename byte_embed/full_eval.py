@@ -89,21 +89,26 @@ def run_one(results_path, label, name, pooling="attn", ckpt_dir="checkpoints", d
     print(f"  saved -> {outp} | MIRACL-full mean nDCG@10 = {mf.get('ndcg@10_mean')}")
 
 
-def run_teacher_baseline(ckpt_dir="checkpoints", device="cuda"):
-    outp = Path(_part_path("baseline", "BGE-M3"))
+def run_teacher_baseline(results_path="results/retrieval_bgem3.json", ckpt_dir="checkpoints",
+                         device="cuda"):
+    # Use the teacher RECORDED in the results, not a hardcoded model — an me5-large run must be scored
+    # against mE5, not BGE-M3. load_teacher gives the same model + prefix + char-budget as the training
+    # targets, so the ceiling is encoded identically to what the students distilled.
+    _, teacher_name, _ = _models_in(results_path)
+    label = {"bge-m3": "BGE-M3", "me5-large": "mE5-large"}.get(teacher_name, teacher_name)
+    outp = Path(_part_path("baseline", label))
     if outp.exists():
-        print("=== baseline BGE-M3: already evaluated -> skip ===")
+        print(f"=== baseline {label}: already evaluated -> skip ===")
         return
-    from sentence_transformers import SentenceTransformer
-    mdl = SentenceTransformer("BAAI/bge-m3", device=device)
+    from byte_embed.teachers import load_teacher
+    teacher = load_teacher(teacher_name, device=device)
 
     def enc(xs):
-        return mdl.encode(xs, normalize_embeddings=True, convert_to_numpy=True,
-                          show_progress_bar=False)
+        return teacher.encode(xs)
 
-    print("=== FULL EVAL baseline/BGE-M3 (the teacher ceiling) ===")
+    print(f"=== FULL EVAL baseline/{label} (the teacher ceiling) ===")
     res = _battery(enc, ckpt_dir)
-    res.update(label="baseline", model="BGE-M3")
+    res.update(label="baseline", model=label)
     outp.write_text(json.dumps(res, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"  saved -> {outp}")
 
@@ -158,7 +163,7 @@ def main():
     if a.merge:
         merge()
     elif a.teacher_baseline:
-        run_teacher_baseline(ckpt_dir=a.ckpt_dir, device=a.device)
+        run_teacher_baseline(a.results, ckpt_dir=a.ckpt_dir, device=a.device)
     elif a.only:
         run_one(a.results, a.label, a.only, pooling=a.pooling, ckpt_dir=a.ckpt_dir, device=a.device)
     else:

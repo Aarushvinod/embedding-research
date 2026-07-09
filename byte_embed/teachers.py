@@ -113,7 +113,8 @@ class RetrievalTeacher:
     def encode(self, texts, source_lang=None, batch_size=64):
         if not texts:
             return np.zeros((0, self.dim), np.float32)
-        return self._m.encode([self.prefix + t for t in texts], batch_size=batch_size,
+        from byte_embed.model import MAX_CHARS       # target reflects the SAME char budget the students see
+        return self._m.encode([self.prefix + t[:MAX_CHARS] for t in texts], batch_size=batch_size,
                               normalize_embeddings=True, convert_to_numpy=True,
                               show_progress_bar=False)
 

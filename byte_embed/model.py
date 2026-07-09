@@ -29,10 +29,17 @@ class TeacherEncoder:
         return emb.to(device) if as_tensor else emb
 
 
+MAX_CHARS = 512   # CONTENT-fair truncation budget in CHARACTERS, shared by the byte AND subword
+                  # students so both see the same span of text. A tokenizer-unit cap (max_length)
+                  # would truncate ByT5 at N bytes but mT5 at N tokens — on a 3-byte script that hands
+                  # the subword student ~3x the content, biasing every non-Latin comparison. Tunable:
+                  # byte compute scales with the byte-length of this budget (Telugu ~3 bytes/char).
+
+
 class ByteStudent(nn.Module):
     """Tokenizer-free student: ByT5 byte encoder -> mean pool -> projection to teacher dim."""
 
-    def __init__(self, backbone: str, out_dim: int, max_bytes: int = 256,
+    def __init__(self, backbone: str, out_dim: int, max_chars: int = MAX_CHARS,
                  grad_checkpoint: bool = True, pooling: str = "mean", attn_heads: int = 8):
         super().__init__()
         from transformers import AutoConfig, AutoTokenizer
@@ -55,7 +62,7 @@ class ByteStudent(nn.Module):
             self.enc.gradient_checkpointing_enable()
         d = getattr(self.enc.config, "d_model", None) or self.enc.config.hidden_size
         self.proj = nn.Linear(d, out_dim)
-        self.max_bytes = max_bytes
+        self.max_chars = max_chars
         self.pooling = pooling  # "mean" | "max" | "attn"
         if pooling == "attn":
             # Lightweight MULTI-HEAD attentive pooling: one learned query per head; each head
@@ -68,7 +75,12 @@ class ByteStudent(nn.Module):
                                        * (d // attn_heads) ** -0.5)
 
     def forward(self, texts, device="cuda"):
-        b = self.tok(texts, padding=True, truncation=True, max_length=self.max_bytes,
+        # CONTENT-fairness: cut by CHARACTERS first (identical text for both tokenizers), then set a
+        # token ceiling generous enough (4x chars >= worst-case UTF-8 bytes) never to re-clip either.
+        if self.max_chars:
+            texts = [t[:self.max_chars] for t in texts]
+        b = self.tok(texts, padding=True, truncation=True,
+                     max_length=(self.max_chars * 4 if self.max_chars else 2048),
                      return_tensors="pt").to(device)
         h = self.enc(**b).last_hidden_state
         m = b["attention_mask"].unsqueeze(-1).float()

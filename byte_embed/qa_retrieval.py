@@ -115,15 +115,19 @@ QA_XOR = {
 _CORPUS_SPLITS = ("test", "train", "dev", "corpus")     # the corpus split varies by dataset
 
 
-def _cache_path(cache_dir, key, n_queries, distractors, seed):
-    return Path(cache_dir) / f"qa_{key}_{n_queries}q_{distractors}d_{seed}.json"
+def _cache_path(cache_dir, key, n_queries, distractors, seed, max_stream=None):
+    ms = "" if max_stream is None else f"_s{max_stream}"   # max_stream bounds which docs enter the pool
+    return Path(cache_dir) / f"qa_{key}_{n_queries}q_{distractors}d_{seed}{ms}.json"  # -> must key on it
 
 
 def _cache_load(cache):
     """Return a cached (queries, rel, pool_id, pool_text) tuple (rel as sets), or None if not cached."""
     if cache.exists():
-        d = json.loads(cache.read_text(encoding="utf-8"))
-        return d["queries"], {k: set(v) for k, v in d["rel"].items()}, d["pool_id"], d["pool_text"]
+        try:
+            d = json.loads(cache.read_text(encoding="utf-8"))
+            return d["queries"], {k: set(v) for k, v in d["rel"].items()}, d["pool_id"], d["pool_text"]
+        except (json.JSONDecodeError, KeyError):        # preempted write left a partial file -> rebuild
+            print(f"  [qa] corrupt pool cache {cache.name} -> rebuilding")
     return None
 
 
@@ -131,9 +135,11 @@ def _cache_save(cache, queries, rel, pool_id, pool_text):
     """Persist a built pool (rel serialized as sorted lists) and return it in-memory (rel as sets).
     `rel` may be a dict of sets or of lists — both are accepted."""
     cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps({"queries": queries, "rel": {k: sorted(v) for k, v in rel.items()},
-                                 "pool_id": pool_id, "pool_text": pool_text}, ensure_ascii=False),
-                     encoding="utf-8")
+    tmp = cache.with_name(cache.name + ".tmp")            # atomic write -> a preemption mid-write never
+    tmp.write_text(json.dumps({"queries": queries, "rel": {k: sorted(v) for k, v in rel.items()},  # leaves
+                               "pool_id": pool_id, "pool_text": pool_text}, ensure_ascii=False),  # a corrupt
+                   encoding="utf-8")                                                              # cache
+    tmp.replace(cache)
     return queries, {k: set(v) for k, v in rel.items()}, pool_id, pool_text
 
 
@@ -150,7 +156,7 @@ def _corpus_stream(path, cfg, prefer):
 def _build_pool(path, cfg, split, key, n_queries, distractors, seed, cache_dir, max_stream=300000):
     """Stream the corpus once -> (queries, rel, pool_id, pool_text); cached. Returns None if unavailable
     or if no relevant docs surface within `max_stream` (bounds very large corpora)."""
-    cache = _cache_path(cache_dir, key, n_queries, distractors, seed)
+    cache = _cache_path(cache_dir, key, n_queries, distractors, seed, max_stream=max_stream)
     hit = _cache_load(cache)
     if hit is not None:
         return hit
@@ -187,8 +193,8 @@ def _build_pool(path, cfg, split, key, n_queries, distractors, seed, cache_dir, 
         txt = (str(d.get("title") or "") + " " + str(d.get("text") or "")).strip()
         if did in needed and did not in id2text:
             id2text[did] = txt
-        elif len(distract) < distractors:
-            distract.append((did, txt))
+        elif did not in needed and len(distract) < distractors:   # never re-add a relevant id as a
+            distract.append((did, txt))                           # distractor (dup _id -> recall>1)
         if (len(id2text) == len(needed) and len(distract) >= distractors) or seen >= max_stream:
             break
 
@@ -207,7 +213,7 @@ def _build_pool_flat(spec, key, n_queries, distractors, seed, cache_dir, max_cor
     """Flat (query, positive-passage) table -> (queries, rel, pool_id, pool_text); cached (same schema
     as `_build_pool`). The corpus is the passages themselves: every sampled query's relevant passage
     plus distractor passages, topped up by streaming `extra_split` when the eval split is small."""
-    cache = _cache_path(cache_dir, key, n_queries, distractors, seed)
+    cache = _cache_path(cache_dir, key, n_queries, distractors, seed, max_stream=max_corpus)
     hit = _cache_load(cache)
     if hit is not None:
         return hit
@@ -328,7 +334,7 @@ def _build_pool_clir(spec, our_lang, key, n_queries, distractors, seed, cache_di
     the spec (`did`/`dtext`/`max_stream`; CIRAL uses docid/text, AfriCLIRMatrix id/contents). Same
     return schema as the other builders; returns None (graceful) if any source is unreachable or no
     relevant docs surface within the cap."""
-    cache = _cache_path(cache_dir, key, n_queries, distractors, seed)
+    cache = _cache_path(cache_dir, key, n_queries, distractors, seed, max_stream=spec.get("max_stream"))
     hit = _cache_load(cache)
     if hit is not None:
         return hit
@@ -370,8 +376,8 @@ def _build_pool_clir(spec, our_lang, key, n_queries, distractors, seed, cache_di
             txt = (str(d.get("title") or "") + " " + str(d.get(dtext_k) or "")).strip()
             if did in needed and did not in id2text:
                 id2text[did] = txt
-            elif len(distract) < distractors:
-                distract.append((did, txt))
+            elif did not in needed and len(distract) < distractors:  # never re-add a relevant id as a
+                distract.append((did, txt))                          # distractor (dup _id -> recall>1)
             if (len(id2text) == len(needed) and len(distract) >= distractors) or seen >= max_stream:
                 break
     except Exception as e:  # noqa: BLE001

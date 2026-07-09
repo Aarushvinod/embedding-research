@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 from pathlib import Path
 
 # RETRIEVAL-ONLY objective: pure InfoNCE contrastive distillation (student_i must pick teacher_i out
@@ -54,7 +55,7 @@ def _save(results, out):
 def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_lang=42000,
         ckpt_dir="checkpoints", teacher_name="sonar", miracl_q=250, miracl_extra=20000,
         only=None, with_baselines=True, with_efficiency=True, pooling="mean", steps=None,
-        patience=0, min_delta=1e-3, boundary=None):
+        patience=0, min_delta=1e-3, boundary=None, seed=0):
     """Train (a subset of) the 6 students. `only` = list of model names to train (None = all,
     [] = precompute-only). `with_baselines`/`with_efficiency` are turned OFF for parallel workers
     (the orchestrator does those once). Workers SKIP loading the teacher when targets are cached.
@@ -126,6 +127,10 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
             continue
         print(f"\n=== {name}  ({backbone}, {steps}x{batch}, teacher={teacher_name}) ===")
         try:
+            # FAIRNESS: seed BEFORE building the student so the projection-head / attn-pool init is
+            # deterministic and identical-recipe across byte and subword (only the tokenizer differs).
+            random.seed(seed)
+            torch.manual_seed(seed)
             student = ByteStudent(backbone, out_dim=teacher_dim, pooling=pooling).to(device)
             params = sum(p.numel() for p in student.parameters())
             vocab_params = student.enc.get_input_embeddings().weight.numel()
@@ -141,7 +146,8 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
             cpath = str(Path(ckpt_dir) / f"{name}_{pooling}{tsuf}.pt") if ckpt else None
             hist = distill(student, None, sentences, device=device, steps=steps, batch=batch,
                            log_every=max(200, steps // 100), ckpt_path=cpath, targets=targets,
-                           patience=patience, min_delta=min_delta, input_transform=transform, **OBJ)
+                           patience=patience, min_delta=min_delta, input_transform=transform,
+                           seed=seed, **OBJ)
             steps_run = hist[-1]["step"] if hist else steps   # < steps when patience stopped early
 
             def enc(xs, _s=student, _t=transform):           # each arm evals with its own transform
@@ -187,8 +193,10 @@ def run(out="results/byte_lowresource.json", smoke=False, device="cuda", n_per_l
         try:
             mdl = SentenceTransformer(mid, device=device)
 
+            from byte_embed.model import MAX_CHARS       # char-cap the ceiling too -> same content budget
+
             def benc(xs, _m=mdl, _p=prefix):
-                return _m.encode([_p + x for x in xs], normalize_embeddings=True,
+                return _m.encode([_p + x[:MAX_CHARS] for x in xs], normalize_embeddings=True,
                                  convert_to_numpy=True, show_progress_bar=False)
 
             bm = eval_battery(benc, langs)
@@ -270,6 +278,9 @@ def main():
                     help="student sentence pooling ('attn' = lightweight multi-head attentive pool)")
     ap.add_argument("--steps", type=int, default=None,
                     help="override steps for the model(s) trained in this call (int = same for all)")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="RNG seed for model init + data order (byte/subword share it -> only the "
+                         "tokenizer differs). Vary across runs to measure seed variance.")
     ap.add_argument("--patience", type=int, default=0,
                     help="early-stop after N log-windows without loss improvement (0 = off, iso-step)")
     ap.add_argument("--min-delta", type=float, dest="min_delta", default=1e-3,
@@ -281,7 +292,7 @@ def main():
     run(out=a.out, smoke=a.smoke, device=a.device, n_per_lang=a.n_per_lang,
         teacher_name=a.teacher_name, only=only, with_baselines=a.with_baselines,
         with_efficiency=a.with_efficiency, pooling=a.pooling, steps=a.steps,
-        patience=a.patience, min_delta=a.min_delta, boundary=a.boundary)
+        patience=a.patience, min_delta=a.min_delta, boundary=a.boundary, seed=a.seed)
 
 
 if __name__ == "__main__":

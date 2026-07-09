@@ -25,7 +25,7 @@ class MatchedStudent(ByteStudent):
     """Reuses ByteStudent.forward/encode/pooling, but builds the encoder from a config (random-init)
     with the chosen input representation instead of `from_pretrained`."""
 
-    def __init__(self, variant, size="small", out_dim=1024, max_len=256,
+    def __init__(self, variant, size="small", out_dim=1024, max_chars=512,
                  grad_checkpoint=True, pooling="mean", attn_heads=8):
         nn.Module.__init__(self)                       # bypass ByteStudent.__init__ (no from_pretrained)
         from transformers import AutoConfig, AutoTokenizer, MT5EncoderModel
@@ -44,7 +44,7 @@ class MatchedStudent(ByteStudent):
             self.enc.gradient_checkpointing_enable()
         d = cfg.d_model
         self.proj = nn.Linear(d, out_dim)
-        self.max_bytes = max_len                       # name reused by the inherited ByteStudent.forward
+        self.max_chars = max_chars                     # char-budget used by the inherited ByteStudent.forward
         self.pooling = pooling
         self.variant = variant
         if pooling == "attn":

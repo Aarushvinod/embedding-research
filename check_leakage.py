@@ -97,12 +97,14 @@ for l in LANGS:
         print(f"  {l}: unavailable")
 
 print("\n=== MIRACL  (cached pools, if present) ===")
-for l in ["en", "zh", "ar", "te"]:
+for l in ["en", "zh", "ar", "te", "bn", "sw", "yo"]:      # every trained + MIRACL-evaluated language
     caches = sorted(Path("checkpoints").glob(f"miracl_{l}_*.json"))
     if not caches:
         print(f"  {l}: no cached pool (skip)")
         continue
-    d = json.loads(caches[0].read_text(encoding="utf-8"))
-    qh, qn = exact(l, list(d["queries"].values()))
-    ps = substr(l, d["pool_text"])
-    print(f"  {l}: queries {qh}/{qn} verbatim | {ps} train sents are substrings of a pool passage")
+    for cache in caches:                                  # check EVERY pool variant, not just caches[0]
+        d = json.loads(cache.read_text(encoding="utf-8"))
+        qh, qn = exact(l, list(d["queries"].values()))
+        ps = substr(l, d["pool_text"])
+        print(f"  {l} [{cache.name}]: queries {qh}/{qn} verbatim | "
+              f"{ps} train sents are substrings of a pool passage")
