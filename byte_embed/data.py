@@ -38,6 +38,54 @@ def load_sentences(langs, n_per_lang=20000, min_len=20, max_len=300):
     return out
 
 
+def _norm(s):
+    """Whitespace-collapsed, case-folded verbatim key for leakage matching."""
+    return " ".join(str(s).split()).casefold()
+
+
+def _eval_exclusion(langs, cache_dir):
+    """Normalized set of eval passages/queries to keep OUT of the training data (leakage). Best-effort:
+    the GOLD passages + queries of any cached deep-eval pool (the exact items the model is scored on)
+    plus the Belebele passages (the shallow-eval retrieval targets). The MIRACL/QA CORPORA are
+    Wikipedia at large and cannot be fully excluded — reservoir sampling (below) reduces that residual
+    overlap and check_leakage.py measures it."""
+    import glob
+    import json
+    import os
+
+    excl = set()
+    if cache_dir:
+        for f in (glob.glob(os.path.join(cache_dir, "miracl_*.json"))
+                  + glob.glob(os.path.join(cache_dir, "qa_*.json"))):
+            try:
+                d = json.loads(open(f, encoding="utf-8").read())
+                rel = d.get("rel") or {}
+                gold_ids = set().union(*[set(v) for v in rel.values()]) if rel else set()
+                id2txt = dict(zip(d.get("pool_id", []), d.get("pool_text", [])))   # gold only (bounded)
+                excl.update(_norm(id2txt[g]) for g in gold_ids if g in id2txt)
+                excl.update(_norm(t) for t in (d.get("queries") or {}).values())
+            except Exception:  # noqa: BLE001
+                continue
+    try:
+        from datasets import load_dataset
+
+        from byte_embed.eval_mteb import FLORES_CODE
+        for lang in langs:
+            fc = FLORES_CODE.get(lang)
+            if not fc:
+                continue
+            try:
+                d = load_dataset("facebook/belebele", fc, split="test")
+                excl.update(_norm(p) for p in set(d["flores_passage"]))
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    if excl:
+        print(f"  [data] leakage-exclusion set: {len(excl)} normalized eval passages/queries")
+    return excl
+
+
 def load_balanced_sentences(langs, n_per_lang=42000, min_len=20, max_len=300, seed=0,
                             cache_dir=None):
     """EQUAL (max-min balanced) monolingual training sentences per language, so no language
@@ -53,7 +101,9 @@ def load_balanced_sentences(langs, n_per_lang=42000, min_len=20, max_len=300, se
 
     cp = None
     if cache_dir:
-        cp = os.path.join(cache_dir, f"wiki_balanced_{'-'.join(langs)}_{n_per_lang}.json")
+        # cache key now depends on seed (the sample is random) + a version tag (reservoir + dedup) so
+        # the old head-of-corpus caches are never silently reused.
+        cp = os.path.join(cache_dir, f"wiki_balanced_{'-'.join(langs)}_{n_per_lang}_s{seed}_rsv2.json")
         if os.path.exists(cp):
             print(f"  [data] reusing balanced cache {cp}")
             return json.loads(open(cp, encoding="utf-8").read())
@@ -61,31 +111,43 @@ def load_balanced_sentences(langs, n_per_lang=42000, min_len=20, max_len=300, se
     from datasets import load_dataset
 
     rng = random.Random(seed)
+    exclude = _eval_exclusion(langs, cache_dir)      # eval passages kept OUT of training (leakage)
+    scan_cap = max(n_per_lang * 8, 500_000)          # how far to scan each stream for the reservoir
     per = {}
     for lang in langs:
-        got = []
+        # RESERVOIR-sample up to n_per_lang paragraphs UNIFORMLY over the scanned corpus rather than
+        # taking the first-N: head-of-corpus over-samples prominent/early articles -> a biased slice
+        # that maximizes FLORES/MIRACL overlap. Eval passages are dropped inline (leakage).
         try:
             ds = load_dataset("wikimedia/wikipedia", f"20231101.{lang}",
                               split="train", streaming=True)
-            for ex in ds:
-                for para in ex.get("text", "").split("\n"):
-                    p = para.strip()
-                    if min_len <= len(p) <= max_len:
-                        got.append(p)
-                        if len(got) >= n_per_lang:
-                            break
-                if len(got) >= n_per_lang:
-                    break
         except Exception as e:  # noqa: BLE001
             print(f"  [data] wikipedia unavailable for {lang} ({e})")
-        per[lang] = got
-        print(f"  [data] {lang}: collected {len(got)}")
+            per[lang] = []
+            continue
+        res, seen = [], 0
+        for ex in ds:
+            for para in ex.get("text", "").split("\n"):
+                p = para.strip()
+                if not (min_len <= len(p) <= max_len) or _norm(p) in exclude:
+                    continue
+                seen += 1
+                if len(res) < n_per_lang:            # fill the reservoir...
+                    res.append(p)
+                else:                                # ...then Algorithm R: keep w/ prob n_per_lang/seen
+                    j = rng.randrange(seen)
+                    if j < n_per_lang:
+                        res[j] = p
+            if seen >= scan_cap:
+                break
+        per[lang] = res
+        print(f"  [data] {lang}: reservoir {len(res)} from {seen} scanned")
 
-    floor = min(min(len(v) for v in per.values()), n_per_lang)
+    floor = min(len(v) for v in per.values())        # balanced floor — DATA-DRIVEN (min over langs)
     out = {}
     for lang, sents in per.items():
-        rng.shuffle(sents)
-        out[lang] = sents[:floor]
+        out[lang] = rng.sample(sents, floor)         # RANDOM-select the floor (better distribution than
+                                                     # a prefix slice); collect-then-truncate
     print(f"  [data] balanced floor = {floor}/lang -> {floor * len(langs)} total sentences")
 
     if cp:

@@ -43,9 +43,12 @@ def _models_in(results_path):
 
 
 def _battery(enc, ckpt_dir):
+    from byte_embed.config import STUDY_LANGS
+    from byte_embed.eval_mteb import eval_battery
     from byte_embed.miracl import eval_miracl_langs
     from byte_embed.qa_retrieval import eval_qa_retrieval
     out = {}
+    out["belebele"] = eval_battery(enc, STUDY_LANGS).get("belebele")   # per_query -> Belebele significance
     out["miracl_full"] = eval_miracl_langs(enc, FULL_MIRACL_LANGS, n_queries=None,
                                            full=True, corpus_caps=ANCHOR_CAPS, cache_dir=ckpt_dir)
     out["qa_full"] = eval_qa_retrieval(enc, benchmarks=QA_FULL, n_queries=ALL_Q, distractors=ALL_D,
