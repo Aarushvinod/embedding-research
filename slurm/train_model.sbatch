@@ -22,6 +22,10 @@
 #SBATCH --gres=gpu:rtx6000ada:1
 
 set -euo pipefail
+# Content-fair char truncation makes byte sequences ~3.5x longer (non-Latin) -> ~4x the activation
+# memory. expandable_segments reclaims fragmented reserved memory (the OOM error explicitly suggests
+# it), which recovers the last few hundred MB; byte models still need a >=40GB card (see submit_all.sh).
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 MODEL="$1"
 OUT="$2"
 BOUNDARY="${3:-}"
