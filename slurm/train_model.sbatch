@@ -11,7 +11,9 @@
 #SBATCH --mem=48G
 #SBATCH --time=48:00:00
 #SBATCH --output=slurm-%x-%j.out
+#SBATCH --open-mode=append
 #SBATCH --requeue
+#SBATCH --signal=B:USR1@300
 # Defaults = RTX 6000 Ada (48GB) — those live on cbcb28/29 only, so the route for CLIP members is
 # the preemptible scavenger tier (--requeue + 5k-step checkpoints make preemption cost <= 5k steps).
 # CLIP-partition fallback (non-preemptible A6000s):
@@ -46,7 +48,15 @@ PART="${OUT%.json}_part_${MODEL}.json"
 EXTRA=()
 [ -n "$BOUNDARY" ] && EXTRA+=(--boundary "$BOUNDARY")
 
+# AUTO-RESUME across the wall: --signal delivers SIGUSR1 ~5 min before the TIME LIMIT; the trap
+# requeues THIS job, which restarts and resumes from the latest 5k-step checkpoint. run_lowresource
+# writes the part file and skips an already-complete model, so requeues stop by themselves once
+# training finishes -- no manual resubmit for multi-wall byte jobs. (srun is backgrounded so `wait`
+# is interruptible by the trap; a foreground srun would block it.)
+trap 'echo "[wall] SIGUSR1 -> requeue $SLURM_JOB_ID (resumes from checkpoint)"; scontrol requeue "$SLURM_JOB_ID" || true' USR1
+
 srun python -u -m byte_embed.run_lowresource \
     --only "$MODEL" --out "$PART" \
     --teacher "$TEACHER" --pooling "$POOLING" --steps "$STEPS" --patience "$PATIENCE" \
-    --no-baselines --no-efficiency "${EXTRA[@]}"
+    --no-baselines --no-efficiency "${EXTRA[@]}" &
+wait

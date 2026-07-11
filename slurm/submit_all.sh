@@ -26,11 +26,12 @@ BASE_FLAGS=(--partition=clip --account=clip --qos=huge-long --gres=gpu:rtxa6000:
 SMALL_FLAGS=(--partition=clip --account=clip --qos=huge-long --constraint=Ampere --gres=gpu:1)
 UTIL_FLAGS=("${SMALL_FLAGS[@]}")     # precompute + merges (GPU jobs, not size-specific)
 
-flags_for() {   # set FL[] to the right sbatch flags — memory-aware: content-fair char truncation makes
-  case "$1" in  # BYTE sequences ~3.5x longer (>24GB), so byte can't ride the 24GB cards subword uses.
-    *-large) FL=("${LARGE_FLAGS[@]}") ;;   # large (byte+subword) -> Hopper (compute-bound)
-    byte-*)  FL=("${BASE_FLAGS[@]}") ;;     # byte-small/base -> clip A6000 (48GB; byte is memory-heavy)
-    *)       FL=("${SMALL_FLAGS[@]}") ;;    # subword-small/base -> any Ampere (memory-light, 24GB ok)
+flags_for() {   # set FL[] to the right sbatch flags — memory- AND speed-aware: content-fair char
+  case "$1" in  # truncation makes BYTE ~3.5x longer, so byte is both memory-heavy (>24GB) and slow.
+    *-large)   FL=("${LARGE_FLAGS[@]}") ;;   # large (byte+subword) -> Hopper (compute-bound)
+    byte-base) FL=("${LARGE_FLAGS[@]}") ;;   # byte-base crawls on A6000 (~5.8s/step) -> Hopper
+    byte-*)    FL=("${BASE_FLAGS[@]}") ;;     # byte-small -> clip A6000 (48GB; fits, fast enough)
+    *)         FL=("${SMALL_FLAGS[@]}") ;;    # subword small/base -> any Ampere (memory-light, 24GB ok)
   esac
 }
 
