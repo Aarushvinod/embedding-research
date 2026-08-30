@@ -21,22 +21,28 @@ export PATIENCE="${PATIENCE-10}"     # plateau early stop: 10 x 1000-step window
 MAIN_MODELS=(byte-small subword-small byte-base subword-base byte-large subword-large)
 ARM_MODELS=(byte-small byte-base byte-large)
 
-LARGE_FLAGS=(--partition=scavenger --account=scavenger --qos=scavenger --constraint=Hopper --gres=gpu:1)
-BASE_FLAGS=(--partition=clip --account=clip --qos=huge-long --gres=gpu:rtxa6000:1)
-SMALL_FLAGS=(--partition=clip --account=clip --qos=huge-long --constraint=Ampere --gres=gpu:1)
+# ALL-SCAVENGER routing: nothing touches the clip partition's own allocation. Preemptible everywhere;
+# --requeue + 5k-step checkpoints (and the sbatch script's SIGUSR1 self-requeue) make preemption and
+# walls self-healing. Memory-aware within scavenger: byte needs big-VRAM cards, subword runs anywhere
+# modern.
+SCAV=(--partition=scavenger --account=scavenger --qos=scavenger)
+LARGE_FLAGS=("${SCAV[@]}" --constraint=Hopper --gres=gpu:1)        # H100/H200 (cml31/33/35/36, vulcan46)
+BASE_FLAGS=("${SCAV[@]}" --gres=gpu:rtxa6000:1)                    # 48GB A6000s exist across many labs' nodes
+SMALL_FLAGS=("${SCAV[@]}" --constraint=Ampere --gres=gpu:1)        # any modern card; subword peaks < 3GB
 UTIL_FLAGS=("${SMALL_FLAGS[@]}")     # precompute + merges (GPU jobs, not size-specific)
 
 flags_for() {   # set FL[] to the right sbatch flags — memory- AND speed-aware: content-fair char
   case "$1" in  # truncation makes BYTE ~3.5x longer, so byte is both memory-heavy (>24GB) and slow.
     *-large)   FL=("${LARGE_FLAGS[@]}") ;;   # large (byte+subword) -> Hopper (compute-bound)
     byte-base) FL=("${LARGE_FLAGS[@]}") ;;   # byte-base crawls on A6000 (~5.8s/step) -> Hopper
-    byte-*)    FL=("${BASE_FLAGS[@]}") ;;     # byte-small -> clip A6000 (48GB; fits, fast enough)
-    *)         FL=("${SMALL_FLAGS[@]}") ;;    # subword small/base -> any Ampere (memory-light, 24GB ok)
+    byte-*)    FL=("${BASE_FLAGS[@]}") ;;     # byte-small (peak 22.5GB) -> 48GB A6000; 24GB is razor-thin
+    *)         FL=("${SMALL_FLAGS[@]}") ;;    # subword small/base -> any Ampere (memory-light)
   esac
 }
 
-# 1) precompute (data + teacher targets + efficiency) — everything else depends on it
-PRE=$(sbatch --parsable "${UTIL_FLAGS[@]}" --job-name=be-precompute --time=04:00:00 --wrap \
+# 1) precompute (data + teacher targets + efficiency) — everything else depends on it.
+#    --requeue so a scavenger preemption restarts it (it re-runs from caches; targets write at the end).
+PRE=$(sbatch --parsable "${UTIL_FLAGS[@]}" --requeue --job-name=be-precompute --time=04:00:00 --wrap \
   "python -u -m byte_embed.run_lowresource --only '' --out $MAIN_OUT \
    --teacher $TEACHER --pooling $POOLING --no-baselines")
 echo "precompute: $PRE  [${UTIL_FLAGS[*]}]"
@@ -65,15 +71,15 @@ done
 
 # 4) merges — main merge also scores the teacher baseline; arm merges skip baselines
 MAIN_DEP=$(IFS=:; echo "${MAIN_IDS[*]}")
-sbatch --parsable "${UTIL_FLAGS[@]}" --job-name=be-merge-main --time=08:00:00 \
+sbatch --parsable "${UTIL_FLAGS[@]}" --requeue --job-name=be-merge-main --time=08:00:00 \
   --dependency=afterok:"$MAIN_DEP" --wrap \
   "python -u -m byte_embed.run_parallel --out $MAIN_OUT --teacher $TEACHER --pooling $POOLING \
    --steps $STEPS --only ''" >/dev/null && echo "merge+baseline (main) queued"
 for arm in teacher random; do
   out="results/retrieval_bgem3_b${arm}.json"
-  sbatch --parsable "${UTIL_FLAGS[@]}" --job-name=be-merge-$arm --time=02:00:00 \
+  sbatch --parsable "${UTIL_FLAGS[@]}" --requeue --job-name=be-merge-$arm --time=02:00:00 \
      --dependency=afterok:"${ARM_IDS[$arm]}" --wrap \
     "python -u -m byte_embed.run_parallel --out $out --teacher $TEACHER --pooling $POOLING \
      --steps $STEPS --boundary $arm --only '' --no-baselines" >/dev/null && echo "merge ($arm) queued"
 done
-echo "submitted: 1 precompute + 12 trainings + 3 merges (large->Hopper, base->A6000, small->Ampere)"
+echo "submitted: 1 precompute + 12 trainings + 3 merges (ALL scavenger: large+byte-base->Hopper, byte-small->A6000, subword->Ampere)"
