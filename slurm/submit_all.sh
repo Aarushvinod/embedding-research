@@ -15,9 +15,10 @@
 set -euo pipefail
 
 # Jobs inherit THIS shell's environment — dispatching from a shell without the conda env active
-# makes every job run the system python (no torch) and fail instantly.
-python -c "import torch" 2>/dev/null || {
-  echo "ERROR: 'python' cannot import torch. Activate the env first:"
+# makes every job run the system python (no torch) and fail instantly. Spec check only: a real
+# `import torch` cold-loads GBs of CUDA libs over NFS (~a minute); find_spec is instant.
+python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('torch') else 1)" 2>/dev/null || {
+  echo "ERROR: this shell's 'python' has no torch. Activate the env first:"
   echo "  source <scratch>/miniconda3/bin/activate && conda activate byteembed"
   exit 1
 }

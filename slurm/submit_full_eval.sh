@@ -11,8 +11,8 @@
 # models whose full_eval part-file already exists.
 set -euo pipefail
 
-python -c "import torch" 2>/dev/null || {
-  echo "ERROR: 'python' cannot import torch. Activate the env first:"
+python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('torch') else 1)" 2>/dev/null || {
+  echo "ERROR: this shell's 'python' has no torch. Activate the env first:"
   echo "  source <scratch>/miniconda3/bin/activate && conda activate byteembed"
   exit 1
 }
