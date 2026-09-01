@@ -29,7 +29,9 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
     best-so-far by more than `min_delta` for `patience` consecutive windows, training stops (and
     checkpoints). patience=0 (default) disables it — `steps` is then exact, which keeps byte/subword
     iso-step; with patience on, `steps` is a CAP and the realized step count should be reported.
-    On a checkpoint resume the plateau tracker restarts (best/stale reset).
+    Checkpoints carry FULL training state (model, optimizer, python/torch/cuda RNG streams, the MoCo
+    queue, and the plateau tracker), so a preempted or walled job resumes the exact uninterrupted
+    trajectory (up to GPU-architecture float nondeterminism).
 
     targets: optional precomputed teacher embeddings (np.ndarray [len(sentences), d], L2-normalized
     and index-aligned with `sentences`). When given, the live `teacher` is NOT called — both the byte
@@ -63,14 +65,46 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
     queue = collections.deque(maxlen=max(1, queue_size // batch)) if queue_size else None
     history = []
     start = 1
-    if ckpt_path and os.path.exists(ckpt_path):  # resume a disconnected cloud run (model + optimizer)
+    win, best_avg, stale = [], float("inf"), 0        # loss-plateau (patience) tracker
+    if ckpt_path and os.path.exists(ckpt_path):
+        # FULL-state resume: model + optimizer + python/torch/cuda RNG + MoCo queue + plateau
+        # tracker. Without the RNG streams a resumed job replays batches/dropout from the seed
+        # origin (breaking same-seed batch-order identity across models with different preemption
+        # patterns); without the queue the first ~queue_size/batch steps train with fewer negatives.
+        # With them, resume continues the EXACT uninterrupted trajectory (up to GPU-arch float
+        # nondeterminism). Old-format checkpoints (model/opt/step only) still load — RNG stays at
+        # the fresh seed and the resume line says so.
         ck = torch.load(ckpt_path, map_location=device)
         student.load_state_dict(ck["model"])
         opt.load_state_dict(ck["opt"])
         start = ck["step"] + 1
-        print(f"  [resume] loaded {ckpt_path} -> continuing from step {start}/{steps}")
+        if "rng_py" in ck:
+            random.setstate(ck["rng_py"])
+        if "rng_torch" in ck:
+            torch.set_rng_state(ck["rng_torch"].cpu())
+        if ck.get("rng_cuda") is not None and torch.cuda.is_available():
+            try:
+                torch.cuda.set_rng_state_all([s.cpu() for s in ck["rng_cuda"]])
+            except RuntimeError:      # different GPU count on the new node -> keep the seeded state
+                pass
+        if queue is not None:
+            for q in ck.get("queue") or []:
+                queue.append(q.to(device))
+        best_avg, stale = ck.get("best_avg", best_avg), ck.get("stale", stale)
+        print(f"  [resume] loaded {ckpt_path} -> continuing from step {start}/{steps} "
+              f"(rng {'restored' if 'rng_py' in ck else 'RESEEDED: pre-fullstate ckpt'}, "
+              f"queue {len(queue) if queue is not None else 0} blocks)")
     targets_t = torch.as_tensor(targets, dtype=torch.float32) if targets is not None else None
-    win, best_avg, stale = [], float("inf"), 0        # loss-plateau (patience) tracker
+
+    def _ckpt():
+        # ckpt_every is a multiple of log_every, so `win` is exactly empty at every periodic save —
+        # the plateau tracker (best_avg/stale) checkpoints losslessly.
+        torch.save({"step": step, "model": student.state_dict(), "opt": opt.state_dict(),
+                    "rng_py": random.getstate(), "rng_torch": torch.get_rng_state(),
+                    "rng_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                    "queue": [q.detach().cpu() for q in queue] if queue is not None else None,
+                    "best_avg": best_avg, "stale": stale}, ckpt_path)
+
     t0 = time.time()
     for step in range(start, steps + 1):
         idx = random.sample(range(n), min(batch, n))
@@ -130,13 +164,11 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
                       f"(no {min_delta} improvement for {patience}x{log_every} steps) "
                       f"-> stopping at step {step}/{steps}")
                 if ckpt_path:
-                    torch.save({"step": step, "model": student.state_dict(),
-                                "opt": opt.state_dict()}, ckpt_path)
+                    _ckpt()
                 history.append({"step": step, "loss": avg, "early_stop": True})
                 break
         if ckpt_path and (step % ckpt_every == 0 or step == steps):  # disconnect-safe checkpoint
-            torch.save({"step": step, "model": student.state_dict(), "opt": opt.state_dict()},
-                       ckpt_path)
+            _ckpt()
     # make history's last entry the ACTUAL last step run — callers read steps_run from it, and when
     # steps < log_every (smoke) or steps isn't a log multiple, the last log point undershoots.
     if history and history[-1]["step"] != step:
