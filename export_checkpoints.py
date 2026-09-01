@@ -36,7 +36,7 @@ def main():
         raise SystemExit(f"no checkpoints match {a.pattern!r}")
     os.makedirs(a.outdir, exist_ok=True)
     for f in files:
-        ck = torch.load(f, map_location="cpu")
+        ck = torch.load(f, map_location="cpu", weights_only=False)
         out = os.path.join(a.outdir, os.path.basename(f))
         torch.save({"step": ck.get("step"), "model": ck["model"]}, out)
         print(f"  {f} -> {out}  ({os.path.getsize(out) / 1e9:.2f} GB, optimizer state dropped)")

@@ -74,7 +74,9 @@ def distill(student, teacher, sentences, device="cuda", steps=2000, batch=64,
         # With them, resume continues the EXACT uninterrupted trajectory (up to GPU-arch float
         # nondeterminism). Old-format checkpoints (model/opt/step only) still load — RNG stays at
         # the fresh seed and the resume line says so.
-        ck = torch.load(ckpt_path, map_location=device)
+        # weights_only=False: torch>=2.6 defaults to True, which refuses the python RNG state
+        # (plain tuples) in our full-state checkpoints. These are our own files — safe to unpickle.
+        ck = torch.load(ckpt_path, map_location=device, weights_only=False)
         student.load_state_dict(ck["model"])
         opt.load_state_dict(ck["opt"])
         start = ck["step"] + 1

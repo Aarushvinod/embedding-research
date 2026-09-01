@@ -57,7 +57,7 @@ def run(family="byte", sizes=("small", "base"), pooling="mean", steps=2000, out=
         if init_ckpt:
             p = init_ckpt.format(size=size)
             if Path(p).exists():
-                sd = torch.load(p, map_location=device)["model"]
+                sd = torch.load(p, map_location=device, weights_only=False)["model"]
                 missing, unexpected = student.load_state_dict(sd, strict=False)
                 print(f"  [init] warm-started from {p} "
                       f"(skipped {len(unexpected)} ckpt keys, {len(missing)} reinit)")

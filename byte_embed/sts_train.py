@@ -43,7 +43,7 @@ def train_sts(student, s1, s2, score, device="cuda", steps=2000, batch=64, lr=2e
     amp = torch.bfloat16 if bf16 else torch.float16
     start = 1
     if ckpt_path and os.path.exists(ckpt_path):
-        ck = torch.load(ckpt_path, map_location=device)
+        ck = torch.load(ckpt_path, map_location=device, weights_only=False)
         student.load_state_dict(ck["model"])
         opt.load_state_dict(ck["opt"])
         start = ck["step"] + 1

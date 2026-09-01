@@ -49,7 +49,7 @@ def _load_enc(name, bm, pooling, ckpt_dir, teacher_dim, device, tsuf=""):
     if not cpath.exists():
         print(f"  [reeval] {name}: checkpoint {cpath.name} not found -> skip")
         return None
-    student.load_state_dict(torch.load(cpath, map_location=device)["model"])
+    student.load_state_dict(torch.load(cpath, map_location=device, weights_only=False)["model"])
     student.to(device).eval()
     print(f"  [reeval] {name}: loaded {cpath.name}")
     return lambda xs, _s=student: _s.encode(xs, device=device)
