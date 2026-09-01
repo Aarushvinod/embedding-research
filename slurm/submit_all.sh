@@ -14,6 +14,14 @@
 #   *-small -> clip, any Ampere (next best available; smalls fit anywhere and schedule fastest)
 set -euo pipefail
 
+# Jobs inherit THIS shell's environment — dispatching from a shell without the conda env active
+# makes every job run the system python (no torch) and fail instantly.
+python -c "import torch" 2>/dev/null || {
+  echo "ERROR: 'python' cannot import torch. Activate the env first:"
+  echo "  source <scratch>/miniconda3/bin/activate && conda activate byteembed"
+  exit 1
+}
+
 MAIN_OUT="results/retrieval_bgem3.json"
 TEACHER="bge-m3"; POOLING="attn"
 export STEPS="${STEPS-100000}"       # the CAP; exported so train_model.sbatch inherits it

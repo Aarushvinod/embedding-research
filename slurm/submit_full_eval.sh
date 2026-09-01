@@ -11,6 +11,12 @@
 # models whose full_eval part-file already exists.
 set -euo pipefail
 
+python -c "import torch" 2>/dev/null || {
+  echo "ERROR: 'python' cannot import torch. Activate the env first:"
+  echo "  source <scratch>/miniconda3/bin/activate && conda activate byteembed"
+  exit 1
+}
+
 TEACHER="bge-m3"; POOLING="attn"
 PARTITION="${PARTITION-clip}"
 ACCOUNT="${ACCOUNT-clip}"
