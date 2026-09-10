@@ -143,6 +143,28 @@ prints the per-language table.
 3. byte-small vs subword-large: byte-small stays ahead on deep retrieval (the cross-size headline).
 4. yo scores land low for both students (teacher coverage), with the byte−subword gap still positive.
 
+## Interpretability analyses (pre-registered; on the trained students, no retraining)
+
+Five analyses, one per headline finding, each with its reading rule written BEFORE the numbers
+exist. Scope: the 10 study languages only (no zero-shot probing of untrained languages). Scripts:
+`byte_embed/interp_*.py` (shared plumbing in `interp_common.py`; every script has a torch-free
+`--selftest`); dispatch: `slurm/submit_interp.sh` (one job per experiment x model, main grid only);
+outputs: `results/interp_<x>_part_<model>.json`, merged + tabulated by `--merge`; figures:
+`python gen_interp_figures.py`. Reranks use the 20k-pool training-time protocol so every per-query
+delta pairs with the stored results via `stats.paired_bootstrap`.
+
+| # | script | aspect | measurement | pre-registered reading rule |
+|---|---|---|---|---|
+| 1 | `interp_params` | capacity | vocab / encoder-block / head parameter split; fraction of vocabulary rows hit by the 10 languages; per-layer effective dimensionality (participation ratio) of pooled states and of the final embedding | byte dense-fraction and vocab-hit >> subword confirms ByT5's "locked vocabulary" allocation story (why byte wins small); byte-small's per-layer PR ~ byte-base's is the saturation signature (nothing left for scale to unlock) |
+| 2 | `interp_alignuni` | objective | Wang-Isola alignment (to the cached teacher target; FLORES translation pairs; query->gold from cached pools) and uniformity, per language | the InfoNCE term that moves byte-vs-subword in step with the retrieval gap is the term the gap lives in |
+| 3 | `interp_langgeom` | language-neutrality | per-layer language centroids, centroid variance share, linear language-ID probe, post-centering subspace overlap; then centroid-difference and LEACE erasure of the final embeddings and a full 20k-pool rerank; cross-lingual cells (CIRAL, AfriQA) = treatment, monolingual cells = control; the un-erased `none` variant must reproduce the stored nDCG within 0.005 (loader check) | erasure moves the treatment cells but not the controls -> the mechanism is real; controls also drop -> the erased subspace was entangled with content (flag). Byte's cross-lingual margin surviving erasure better than subword's -> byte's space is more language-neutral |
+| 4 | `interp_script` | script | uroman-romanized vs native te/bn/am/ar/zh: per-sentence cosine, centroid shift toward the Latin cluster / English translations; FLORES pair alignment and P@1 grouped into same-script (Latin-Latin) vs cross-script cells + design cells sw-rw (same family, same script), ha-am (same family, different script), yo-Latin (unrelated, same script); monolingual battery re-run with romanized queries AND passages | prediction on record: both cross-lingual wins are Latin<->Latin, so byte should show the larger same-script advantage AND the larger romanization sensitivity on non-Latin languages -> script-mediated advantage |
+| 5 | `interp_segment` | composition (byte only) | linear probes on per-byte-position residual states, layers 0..L, for teacher-tokenizer token ends, INTERIOR sub-word boundaries (token end not followed by whitespace — avoids the trivially visible 0x20 byte), whitespace word ends, and a count-matched random control; candidate universe = character-final bytes only; Chinese (no whitespace) is the cleanest cell; an MLP probe runs before any null is claimed | interior boundaries decodable well above the random control by layers 1-3 -> the boundary-injection null was REDUNDANCY (markers carried information the model already had); chance everywhere incl. the MLP -> IRRELEVANCE (segmentation is not used for retrieval). Teacher-boundary decodability answers the subword-teacher-confound objection directly |
+
+Deferred to camera-ready / follow-up (not run for the submission): language-specific neurons +
+steering (LAPE / AP), MechIR activation patching, 45-pair / cross-model CKA, attention-pattern
+descriptives, SAEs on the embedding space.
+
 ## How to run (single session, multi-session, or SLURM)
 
 **Colab, one session:** `notebooks/byteembed_retrieval_a100.ipynb` top-to-bottom. (CLI equivalent:

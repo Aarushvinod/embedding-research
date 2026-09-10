@@ -21,6 +21,7 @@ tokenizer is the only manipulated variable.
 ```
 RETRIEVAL_EXPERIMENT.md   locked design for the byte-vs-subword retrieval study — START HERE
 gen_figures.py            builds figures/ from results/*.json
+gen_interp_figures.py     builds figures/fig_interp_*.png from results/interp_*.json
 common/                   shared eval helpers (l2norm + optional SIB/STS MTEB probes)
 byte_embed/               the study (+ README.md, RESULTS.md, NOVELTY.md)
   run_lowresource.py  orchestrator      teachers.py  BGE-M3 / mE5 retrieval teachers
@@ -31,7 +32,7 @@ byte_embed/               the study (+ README.md, RESULTS.md, NOVELTY.md)
   full_eval.py  post-training full-corpus final evaluation
   reeval.py  additive re-evaluation of finished checkpoints
 notebooks/                byteembed_retrieval_a100.ipynb (the runner) + specialization notebooks
-slurm/                    submit_all.sh (training) · submit_full_eval.sh (final eval) · train_model.sbatch
+slurm/                    submit_all.sh (training) · submit_full_eval.sh (final eval) · submit_interp.sh (interpretability) · train_model.sbatch
 results/                  raw run JSON (gitignored)
 ```
 
@@ -50,6 +51,7 @@ python -m byte_embed.run_lowresource --teacher bge-m3 --pooling attn --steps 100
 ```bash
 bash slurm/submit_all.sh          # 1 precompute -> 12 dependency-gated trainings -> merges
 bash slurm/submit_full_eval.sh    # after training: full-corpus final eval, one job per model
+bash slurm/submit_interp.sh       # after training: the 5 interpretability analyses, one job per (experiment, model)
 ```
 Same per-model part-file convention as the notebook, so Colab sessions and SLURM jobs are
 interchangeable mid-study. See `RETRIEVAL_EXPERIMENT.md` → "How to run" for multi-session
