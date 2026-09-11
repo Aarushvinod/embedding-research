@@ -43,34 +43,44 @@ def paired_bootstrap(a: dict, b: dict, n_boot=10000, seed=0, alpha=0.05):
             "p_value": round(p, 4), "n_paired": n, "significant": bool(lo > 0 or hi < 0)}
 
 
-def iter_perquery(d: dict):
-    """Yield ((benchmark, lang), {qid: score}) for every per_query block in a model-result or
-    full_eval-part dict (handles both the pooled training results and the full-corpus final eval)."""
+def iter_cells(d: dict):
+    """Yield ((benchmark, lang), metrics-dict) for every scored cell in a model-result or full_eval-part
+    dict (handles both the pooled training results and the full-corpus final eval). The metrics dict
+    carries the scalar summaries (ndcg@10, recall@100, mrr@10, precision@10, recall@10; Belebele also
+    recall@1 / precision@1) and, when present, the per_query block used by the paired bootstrap."""
     for mk in _MIRACL_KEYS:
         mf = d.get(mk)
         if mf:
             for lang, m in (mf.get("per_lang") or {}).items():
-                if m and m.get("per_query"):
-                    yield ("MIRACL", lang), m["per_query"]
+                if isinstance(m, dict):
+                    yield ("MIRACL", lang), m
     for qk in _QA_KEYS:
         qa = d.get(qk)
         if isinstance(qa, dict):
             for bench, bd in qa.items():
                 if isinstance(bd, dict):
                     for lang, m in (bd.get("per_lang") or {}).items():
-                        if m and m.get("per_query"):
-                            yield (bench, lang), m["per_query"]
+                        if isinstance(m, dict):
+                            yield (bench, lang), m
     for extra in ("afriqa_100k",):
         af = d.get(extra)
         if af and (af.get("per_lang")):
             for lang, m in af["per_lang"].items():
-                if m and m.get("per_query"):
-                    yield (extra, lang), m["per_query"]
+                if isinstance(m, dict):
+                    yield (extra, lang), m
     bel = d.get("belebele")
     if isinstance(bel, dict):
         for lang, m in bel.items():
-            if isinstance(m, dict) and m.get("per_query"):
-                yield ("belebele", lang), m["per_query"]
+            if isinstance(m, dict):
+                yield ("belebele", lang), m
+
+
+def iter_perquery(d: dict):
+    """Yield ((benchmark, lang), {qid: score}) for every per_query block — the cells the paired
+    bootstrap can use (per-query scores exist for nDCG@10 only)."""
+    for cell, m in iter_cells(d):
+        if m.get("per_query"):
+            yield cell, m["per_query"]
 
 
 def compare(better: dict, worse: dict, n_boot=10000):
@@ -118,16 +128,20 @@ _SHORT = {"MIRACL": "miracl", "belebele": "belebele", "amharicpr": "amharicpr", 
           "afriqa": "afriqa"}
 
 
-def report_table(loader=_load_part):
-    """Per-model nDCG@10 on every per-query cell (= mean of the per-query scores), grouped by benchmark
-    family, for whichever part files exist. Read-only; nothing is merged or written."""
+DEFAULT_METRICS = ("ndcg@10", "recall@100", "mrr@10", "recall@1")
+
+
+def report_table(loader=_load_part, metrics=DEFAULT_METRICS):
+    """Per-model scores on every cell, one block per (benchmark family, metric), for whichever part
+    files exist. A metric is skipped for a family that does not report it (recall@100 exists for the
+    retrieval pools, recall@1 only for Belebele). Read-only; nothing is merged or written."""
     rows = []
     for label, models in (("main", MAIN), ("bteacher", ARMS), ("brandom", ARMS)):
         for m in models:
             d = loader(label, m)
             if d:
                 name = m if label == "main" else f"{m} [{label[1:]}]"
-                rows.append((name, {c: float(np.mean(list(pq.values()))) for c, pq in iter_perquery(d)}))
+                rows.append((name, dict(iter_cells(d))))
     if not rows:
         print("no part files found")
         return
@@ -142,12 +156,16 @@ def report_table(loader=_load_part):
             for c in cells:
                 if c[0] == fam and c not in cols:
                     cols.append(c)
-        print(f"\n  {_SHORT.get(fam, fam)} nDCG@10" + "".join(f"{lang:>8}" for _, lang in cols) + f"{'mean':>8}")
-        for name, cells in rows:
-            vals = [cells.get(c) for c in cols]
-            got = [v for v in vals if v is not None]
-            print(f"  {name:22}" + "".join(f"{v:>8.3f}" if v is not None else f"{'-':>8}" for v in vals)
-                  + (f"{np.mean(got):>8.3f}" if got else f"{'-':>8}"))
+        for metric in metrics:
+            if not any(cells[c].get(metric) is not None for _, cells in rows for c in cols if c in cells):
+                continue
+            print(f"\n  {_SHORT.get(fam, fam)} {metric}" + "".join(f"{lang:>8}" for _, lang in cols)
+                  + f"{'mean':>8}")
+            for name, cells in rows:
+                vals = [cells[c].get(metric) if c in cells else None for c in cols]
+                got = [v for v in vals if v is not None]
+                print(f"  {name:22}" + "".join(f"{v:>8.3f}" if v is not None else f"{'-':>8}" for v in vals)
+                      + (f"{np.mean(got):>8.3f}" if got else f"{'-':>8}"))
 
 
 def report_bytevssub(n_boot=10000, loader=_load_part):
@@ -205,6 +223,9 @@ def main():
     ap.add_argument("--training", action="store_true",
                     help="training-time 20k-pool part files (available per model as each training "
                          "finishes) instead of the full-corpus final-eval parts")
+    ap.add_argument("--metrics", default=",".join(DEFAULT_METRICS),
+                    help="comma list for the tables; available: ndcg@10 recall@100 mrr@10 precision@10 "
+                         "recall@10, plus recall@1 / precision@1 on Belebele (paired bootstrap: nDCG@10 only)")
     ap.add_argument("--n-boot", type=int, default=10000)
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
@@ -213,7 +234,8 @@ def main():
     loader = _load_train_part if a.training else _load_part
     print("SETTING: " + ("training-time battery — 250 queries x 20k-distractor pools"
                          if a.training else "full-corpus final eval"))
-    report_table(loader)
+    report_table(loader, tuple(m for m in a.metrics.split(",") if m))
+    print("\n  paired bootstrap below uses nDCG@10 (the only metric with per-query scores)")
     if a.arms:
         report_arms(a.n_boot, loader)
     else:
