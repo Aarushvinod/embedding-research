@@ -33,7 +33,6 @@ byte_embed/               the study (+ README.md, RESULTS.md, NOVELTY.md)
   reeval.py  additive re-evaluation of finished checkpoints
 notebooks/                byteembed_retrieval_a100.ipynb (the runner) + specialization notebooks
 slurm/                    submit_all.sh (training) · submit_full_eval.sh (final eval) · submit_interp.sh (interpretability) · train_model.sbatch
-- `bash slurm/status.sh` — read-only status: per-model training steps / checkpoints / full-eval and interp part files, merged files, and the queue with live training progress from the logs.
 results/                  raw run JSON (gitignored)
 ```
 
@@ -53,6 +52,7 @@ python -m byte_embed.run_lowresource --teacher bge-m3 --pooling attn --steps 100
 bash slurm/submit_all.sh          # 1 precompute -> 12 dependency-gated trainings -> merges
 bash slurm/submit_full_eval.sh    # after training: full-corpus final eval, one job per model
 bash slurm/submit_interp.sh       # after training: the 5 interpretability analyses, one job per (experiment, model)
+bash slurm/status.sh              # any time: what is done / running (part files, checkpoints, queue, live training progress)
 ```
 Same per-model part-file convention as the notebook, so Colab sessions and SLURM jobs are
 interchangeable mid-study. See `RETRIEVAL_EXPERIMENT.md` → "How to run" for multi-session
