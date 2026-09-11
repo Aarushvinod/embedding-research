@@ -54,6 +54,29 @@ def write_json(p, obj):
     p.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def utf8_stdout():
+    """Windows consoles/pipes default to cp1252, which cannot print the tables' Δ/→/— glyphs
+    (SLURM/Linux is UTF-8 already); call first thing in every main()."""
+    import sys
+    for s in (sys.stdout, sys.stderr):
+        if hasattr(s, "reconfigure"):
+            try:
+                s.reconfigure(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
+def results_meta(results="results/retrieval_bgem3.json"):
+    """Top-level run metadata (`langs`, `teacher`, `n_train`, ...) from the merged results file or,
+    failing that, the first part file that carries it."""
+    p = Path(results)
+    for f in [p] + sorted(p.parent.glob(f"{p.stem}_part_*.json")):
+        d = read_json(f) if f.exists() else None
+        if d and d.get("langs") and d.get("n_train"):
+            return d
+    return {}
+
+
 def models_in(results="results/retrieval_bgem3.json", main_only=True):
     """(models, teacher, teacher_dim) across the merged results + part files; main grid only by
     default (boundary arms are dropped — exp 5 explains the boundary result from the main bytes)."""
@@ -153,27 +176,50 @@ def _select_layers(n_layers, layers):
     return list(range(n_layers)) if layers is None else [l for l in layers if 0 <= l < n_layers]
 
 
+def _hidden_states(student, out):
+    """`out.hidden_states` with the layout every per-layer analysis assumes, verified at runtime:
+    len == num_layers + 1, index 0 = embedding output (input of block 0), 1..N-1 = outputs of blocks
+    0..N-2 (pre-LN residual stream), N = final-LayerNorm output == last_hidden_state. Older
+    T5Stack.forward builds exactly this tuple by hand (append before each block, then the post-LN
+    state); newer transformers (5.1x) record block outputs with OutputRecorder, prepend block 0's
+    input and tie the last entry to last_hidden_state — same layout, but assert rather than trust
+    it across versions."""
+    import torch
+    hs = out.hidden_states
+    cfg = student.enc.config
+    n = getattr(cfg, "num_layers", None) or cfg.num_hidden_layers
+    if len(hs) != n + 1 or not torch.equal(hs[-1], out.last_hidden_state):
+        raise SystemExit(f"[interp] unexpected hidden_states layout: {len(hs)} entries for "
+                         f"{n} layers, last==last_hidden_state={torch.equal(hs[-1], out.last_hidden_state)} "
+                         f"(transformers layout changed — fix interp_common._hidden_states)")
+    return hs
+
+
 def layer_pooled(student, texts, device="cuda", batch_size=8, layers=None, final=True):
-    """Masked-MEAN-pooled residual-stream state per layer -> (states fp16 [n_sel_layers, n, d],
+    """Masked-MEAN-pooled residual-stream state per layer -> (states float32 [n_sel_layers, n, d],
     layer_ids, final_emb [n, out_dim] | None). Layer 0 = embedding output; the last index is the
     final-LayerNorm output (== last_hidden_state). Intermediate T5 states are pre-LN residuals whose
     norms grow with depth — normalize per layer before any cross-layer comparison. Only pooled
-    vectors leave the GPU, so byte-large (36 layers, up to 2048 positions) is fine at batch 4-8."""
+    vectors leave the GPU, so byte-large (36 layers, up to 2048 positions) is fine at batch 4-8.
+    Stored in float32, NOT fp16: T5/mT5 residual streams carry a few massive-activation dimensions
+    (|x| ~ 1e4-1e5 in mT5-large) that overflow fp16 to inf and poison every downstream statistic."""
     import torch
 
+    if not texts:
+        raise ValueError("layer_pooled: no texts")
     chunks, finals, layer_ids = None, [], None
     with torch.inference_mode():
         for i in range(0, len(texts), batch_size):
             b = tokenize_like_forward(student, texts[i:i + batch_size], device)
             out = student.enc(**b, output_hidden_states=True)
-            hs = out.hidden_states
+            hs = _hidden_states(student, out)
             m = b["attention_mask"].unsqueeze(-1).float()
             if layer_ids is None:
                 layer_ids = _select_layers(len(hs), layers)
                 chunks = [[] for _ in layer_ids]
             denom = m.sum(1).clamp(min=1.0)
             for j, l in enumerate(layer_ids):
-                chunks[j].append(((hs[l] * m).sum(1) / denom).half().cpu().numpy())
+                chunks[j].append(((hs[l] * m).sum(1) / denom).float().cpu().numpy())
             if final:
                 finals.append(_pool_like_forward(student, hs[-1], m).float().cpu().numpy())
     states = np.stack([np.concatenate(c, 0) for c in chunks], 0)
@@ -181,23 +227,26 @@ def layer_pooled(student, texts, device="cuda", batch_size=8, layers=None, final
 
 
 def layer_positions(student, texts, sel, device="cuda", layers=None, batch_size=4):
-    """Per-POSITION residual states for selected positions only -> (dict layer -> fp16 [N, d],
-    index list [(text_idx, pos), ...] in row order). Nothing but the selected rows leaves the GPU.
+    """Per-POSITION residual states for selected positions only -> (dict layer -> float32 [N, d],
+    index list [(text_idx, pos), ...] in row order; float32 for the same overflow reason as
+    layer_pooled). Nothing but the selected rows leaves the GPU.
     `sel[i]` = positions to keep in text i (byte offsets for ByT5, token offsets for mT5); every
     position must lie inside the unpadded sequence."""
     import torch
 
-    store, index, layer_ids = None, [], None
+    if not texts:
+        raise ValueError("layer_positions: no texts")
+    store, index, layer_ids, d = None, [], None, None
     with torch.inference_mode():
         for i in range(0, len(texts), batch_size):
             bt = texts[i:i + batch_size]
             b = tokenize_like_forward(student, bt, device)
             out = student.enc(**b, output_hidden_states=True)
-            hs = out.hidden_states
+            hs = _hidden_states(student, out)
             lens = b["attention_mask"].sum(1).tolist()
             if layer_ids is None:
                 layer_ids = _select_layers(len(hs), layers)
-                store = {l: [] for l in layer_ids}
+                store, d = {l: [] for l in layer_ids}, hs[0].size(-1)
             for k in range(len(bt)):
                 pos = [p for p in sel[i + k] if p < lens[k]]
                 if len(pos) != len(sel[i + k]):
@@ -207,9 +256,10 @@ def layer_positions(student, texts, sel, device="cuda", layers=None, batch_size=
                     continue
                 pt = torch.as_tensor(pos, device=device)
                 for l in layer_ids:
-                    store[l].append(hs[l][k].index_select(0, pt).half().cpu().numpy())
+                    store[l].append(hs[l][k].index_select(0, pt).float().cpu().numpy())
                 index.extend((i + k, p) for p in pos)
-    return {l: np.concatenate(v, 0) for l, v in store.items()}, index
+    return {l: (np.concatenate(v, 0) if v else np.zeros((0, d), np.float32))
+            for l, v in store.items()}, index
 
 
 def byte_offsets(text, max_chars=None):
@@ -254,15 +304,31 @@ def flores_parallel(langs=None, cache_dir="checkpoints"):
     return par
 
 
-def sample_training_sentences(ckpt_dir="checkpoints", per_lang=1000, seed=0, langs=None):
-    """Stratified sample of the cached (sentence, language, BGE-M3 target) triples the students were
-    distilled on — free positive pairs for alignment-to-teacher. Discovers the targets tag by glob."""
-    from byte_embed.teachers import load_cached_targets
-    sidecars = sorted(glob.glob(os.path.join(ckpt_dir, "teachertargets_bge-m3_*.json")))
-    if not sidecars:
-        raise SystemExit(f"no teachertargets_bge-m3_*.json in {ckpt_dir}")
-    tag = Path(sidecars[-1]).stem[len("teachertargets_bge-m3_"):]
-    sents, sl, T = load_cached_targets(ckpt_dir, "bge-m3", tag)
+def sample_training_sentences(ckpt_dir="checkpoints", per_lang=1000, seed=0, langs=None,
+                              results="results/retrieval_bgem3.json"):
+    """Stratified sample of the cached (sentence, language, teacher target) triples the students were
+    distilled on — free positive pairs for alignment-to-teacher. The sidecar tag is rebuilt from the
+    results file's own metadata (run_lowresource.py tags targets '<langs joined by ->_<per-language
+    floor>' with n_train = floor x len(langs)), so a stale sidecar from another language set is never
+    picked up; the lexicographic glob is only a fallback when that exact file is absent. Both halves
+    (.json + .npy) must exist — a half-synced cache raises SystemExit, which callers degrade on."""
+    from byte_embed.teachers import load_cached_targets, targets_exist
+    meta = results_meta(results)
+    teacher = meta.get("teacher") or "bge-m3"
+    prefix = f"teachertargets_{teacher}_"
+    tag = None
+    if meta.get("langs") and meta.get("n_train"):
+        cand = f"{'-'.join(meta['langs'])}_{meta['n_train'] // len(meta['langs'])}"
+        if targets_exist(ckpt_dir, teacher, cand):
+            tag = cand
+    if tag is None:
+        sidecars = [s for s in sorted(glob.glob(os.path.join(ckpt_dir, prefix + "*.json")))
+                    if targets_exist(ckpt_dir, teacher, Path(s).stem[len(prefix):])]
+        if not sidecars:
+            raise SystemExit(f"no complete {prefix}*.json/.npy pair in {ckpt_dir}")
+        tag = Path(sidecars[-1]).stem[len(prefix):]
+        print(f"  [interp] warn: no cached-targets tag from {results} metadata -> using {sidecars[-1]}")
+    sents, sl, T = load_cached_targets(ckpt_dir, teacher, tag)
     sl = np.asarray(sl)
     rng = np.random.default_rng(seed)
     keep = []
@@ -300,6 +366,7 @@ def flores_xling(emb, langs=None, k=10):
 def _centroids(X, labels):
     labs = sorted(set(labels))
     labels = np.asarray(labels)
+    X = np.asarray(X, dtype=np.float64)
     mu = X.mean(0)
     C = np.stack([X[labels == l].mean(0) for l in labs], 0)
     w = np.array([(labels == l).mean() for l in labs])
@@ -324,7 +391,7 @@ def fit_leace(X, labels, eps=1e-6):
     Guarantees no LINEAR classifier can recover the concept (linear guardedness) while moving the
     representations as little as possible. Apply with `apply_projection`."""
     _, mu, C, w = _centroids(X, labels)
-    Xc = X - mu
+    Xc = np.asarray(X, dtype=np.float64) - mu                # float64: W = S^{-1/2} is ill-conditioned
     S = Xc.T @ Xc / max(len(X) - 1, 1)
     lam, U = np.linalg.eigh(S)
     lam = np.maximum(lam, eps * lam.max())
@@ -427,6 +494,7 @@ def _selftest():
 
 
 def main():
+    utf8_stdout()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--selftest", action="store_true")
     if ap.parse_args().selftest:

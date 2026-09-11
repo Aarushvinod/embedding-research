@@ -26,7 +26,8 @@ import numpy as np
 
 from byte_embed.interp_common import (MAIN_MODELS, alignment, flores_parallel, flores_xling,
                                       load_student, make_encode, merge_parts, models_in, part_path,
-                                      read_json, sample_training_sentences, uniformity, write_json)
+                                      read_json, sample_training_sentences, uniformity, utf8_stdout,
+                                      write_json)
 
 ANALYSIS = "alignuni"
 POOL_TAG = "250q_20000d"          # the training-time 20k-pool caches
@@ -62,7 +63,7 @@ def run_one(name, results, ckpt_dir, device, n_train=1000, n_pool=2000, seed=0):
 
     # (a) alignment to the teacher target + uniformity, per language
     try:
-        sents, sl, T = sample_training_sentences(ckpt_dir, per_lang=n_train, seed=seed)
+        sents, sl, T = sample_training_sentences(ckpt_dir, per_lang=n_train, seed=seed, results=results)
         E, sl = enc(sents), np.asarray(sl)
         res["teacher_align"] = {l: alignment(E[sl == l], T[sl == l]) for l in sorted(set(sl.tolist()))}
         res["uniformity"] = {l: uniformity(E[sl == l], seed=seed) for l in sorted(set(sl.tolist()))}
@@ -151,6 +152,7 @@ def _selftest():
 
 
 def main():
+    utf8_stdout()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--results", default="results/retrieval_bgem3.json")
     ap.add_argument("--ckpt-dir", default="checkpoints")

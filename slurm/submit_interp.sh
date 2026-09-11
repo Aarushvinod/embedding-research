@@ -49,7 +49,7 @@ for exp in $EXPS; do
   done
   [ "${#IDS[@]}" -eq 0 ] && continue
   DEP=$(IFS=:; echo "${IDS[*]}")
-  sb --job-name="in-$exp-merge" --time=00:30:00 --dependency=afterany:"$DEP" \
+  sb --gres="$GRES_SUB" --job-name="in-$exp-merge" --time=00:30:00 --dependency=afterany:"$DEP" \
      --wrap "python -u -m byte_embed.interp_$exp --merge" >/dev/null && echo "merge ($exp) queued"
 done
 echo "submitted: $total interp jobs + one merge per experiment"

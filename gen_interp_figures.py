@@ -34,7 +34,8 @@ def fig_params():
     x = np.arange(len(names))
     ax[0].bar(x - 0.2, [M[n]["params"]["dense_frac"] for n in names], 0.4, label="dense (non-vocab) fraction",
               color=[COLOR[n] for n in names])
-    ax[0].bar(x + 0.2, [M[n]["vocab_util"]["frac_hit"] for n in names], 0.4, label="vocab rows hit",
+    ax[0].bar(x + 0.2, [M[n]["vocab_util"].get("frac_hit_reachable", M[n]["vocab_util"]["frac_hit"])
+                        for n in names], 0.4, label="vocab rows hit (of reachable)",
               color=[COLOR[n] for n in names], hatch="//", alpha=0.7)
     ax[0].set_xticks(x); ax[0].set_xticklabels(names, rotation=30, ha="right"); ax[0].set_ylim(0, 1.05)
     ax[0].set_title("Parameter allocation & vocabulary use"); ax[0].legend(fontsize=8)
@@ -131,6 +132,8 @@ def fig_segment():
         if not r or not r.get("langs"):
             continue
         langs = [l for l in r["langs"] if l != "zh"]
+        if not langs:
+            continue
         layer_ids = [e["layer"] for e in r["langs"][langs[0]]["layers"]]
         for lab, ls in (("interior", "-"), ("random", ":")):
             ys = []

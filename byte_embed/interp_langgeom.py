@@ -30,7 +30,7 @@ import numpy as np
 from byte_embed.interp_common import (MAIN_MODELS, apply_projection, fit_leace, fit_mean_diff,
                                       flores_parallel, flores_xling, lang_probe, layer_pooled,
                                       load_student, make_encode, merge_parts, models_in, part_path,
-                                      read_json, write_json)
+                                      read_json, utf8_stdout, write_json)
 
 ANALYSIS = "langgeom"
 VARIANTS = ("none", "mean_diff", "leace")
@@ -76,9 +76,12 @@ def language_geometry(X, labels, seed=0, k=16, standardize=True):
             "subspace_overlap": round(float(np.mean(ov)), 4) if ov else None}
 
 
+FITTERS = {"mean_diff": fit_mean_diff, "leace": fit_leace}
+
+
 def erasure_fits(F, labels):
     """{variant: (P, mu)} on the FINAL embeddings (FLORES; held out from every eval pool)."""
-    return {"mean_diff": fit_mean_diff(F, labels), "leace": fit_leace(F, labels)}
+    return {v: fit(F, labels) for v, fit in FITTERS.items()}
 
 
 def _xling_summary(xl):
@@ -86,22 +89,33 @@ def _xling_summary(xl):
             for a, row in xl.items()}
 
 
-def flores_variants(F_by_lang, fits):
+def flores_variants(F_by_lang, fits, seed=0):
     """FLORES cross-lingual retrieval (P@1 / nDCG@10 per language pair) for: raw, centered (subtract
     each side's OWN centroid — legal here because the language of every sentence is known), and
-    each erasure projection. Also the post-erasure language-probe accuracy on the final embeddings."""
+    each erasure projection (`fits`, fitted on ALL FLORES rows — what the battery uses).
+    Also the post-erasure language-probe accuracy, measured HELD-OUT: the erasers are refit on half
+    of the sentence ids and the probe is trained/tested on the other half, l2-normalized like every
+    consumer of the projection. An in-sample probe would be meaningless — after LEACE the class means
+    are exactly equal over the fitting set, so any split of it has anti-correlated class offsets and
+    the probe scores ~0 (below chance) for every model."""
     langs = list(F_by_lang)
+    n = len(F_by_lang[langs[0]])
     X = np.concatenate([F_by_lang[l] for l in langs], 0)
     labels = np.concatenate([[l] * len(F_by_lang[l]) for l in langs])
     out = {"raw": _xling_summary(flores_xling(F_by_lang, langs))}
     cen = {l: F_by_lang[l] - F_by_lang[l].mean(0) for l in langs}
     out["centered"] = _xling_summary(flores_xling({l: _l2(v) for l, v in cen.items()}, langs))
-    probes = {"raw": lang_probe(X, labels)}
+    rng = np.random.default_rng(seed)
+    half = np.zeros(n, dtype=bool)
+    half[rng.choice(n, size=n // 2, replace=False)] = True
+    tr = np.tile(half, len(langs))                          # sentence-id split, same ids in every language
+    te = ~tr
+    probes = {"raw": lang_probe(_l2(X[te]), labels[te], seed=seed)}
     for v, (P, mu) in fits.items():
-        Xe = apply_projection(X, P, mu)
-        probes[v] = lang_probe(Xe, labels)
         E = {l: _l2(apply_projection(F_by_lang[l], P, mu)) for l in langs}
         out[v] = _xling_summary(flores_xling(E, langs))
+        Ph, muh = FITTERS[v](X[tr], labels[tr])
+        probes[v] = lang_probe(_l2(apply_projection(X[te], Ph, muh)), labels[te], seed=seed)
     return out, probes
 
 
@@ -142,7 +156,7 @@ def identity_check(mine, stored, tol=0.005):
             diffs[cell] = abs(float(np.mean([qa[k] for k in ks])) - float(np.mean([qb[k] for k in ks])))
     worst = max(diffs.values()) if diffs else None
     return {"max_abs_diff": (round(worst, 4) if worst is not None else None), "cells": len(diffs),
-            "pass": bool(worst is not None and worst <= tol)}
+            "pass": (bool(worst <= tol) if worst is not None else None)}   # None = nothing to compare
 
 
 # ----------------------------------------------------------------------------------------------
@@ -164,7 +178,7 @@ def run_one(name, results, ckpt_dir, device, variants=VARIANTS, seed=0, n_probe=
     texts = [par[l][i] for l in langs for i in range(n)]
     labels = np.array([l for l in langs for _ in range(n)])
 
-    if "layers" not in res:
+    if "layers" not in res or not fits_path(name).exists():     # both files or recompute both
         states, layer_ids, Ffinal = layer_pooled(student, texts, device=device,
                                                  batch_size=(4 if "large" in name else 8))
         rng = np.random.default_rng(seed)
@@ -175,7 +189,7 @@ def run_one(name, results, ckpt_dir, device, variants=VARIANTS, seed=0, n_probe=
         res["final_geometry"] = language_geometry(Ffinal, labels, seed, standardize=False)
         F_by_lang = {l: Ffinal[labels == l] for l in langs}
         fits = erasure_fits(Ffinal, labels)
-        res["flores_xling"], res["probe_after_erasure"] = flores_variants(F_by_lang, fits)
+        res["flores_xling"], res["probe_after_erasure"] = flores_variants(F_by_lang, fits, seed)
         res["flores_xling_mean"] = {v: xling_mean(m) for v, m in res["flores_xling"].items()}
         np.savez(fits_path(name), **{f"{v}_P": P for v, (P, mu) in fits.items()},
                  **{f"{v}_mu": mu for v, (P, mu) in fits.items()})
@@ -192,18 +206,21 @@ def run_one(name, results, ckpt_dir, device, variants=VARIANTS, seed=0, n_probe=
     for v in variants:
         if v in res["variants"]:
             continue
+        bs = 32 if bm.get("kind") == "byte" else 128      # byte-large on a 48 GB card: Belebele passages are long
         if v == "none":
-            enc = make_encode(student, device)
+            enc = make_encode(student, device, batch_size=bs)
         else:
             P, mu = fits[v]
-            enc = make_encode(student, device, post=lambda E, P=P, mu=mu: apply_projection(E, P, mu))
+            enc = make_encode(student, device, post=lambda E, P=P, mu=mu: apply_projection(E, P, mu),
+                              batch_size=bs)
         print(f"=== {name}: battery, variant={v} ===")
         res["variants"][v] = battery(enc, ckpt_dir)
         if v == "none":
             res["identity_check"] = identity_check(res["variants"]["none"], bm)
             ic = res["identity_check"]
-            print(f"  [loader check] max|dnDCG@10| = {ic['max_abs_diff']} over {ic['cells']} cells -> "
-                  f"{'PASS' if ic['pass'] else 'WARN: does not reproduce stored results'}")
+            verdict = ("PASS" if ic["pass"] else "no shared per-query cells (stored results predate "
+                       "per_query?)" if ic["pass"] is None else "WARN: does not reproduce stored results")
+            print(f"  [loader check] max|dnDCG@10| = {ic['max_abs_diff']} over {ic['cells']} cells -> {verdict}")
         write_json(outp, res)
     print(f"  saved -> {outp}")
 
@@ -216,6 +233,7 @@ def merge(n_boot=10000):
     print("\nEXP 3 — LANGUAGE GEOMETRY (final embeddings) + ERASURE")
     print(f"  {'model':15}{'probe raw':>10}{'probe md':>9}{'probe leace':>12}{'centroid var':>13}"
           f"{'overlap':>8}{'FLORES P@1 raw/cen/md/leace':>30}{'loader':>8}")
+    print("  (probes = held-out language-ID accuracy on the final embeddings; chance = 0.10)")
     for n in MAIN_MODELS:
         r = M.get(n)
         if not r or "final_geometry" not in r:
@@ -224,7 +242,7 @@ def merge(n_boot=10000):
         ic = r.get("identity_check", {})
         nan = float("nan")
         fx_str = "/".join(f"{fx.get(k, nan):.3f}" for k in ("raw", "centered", "mean_diff", "leace"))
-        loader = "PASS" if ic.get("pass") else ("WARN" if ic else "—")
+        loader = "PASS" if ic.get("pass") else ("n/a" if ic.get("pass") is None else "WARN") if ic else "—"
         print(f"  {n:15}{g['lang_probe_acc']:>10.3f}{pa.get('mean_diff', nan):>9.3f}"
               f"{pa.get('leace', nan):>12.3f}{g['centroid_var_ratio']:>13.4f}"
               f"{(g['subspace_overlap'] or nan):>8.3f}{fx_str:>30}{loader:>8}")
@@ -278,6 +296,9 @@ def _selftest():
     F = {str(k): _l2(X[labels == str(k)]) for k in range(K)}
     xl, probes = flores_variants(F, fits)
     assert probes["raw"] > 0.95 and probes["leace"] < 0.2 and probes["mean_diff"] < 0.2, probes
+    assert probes["leace"] > 0.02 and probes["mean_diff"] > 0.02, probes   # held-out: ~chance, not ~0
+    ic0 = identity_check({"miracl": {"per_lang": {}}}, {"miracl": {"per_lang": {}}})
+    assert ic0["pass"] is None and ic0["cells"] == 0, ic0
     assert set(xl) == {"raw", "centered", "mean_diff", "leace"}
     assert is_treatment(("afriqa", "rw")) and not is_treatment(("miracl", "te"))
     mine = {"miracl": {"per_lang": {"te": {"per_query": {"q1": 0.5, "q2": 0.7}}}}}
@@ -288,6 +309,7 @@ def _selftest():
 
 
 def main():
+    utf8_stdout()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--results", default="results/retrieval_bgem3.json")
     ap.add_argument("--ckpt-dir", default="checkpoints")

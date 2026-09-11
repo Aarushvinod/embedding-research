@@ -22,7 +22,7 @@ import numpy as np
 
 from byte_embed.interp_common import (MAIN_MODELS, effective_rank, flores_parallel, layer_pooled,
                                       load_student, merge_parts, models_in, part_path,
-                                      sample_training_sentences, write_json)
+                                      sample_training_sentences, utf8_stdout, write_json)
 
 ANALYSIS = "params"
 
@@ -46,17 +46,27 @@ def param_breakdown(student):
     return out
 
 
-def utilization_from_counts(counts, vocab_rows):
-    """Pure-numpy core: fraction of vocabulary rows ever hit, and how many rows carry 99% of the
-    token mass (a Zipf-shaped subword vocabulary is dominated by a small head)."""
+def utilization_from_counts(counts, vocab_rows, rows_reachable=None):
+    """Pure-numpy core: fraction of vocabulary rows ever hit (of all embedding rows, and of the rows a
+    text can actually produce), and how many rows carry 99% of the token mass (a Zipf-shaped subword
+    vocabulary is dominated by a small head)."""
     counts = np.asarray(counts, dtype=np.int64)
+    rows_reachable = int(rows_reachable or vocab_rows)
     hit = int((counts > 0).sum())
     srt = np.sort(counts)[::-1]
     cum = np.cumsum(srt) / max(srt.sum(), 1)
     rows99 = int(np.searchsorted(cum, 0.99) + 1) if srt.sum() else 0
-    return {"vocab_rows": int(vocab_rows), "rows_hit": hit,
-            "frac_hit": round(hit / vocab_rows, 4), "rows_for_99pct_mass": rows99,
+    return {"vocab_rows": int(vocab_rows), "rows_reachable": rows_reachable, "rows_hit": hit,
+            "frac_hit": round(hit / vocab_rows, 4), "frac_hit_reachable": round(hit / rows_reachable, 4),
+            "rows_for_99pct_mass": rows99,
             "frac_for_99pct_mass": round(rows99 / vocab_rows, 4), "n_tokens": int(srt.sum())}
+
+
+def reachable_rows(student):
+    """Embedding rows a text can produce. ByT5: 256 byte values + 3 specials = 259 (its 125 sentinel
+    rows 259-383 never occur, and 13 byte values are illegal in UTF-8, so even a byte model tops out
+    near 0.95 of these); subword: len(tokenizer) (mT5's 250,112 rows include 12 padding rows)."""
+    return 259 if "ByT5" in type(student.tok).__name__ else len(student.tok)
 
 
 def vocab_utilization(student, texts, batch=512):
@@ -68,7 +78,7 @@ def vocab_utilization(student, texts, batch=512):
                           max_length=(student.max_chars * 4 if student.max_chars else 2048))["input_ids"]
         flat = np.fromiter((t for row in ids for t in row), dtype=np.int64)
         counts += np.bincount(flat, minlength=vocab_rows)[:vocab_rows]
-    return utilization_from_counts(counts, vocab_rows)
+    return utilization_from_counts(counts, vocab_rows, reachable_rows(student))
 
 
 def spectra_from_states(states, layer_ids, final_emb=None):
@@ -100,7 +110,8 @@ def run_one(name, results, ckpt_dir, device, n_flores=300, n_train=1000, seed=0)
     idx = rng.choice(len(next(iter(par.values()))), size=n_flores, replace=False)
     flores_texts = [par[l][i] for l in par for i in idx]
     try:
-        train_texts, _, _ = sample_training_sentences(ckpt_dir, per_lang=n_train, seed=seed)
+        train_texts, _, _ = sample_training_sentences(ckpt_dir, per_lang=n_train, seed=seed,
+                                                      results=results)
     except SystemExit as e:  # no cached targets on this machine -> FLORES only
         print(f"  [params] {e} -> utilization on FLORES only")
         train_texts = []
@@ -121,8 +132,9 @@ def merge():
     d = merge_parts(ANALYSIS)
     M = d["models"]
     print("\nEXP 1 — PARAMETER ALLOCATION (dense fraction, vocab utilization, effective dimensionality)")
-    print(f"  {'model':15}{'total(M)':>9}{'vocab%':>8}{'blocks%':>9}{'vocab hit':>10}{'rows99%':>9}"
-          f"{'final PR':>10}{'mid PR(std)':>12}{'last PR(std)':>13}")
+    print(f"  {'model':15}{'total(M)':>9}{'vocab%':>8}{'blocks%':>9}{'vocab hit':>10}{'reachable':>10}"
+          f"{'rows99%':>9}{'final PR':>10}{'mid PR(std)':>12}{'last PR(std)':>13}")
+    print("  (vocab hit = rows used / all embedding rows; reachable = / rows a text can produce)")
     for name in MAIN_MODELS:
         r = M.get(name)
         if not r:
@@ -131,7 +143,8 @@ def merge():
         mid = L[len(L) // 2]["std"]["participation_ratio"]
         last = L[-1]["std"]["participation_ratio"]
         print(f"  {name:15}{p['total'] / 1e6:>9.0f}{100 * p['frac']['vocab']:>8.1f}"
-              f"{100 * p['frac']['blocks']:>9.1f}{u['frac_hit']:>10.3f}{u['frac_for_99pct_mass']:>9.4f}"
+              f"{100 * p['frac']['blocks']:>9.1f}{u['frac_hit']:>10.3f}"
+              f"{u.get('frac_hit_reachable', u['frac_hit']):>10.3f}{u['frac_for_99pct_mass']:>9.4f}"
               f"{r['final']['participation_ratio']:>10.1f}{mid:>12.1f}{last:>13.1f}")
     print("  reading: byte dense%/vocab-hit >> subword confirms the allocation story; byte-small's"
           " PR ~ byte-base's is the saturation signature.")
@@ -143,6 +156,7 @@ def _selftest():
     counts[:10] = 1000          # 10 rows carry all the mass
     u = utilization_from_counts(counts, 1000)
     assert u["frac_hit"] == 0.01 and u["rows_for_99pct_mass"] == 10, u
+    assert utilization_from_counts(counts, 1000, rows_reachable=20)["frac_hit_reachable"] == 0.5
     states = np.stack([rng.standard_normal((400, 32)),                        # isotropic
                        np.outer(rng.standard_normal(400), rng.standard_normal(32))], 0)
     sp = spectra_from_states(states, [0, 1], final_emb=rng.standard_normal((400, 8)))
@@ -153,6 +167,7 @@ def _selftest():
 
 
 def main():
+    utf8_stdout()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--results", default="results/retrieval_bgem3.json")
     ap.add_argument("--ckpt-dir", default="checkpoints")
