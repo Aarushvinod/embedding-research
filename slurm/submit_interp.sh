@@ -16,6 +16,7 @@
 #   PARTITION=scavenger ACCOUNT=scavenger QOS=scavenger bash slurm/submit_interp.sh
 #   MODELS="byte-small subword-small" bash slurm/submit_interp.sh          # subset of models
 #   EXPS="params alignuni" MODE=exp bash slurm/submit_interp.sh            # subset of experiments
+#   PARTITION=tron ACCOUNT=tron QOS=default CPUS=4 bash slurm/submit_interp.sh   # QOS with a CPU cap
 set -euo pipefail
 
 python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('torch') else 1)" 2>/dev/null || {
@@ -30,6 +31,7 @@ PARTITION="${PARTITION-clip}"; ACCOUNT="${ACCOUNT-clip}"; QOS="${QOS-huge-long}"
 GRES_BYTE="${GRES_BYTE-gpu:rtxa6000:1}"     # byte-large per-position extraction wants 48GB
 GRES_SUB="${GRES_SUB-gpu:1}"; CONSTRAINT="${CONSTRAINT-Ampere}"
 MODE="${MODE-model}"
+CPUS="${CPUS-8}"; MEM="${MEM-48G}"                 # per-job CPU / RAM; some QOS cap these (tron default: 4 CPUs)
 EXPS="${EXPS-params alignuni script segment langgeom}"
 MODELS="${MODELS-byte-small subword-small byte-base subword-base byte-large subword-large}"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -38,7 +40,7 @@ SFLAGS=()
 [ -n "$PARTITION" ] && SFLAGS+=(--partition="$PARTITION")
 [ -n "$ACCOUNT" ]   && SFLAGS+=(--account="$ACCOUNT")
 [ -n "$QOS" ]       && SFLAGS+=(--qos="$QOS")
-sb() { sbatch --parsable "${SFLAGS[@]}" --cpus-per-task=8 --mem=48G --requeue \
+sb() { sbatch --parsable "${SFLAGS[@]}" --cpus-per-task="$CPUS" --mem="$MEM" --requeue \
       --output=slurm-%x-%j.out "$@"; }
 gres_for()  { case "$1" in byte-*) echo "$GRES_BYTE" ;; *) echo "$GRES_SUB" ;; esac; }
 hours_for() { case "$1" in langgeom) echo 08:00:00 ;; script|segment) echo 06:00:00 ;; *) echo 02:00:00 ;; esac; }
