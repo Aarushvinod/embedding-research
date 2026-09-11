@@ -33,6 +33,7 @@ byte_embed/               the study (+ README.md, RESULTS.md, NOVELTY.md)
   reeval.py  additive re-evaluation of finished checkpoints
 notebooks/                byteembed_retrieval_a100.ipynb (the runner) + specialization notebooks
 slurm/                    submit_all.sh (training) · submit_full_eval.sh (final eval) · submit_interp.sh (interpretability) · train_model.sbatch
+- `bash slurm/status.sh` — read-only status: per-model training steps / checkpoints / full-eval and interp part files, merged files, and the queue with live training progress from the logs.
 results/                  raw run JSON (gitignored)
 ```
 
