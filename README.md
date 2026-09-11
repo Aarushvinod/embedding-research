@@ -53,6 +53,7 @@ bash slurm/submit_all.sh          # 1 precompute -> 12 dependency-gated training
 bash slurm/submit_full_eval.sh    # after training: full-corpus final eval, one job per model
 bash slurm/submit_interp.sh       # after training: the 5 interpretability analyses, one job per (experiment, model)
 bash slurm/status.sh              # any time: what is done / running (part files, checkpoints, queue, live training progress)
+python -m byte_embed.stats --training   # 20k-pool byte-vs-subword table + paired bootstrap from the part files (add --arms for B/C vs A)
 ```
 Same per-model part-file convention as the notebook, so Colab sessions and SLURM jobs are
 interchangeable mid-study. See `RETRIEVAL_EXPERIMENT.md` → "How to run" for multi-session

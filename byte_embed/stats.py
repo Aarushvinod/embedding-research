@@ -96,15 +96,65 @@ def _print_rows(title, rows):
 
 
 def _load_part(label, model):
+    """FULL-corpus final-eval entry (results/full_eval_part_<label>_<model>.json)."""
     p = Path(f"results/full_eval_part_{label}_{model}.json")
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
 
 
-def report_bytevssub(n_boot=10000):
-    """byte-X minus subword-X at each size, from the full_eval part files."""
+def _load_train_part(label, model):
+    """TRAINING-TIME (250 queries x 20k-distractor pools) entry from the per-model part file that each
+    SLURM training job writes (results/retrieval_bgem3[_bteacher|_brandom]_part_<model>.json) — so
+    the comparison is available before the merge job runs, i.e. with byte-large still training."""
+    suf = "" if label == "main" else f"_{label}"
+    p = Path(f"results/retrieval_bgem3{suf}_part_{model}.json")
+    if not p.exists():
+        return None
+    return (json.loads(p.read_text(encoding="utf-8")).get("models") or {}).get(model)
+
+
+MAIN = ["byte-small", "subword-small", "byte-base", "subword-base", "byte-large", "subword-large"]
+ARMS = ["byte-small", "byte-base", "byte-large"]
+_SHORT = {"MIRACL": "miracl", "belebele": "belebele", "amharicpr": "amharicpr", "ciral": "ciral",
+          "afriqa": "afriqa"}
+
+
+def report_table(loader=_load_part):
+    """Per-model nDCG@10 on every per-query cell (= mean of the per-query scores), grouped by benchmark
+    family, for whichever part files exist. Read-only; nothing is merged or written."""
+    rows = []
+    for label, models in (("main", MAIN), ("bteacher", ARMS), ("brandom", ARMS)):
+        for m in models:
+            d = loader(label, m)
+            if d:
+                name = m if label == "main" else f"{m} [{label[1:]}]"
+                rows.append((name, {c: float(np.mean(list(pq.values()))) for c, pq in iter_perquery(d)}))
+    if not rows:
+        print("no part files found")
+        return
+    fams = []                                        # benchmark families in first-seen order
+    for _, cells in rows:
+        for bench, _ in cells:
+            if bench not in fams:
+                fams.append(bench)
+    for fam in fams:
+        cols = []
+        for _, cells in rows:
+            for c in cells:
+                if c[0] == fam and c not in cols:
+                    cols.append(c)
+        print(f"\n  {_SHORT.get(fam, fam)} nDCG@10" + "".join(f"{lang:>8}" for _, lang in cols) + f"{'mean':>8}")
+        for name, cells in rows:
+            vals = [cells.get(c) for c in cols]
+            got = [v for v in vals if v is not None]
+            print(f"  {name:22}" + "".join(f"{v:>8.3f}" if v is not None else f"{'-':>8}" for v in vals)
+                  + (f"{np.mean(got):>8.3f}" if got else f"{'-':>8}"))
+
+
+def report_bytevssub(n_boot=10000, loader=_load_part):
+    """byte-X minus subword-X at each size, from the part files (full-corpus or training-time)."""
     any_found = False
     for size in ("small", "base", "large"):
-        b, s = _load_part("main", f"byte-{size}"), _load_part("main", f"subword-{size}")
+        b, s = loader("main", f"byte-{size}"), loader("main", f"subword-{size}")
         if not (b and s):
             print(f"[byte-{size} vs subword-{size}] part file(s) missing — skip")
             continue
@@ -112,17 +162,17 @@ def report_bytevssub(n_boot=10000):
         _print_rows(f"byte-{size} − subword-{size}  (Δ>0 ⇒ byte wins; * CI excludes 0)",
                     compare(b, s, n_boot))
     if not any_found:
-        print("No full_eval part files found — run slurm/submit_full_eval.sh first.")
+        print("No part files found for this setting.")
 
 
-def report_arms(n_boot=10000):
+def report_arms(n_boot=10000, loader=_load_part):
     """Boundary arms B (teacher) and C (random) minus A (raw main) per byte size."""
     for size in ("small", "base", "large"):
-        a = _load_part("main", f"byte-{size}")
+        a = loader("main", f"byte-{size}")
         if not a:
             continue
         for arm, lab in (("teacher", "bteacher"), ("random", "brandom")):
-            x = _load_part(lab, f"byte-{size}")
+            x = loader(lab, f"byte-{size}")
             if x:
                 _print_rows(f"byte-{size}: {arm}-boundary − raw  (Δ>0 ⇒ markers help)",
                             compare(x, a, n_boot))
@@ -152,15 +202,22 @@ def _selftest():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--arms", action="store_true", help="boundary B/C vs A instead of byte vs subword")
+    ap.add_argument("--training", action="store_true",
+                    help="training-time 20k-pool part files (available per model as each training "
+                         "finishes) instead of the full-corpus final-eval parts")
     ap.add_argument("--n-boot", type=int, default=10000)
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
-        _selftest()
-    elif a.arms:
-        report_arms(a.n_boot)
+        return _selftest()
+    loader = _load_train_part if a.training else _load_part
+    print("SETTING: " + ("training-time battery — 250 queries x 20k-distractor pools"
+                         if a.training else "full-corpus final eval"))
+    report_table(loader)
+    if a.arms:
+        report_arms(a.n_boot, loader)
     else:
-        report_bytevssub(a.n_boot)
+        report_bytevssub(a.n_boot, loader)
 
 
 if __name__ == "__main__":
