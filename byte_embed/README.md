@@ -46,8 +46,8 @@ profile** (FLOPs / throughput / latency / VRAM).
   `data.py` — `load_balanced_sentences`; `miracl.py` — MIRACL; `config.py` — the 9-language code maps;
   `robustness.py` — orthographic perturbations (deferred from v1, kept for a follow-up robustness run).
 
-- `interp_common.py` — shared plumbing for the interpretability analyses: exact-forward activation extraction (`layer_pooled`, `layer_positions`), student loader that returns the model object, FLORES 10-way parallel loader, LEACE / mean-difference erasure, effective rank, alignment / uniformity, language probes.
-- `interp_params.py` / `interp_alignuni.py` / `interp_langgeom.py` / `interp_script.py` / `interp_segment.py` — the five pre-registered analyses (capacity, objective, language-neutrality, script, composition); see RETRIEVAL_EXPERIMENT.md "Interpretability analyses".
+- `interp_common.py` — shared plumbing for the interpretability experiments: student loader (trained or pretrained-only), exact-forward tokenization, forward-hook activation recording and editing (`record_blocks`, `block_hook`), per-position extraction, rank-1 LEACE erasers, FLORES cache.
+- `interp_english.py` / `interp_script.py` / `interp_segment.py` — the three pre-registered experiments (English erased inside the encoder; native vs romanized script; emergent segmentation with surface / pretrained baselines and cross-lingual transfer); see RETRIEVAL_EXPERIMENT.md "Interpretability experiments".
 
 ## Honest framing
 Byte is **not** cheaper. Its UTF-8 cost is *higher* than subword for non-Latin scripts — Indic byte

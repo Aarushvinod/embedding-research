@@ -51,7 +51,7 @@ python -m byte_embed.run_lowresource --teacher bge-m3 --pooling attn --steps 100
 ```bash
 bash slurm/submit_all.sh          # 1 precompute -> 12 dependency-gated trainings -> merges
 bash slurm/submit_full_eval.sh    # after training: full-corpus final eval, one job per model
-bash slurm/submit_interp.sh       # after training: the 5 interpretability analyses, one job per model (MODE=exp: per experiment x model)
+bash slurm/submit_interp.sh       # after training: the 3 interpretability experiments, one job per model (MODE=exp: per experiment x model)
 bash slurm/status.sh              # any time: what is done / running (part files, checkpoints, queue, live training progress)
 python -m byte_embed.stats --training   # 20k-pool tables (nDCG@10, recall@100, MRR@10, Belebele recall@1; --metrics to choose) + paired bootstrap from the part files; --arms for B/C vs A
 ```

@@ -28,4 +28,5 @@ matplotlib>=3.8
 # if present, else the HF port, else LaBSE.
 # Optional: FLOPs counting in efficiency.profile_model (degrades to None if absent).
 # fvcore>=0.1.5
-uroman>=1.3           # transliteration probe (interp_script.py); hard dependency, never a silent fallback
+uroman>=1.3           # transliteration (interp_script.py); hard dependency, never a silent fallback
+pypinyin>=0.51        # tone-marked pinyin, the second romanization scheme for zh (control only; skipped if absent)

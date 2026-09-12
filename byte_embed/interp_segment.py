@@ -1,28 +1,36 @@
-"""Exp 5 — emergent segmentation in ByT5's early layers (composition): does the byte student build
-word-like units on its own?
+"""Exp 5 — emergent segmentation in the byte students (byte models only).
 
-MrT5 (ICLR 2025) showed a byte encoder consolidates orthography-adaptive units by encoder layers
-1-3 when trained with a deletion gate; whether VANILLA retrieval-distilled byte students do so is
-untested. We extract per-byte-position residual states and train linear probes for per-position
-boundary labels: `tok_end` = last byte of a BGE-M3 (teacher-tokenizer) token; `word_end` = last
-byte before whitespace (space-delimited languages only); `interior` = a tok_end strictly inside a
-run of letters/marks/digits, contrasted only with in-run non-boundaries — the non-trivial sub-word
-boundary, because a word boundary is trivially decodable from the 0x20 byte sitting in the input
-(the "spaces trap"); `random` = count-matched random positions (chance calibration). Chinese has no whitespace, so every boundary there had to be COMPUTED, not copied —
-the cleanest test-bed. The candidate universe is character-final bytes only (a mid-character byte
-can never be a boundary in a multi-byte script, and that would be a trivial signal); whitespace
-bytes are never candidates (the 0x20 byte would be trivially decodable); standalone sentencepiece
-'▁' tokens are dropped before collecting token ends (`teacher_cuts`) because the XLM-R fast
-tokenizer assigns them the span of the NEXT word's first character — kept, they plant a bogus
-boundary one character into 1-6% of sampled words and after the first character of ~half of the
-Chinese sentences; and `interior` is defined — positives AND negatives — strictly inside runs of
-letters/marks/digits, so neither punctuation nor whitespace can carry the label. Indic vowel signs
-are marks (Unicode Mn/Mc) and count as word characters. Reading rule
-(pre-registered): interior boundaries decodable well above the random control by layers 1-3 =>
-"redundancy" explanation of the boundary-injection null (markers added information the model
-already had); chance-level everywhere incl. an MLP probe => "irrelevance" (segmentation isn't used
-for this task at all). Teacher-boundary decodability also answers the "subword teacher biases the
-byte student" reviewer risk directly. Byte models only.
+Claim under test: byte models develop segmentation on their own, and different languages develop
+their own rather than sharing one structure imposed by a subword tokenizer.
+
+Setup: all ten languages, 500 FLORES sentences each; per-byte-position residual states at every
+layer (0 = embeddings, then every block); per-position labels
+  tok_end   last byte of a BGE-M3 (teacher-tokenizer) token, with the standalone-'▁' correction
+            (`teacher_cuts`: the XLM-R fast tokenizer gives a lone '▁' the span of the NEXT word's
+            first character, which would plant a bogus boundary one character into 1-6% of words);
+  interior  a token end strictly inside a run of letters/marks/digits, contrasted ONLY with in-run
+            non-boundaries — the non-trivial sub-word boundary (a word boundary is trivially
+            decodable from the 0x20 byte in the input: the "spaces trap");
+  word_end  last byte before whitespace (undefined for Chinese);
+  random    count-matched random character-final positions (chance calibration).
+Candidates are character-final bytes only (a mid-character byte can never be a boundary in a
+multi-byte script); whitespace bytes are never candidates. One logistic-regression probe per layer,
+label and language, balanced accuracy, train/test split BY SENTENCE with bootstrap intervals over
+test sentences.
+Robustness: (a) a surface-statistics baseline — the same probe on a one-hot window of raw bytes
+around the position, no model; (b) the same probes on the untouched PRETRAINED ByT5 encoder, so
+what distillation added is separated from what ByT5 already had.
+Core result — cross-lingual transfer at the peak layer: a probe trained on language A tested on
+held-out sentences of language B for all 100 pairs, reported as acc(A->B) / acc(B->B) (each
+language standardized with its own statistics, so the matrix tests whether the boundary DIRECTION
+transfers), plus one joint probe trained on all languages and scored per language.
+
+Pre-registered readings: within-language accuracy must beat the surface baseline and the random
+control for the representation to count as carrying segmentation; the pretrained comparison says
+whether distillation added any. Transfer: low ratios even within a script (en->sw, sw->rw) mean
+LANGUAGE-specific segmentation (the claim); high within-script / low cross-script mean script-
+specific features; high everywhere means one shared feature. Cross-script cells are expected to be
+low on byte-overlap grounds alone, so the same-script cells carry the result.
 
   python -m byte_embed.interp_segment --only byte-small
   python -m byte_embed.interp_segment --only byte-small --langs en,zh --n-sent 50   # fast path
@@ -42,32 +50,28 @@ from byte_embed.interp_common import (LATIN, SCRIPT, byte_offsets, flores_parall
                                       utf8_stdout, write_json)
 
 ANALYSIS = "segment"
+SCHEMA = 2                         # bumped when the part-file contents change meaning
 LABELS = ("tok_end", "interior", "word_end", "random")
 BYTE_MODELS = ["byte-small", "byte-base", "byte-large"]
 NO_SPACES = {"zh"}
+SURFACE_K = 4                      # bytes of context on each side for the surface baseline
 
 
 # ----------------------------------------------------------------------------------------------
 # labels (pure python)
 # ----------------------------------------------------------------------------------------------
 def _is_word_char(ch):
-    """Letters, marks (Indic vowel signs, Arabic diacritics) and digits — i.e. anything that is not
+    """Letters, marks (Indic vowel signs, Arabic diacritics) and digits — anything that is not
     whitespace, punctuation, a symbol or a control character."""
     return unicodedata.category(ch)[0] in "LMN"
 
 
 def position_labels(text, cuts, lang, max_chars=512):
-    """Per-byte-position labels for one text. `cuts` = CHARACTER offsets of teacher-token ends
-    (boundaries.boundary_cuts): a cut at c means a token ends after character c-1, so the boundary
-    sits on the LAST BYTE of character c-1. Returns None for texts shorter than two characters, else
+    """Per-byte-position labels for one text. `cuts` = CHARACTER offsets of teacher-token ends: a
+    cut at c means a token ends after character c-1, so the boundary sits on the LAST BYTE of
+    character c-1. Returns None for texts shorter than two characters, else
     {name: (positives: set(byte_pos) | None if undefined, universe: sorted candidate byte positions
-    the label is defined over — negatives are drawn from universe minus positives)}:
-      tok_end   last byte of a teacher token; universe = every non-whitespace, non-final character
-      word_end  last byte of a non-whitespace character followed by whitespace (None for zh)
-      interior  tok_end restricted to positions strictly INSIDE a run of word characters (letters /
-                marks / digits on BOTH sides); universe = those in-run positions only
-      random    count-matched (to tok_end) random positions from tok_end's universe, crc32-seeded
-    Whitespace characters are never candidates and the sentence-final byte is excluded (trivial)."""
+    the label is defined over — negatives are drawn from universe minus positives)}."""
     starts, n_bytes = byte_offsets(text, max_chars)
     text = text[:max_chars]
     L = len(text)
@@ -92,9 +96,8 @@ def position_labels(text, cuts, lang, max_chars=512):
 
 def build_dataset(texts, cuts_list, lang, rng, max_chars=512, per_text_cap=40):
     """Balanced positives/negatives per label -> (sel: positions per text, items: {label: [(text_idx,
-    pos, y)]}). Negatives are drawn from that label's OWN universe minus its positives (so the
-    `interior` probe contrasts in-word boundaries with in-word non-boundaries, never with
-    punctuation or whitespace), count-matched; per_text_cap bounds the extraction cost."""
+    pos, y)]}). Negatives come from that label's OWN universe minus its positives, count-matched;
+    per_text_cap bounds the extraction cost."""
     sel, items = [], {l: [] for l in LABELS}
     for i, (t, cuts) in enumerate(zip(texts, cuts_list)):
         labs = position_labels(t, cuts, lang, max_chars)
@@ -117,43 +120,73 @@ def build_dataset(texts, cuts_list, lang, rng, max_chars=512, per_text_cap=40):
     return sel, items
 
 
-# ----------------------------------------------------------------------------------------------
-# probes (numpy + sklearn)
-# ----------------------------------------------------------------------------------------------
-def probe_metrics(X, y, seed=0, mlp=False):
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import balanced_accuracy_score, f1_score
-    from sklearn.model_selection import train_test_split
-    from sklearn.neural_network import MLPClassifier
-    from sklearn.preprocessing import StandardScaler
-    y = np.asarray(y)
-    if len(set(y.tolist())) < 2 or len(y) < 20:
-        return None
-    Xtr, Xte, ytr, yte = train_test_split(np.asarray(X, dtype=np.float32), y, test_size=0.2,
-                                          random_state=seed, stratify=y)
-    sc = StandardScaler().fit(Xtr)
-    clf = (MLPClassifier(hidden_layer_sizes=(256,), max_iter=300, random_state=seed) if mlp
-           else LogisticRegression(max_iter=2000, C=10.0))
-    clf.fit(sc.transform(Xtr), ytr)
-    pred = clf.predict(sc.transform(Xte))
-    return {"acc": round(float((pred == yte).mean()), 3),
-            "bacc": round(float(balanced_accuracy_score(yte, pred)), 3),
-            "f1": round(float(f1_score(yte, pred)), 3), "n": int(len(y))}
-
-
 def teacher_cuts(text, tok):
     """Teacher-token END character offsets, like boundaries.boundary_cuts, minus the ends of standalone
-    '▁' tokens: the XLM-R fast tokenizer reports a lone '▁' (id 6, emitted before words it cannot
-    attach to) with the span of the NEXT word's first character — 'brown fox' -> ('▁', (16, 17)),
-    ('fox', (16, 19)); '周一，' -> ('▁', (0, 1)), ('周一', (0, 2)) — so boundary_cuts would plant a
-    boundary one character into the word ('f|ox', '周|一'). Measured on FLORES: 1.5-5.8% of sampled
-    interior positives per language, and a bogus first-character boundary in ~47% of Chinese
-    sentences. It is the ONLY token with an overlapping span. Arm B (mark_teacher) was trained and
-    evaluated with those spurious markers included (~0.2-1.2 per sentence); the probe labels here
-    are the corrected teacher boundaries."""
+    '▁' tokens (see the module docstring)."""
     enc = tok(text, return_offsets_mapping=True, add_special_tokens=False, truncation=True, max_length=512)
     toks = tok.convert_ids_to_tokens(enc["input_ids"])
     return sorted({e for t, (_, e) in zip(toks, enc["offset_mapping"]) if t != "▁" and 0 < e < len(text)})
+
+
+def surface_features(texts, items, k=SURFACE_K, max_chars=512):
+    """The no-model baseline: one-hot of the raw bytes in the window [p-k, p+k] around each labelled
+    position of the (char-truncated) text."""
+    rows = []
+    for i, p, _ in items:
+        b = texts[i][:max_chars].encode("utf-8")
+        f = np.zeros((2 * k + 1, 256), np.float32)
+        for j, off in enumerate(range(-k, k + 1)):
+            q = p + off
+            if 0 <= q < len(b):
+                f[j, b[q]] = 1.0
+        rows.append(f.ravel())
+    return np.stack(rows, 0) if rows else np.zeros((0, (2 * k + 1) * 256), np.float32)
+
+
+# ----------------------------------------------------------------------------------------------
+# probes (numpy + sklearn)
+# ----------------------------------------------------------------------------------------------
+def group_split(y, groups, seed=0, test_size=0.2):
+    from sklearn.model_selection import GroupShuffleSplit
+    tr, te = next(GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=seed)
+                  .split(np.zeros(len(y)), y, groups))
+    return tr, te
+
+
+def fit_probe(X, y, seed=0):
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    sc = StandardScaler().fit(X)
+    clf = LogisticRegression(max_iter=2000, C=10.0, random_state=seed).fit(sc.transform(X), y)
+    return sc, clf
+
+
+def probe_metrics(X, y, groups, seed=0, n_boot=200):
+    """Balanced accuracy of a linear probe with the train/test split BY SENTENCE (groups) and a
+    bootstrap interval over the test sentences. None if the label is degenerate."""
+    from sklearn.metrics import balanced_accuracy_score, f1_score
+    X, y, groups = np.asarray(X, np.float32), np.asarray(y), np.asarray(groups)
+    if len(set(y.tolist())) < 2 or len(y) < 20 or len(set(groups.tolist())) < 5:
+        return None
+    tr, te = group_split(y, groups, seed)
+    if len(set(y[tr].tolist())) < 2 or len(set(y[te].tolist())) < 2:
+        return None
+    sc, clf = fit_probe(X[tr], y[tr], seed)
+    pred = clf.predict(sc.transform(X[te]))
+    yt, gt = y[te], groups[te]
+    ug = np.unique(gt)
+    idx = {g: np.flatnonzero(gt == g) for g in ug}
+    rng = np.random.default_rng(seed)
+    boots = []
+    for _ in range(n_boot):
+        ii = np.concatenate([idx[g] for g in rng.choice(ug, size=len(ug), replace=True)])
+        if len(set(yt[ii].tolist())) > 1:
+            boots.append(balanced_accuracy_score(yt[ii], pred[ii]))
+    lo, hi = (np.quantile(boots, [0.025, 0.975]) if boots else (float("nan"), float("nan")))
+    return {"acc": round(float((pred == yt).mean()), 3),
+            "bacc": round(float(balanced_accuracy_score(yt, pred)), 3),
+            "bacc_ci": [round(float(lo), 3), round(float(hi), 3)],
+            "f1": round(float(f1_score(yt, pred)), 3), "n": int(len(y)), "n_test_sent": int(len(ug))}
 
 
 def layer_plan(n_layers):
@@ -163,9 +196,46 @@ def layer_plan(n_layers):
     return sorted(set([0, 1, 2, 3, 4] + list(range(7, n_layers, 3)) + [n_layers - 1]))
 
 
+def peak_layer(res, key="layers"):
+    """Layer with the highest mean interior balanced accuracy across languages (trained probes)."""
+    acc = {}
+    for lang, d in res["langs"].items():
+        for e in d.get(key) or []:
+            if e.get("interior"):
+                acc.setdefault(e["layer"], []).append(e["interior"]["bacc"])
+    if not acc:
+        return None
+    return int(max(acc, key=lambda l: float(np.mean(acc[l]))))
+
+
+def _lang_sample(par, lang, n_sent, seed):
+    rng = np.random.default_rng([seed, zlib.crc32(lang.encode("utf-8"))])
+    idx = rng.choice(len(par[lang]), size=min(n_sent, len(par[lang])), replace=False)
+    return [par[lang][i] for i in idx], rng
+
+
+def _probe_layers(feats, index, items, layers, seed):
+    row_of = {k: r for r, k in enumerate(index)}
+    out = []
+    for l in layers:
+        entry = {"layer": int(l)}
+        for lab in LABELS:
+            it = [(row_of[(i, p)], y, i) for i, p, y in items[lab] if (i, p) in row_of]
+            if not it:
+                entry[lab] = None
+                continue
+            rows, y, g = zip(*it)
+            entry[lab] = probe_metrics(feats[l][list(rows)], y, g, seed)
+        out.append(entry)
+    return out
+
+
+# ----------------------------------------------------------------------------------------------
 def run_one(name, results, ckpt_dir, device, langs=None, n_sent=None, seed=0):
     outp = part_path(ANALYSIS, name)
-    res = read_json(outp) or {"model": name, "langs": {}}
+    res = read_json(outp) or {}
+    if res.get("schema") != SCHEMA:          # first-round part files (position-level splits) are discarded
+        res = {"model": name, "langs": {}, "schema": SCHEMA}
     loaded = load_student(name, results, ckpt_dir, device)
     if loaded is None:
         return
@@ -173,6 +243,7 @@ def run_one(name, results, ckpt_dir, device, langs=None, n_sent=None, seed=0):
     if bm.get("kind") != "byte":
         print(f"  [segment] {name} is not a byte model -> skip")
         return
+    pre = load_student(name, results, ckpt_dir, device, pretrained_only=True)[0]
     from byte_embed.boundaries import _teacher_tok
     tok = _teacher_tok()
     par = flores_parallel(cache_dir=ckpt_dir)
@@ -181,161 +252,248 @@ def run_one(name, results, ckpt_dir, device, langs=None, n_sent=None, seed=0):
     if bad:
         raise SystemExit(f"unknown langs {bad}; choose from {list(par)}")
     n_sent = n_sent or (300 if "large" in name else 500)
-    res.update(kind="byte", steps_run=bm.get("steps_run"))
+    big = "large" in name
+    res.update(kind="byte", steps_run=bm.get("steps_run"), n_sent=n_sent)
+    layers = layer_plan(student.enc.config.num_layers + 1)     # embeddings + every block
+
     for lang in langs:
-        if lang in res["langs"]:
+        d = res["langs"].get(lang) or {}
+        if d.get("layers") and d.get("surface") and d.get("pretrained"):
             print(f"  {name}/{lang}: done -> skip")
             continue
         # per-language generator: sampling depends only on (seed, lang), so a requeued run that
         # skips finished languages draws exactly what an uninterrupted run would have drawn
-        rng = np.random.default_rng([seed, zlib.crc32(lang.encode("utf-8"))])
-        idx = rng.choice(len(par[lang]), size=min(n_sent, len(par[lang])), replace=False)
-        texts = [par[lang][i] for i in idx]
+        texts, rng = _lang_sample(par, lang, n_sent, seed)
         cuts_list = [teacher_cuts(t[:student.max_chars], tok) for t in texts]
         sel, items = build_dataset(texts, cuts_list, lang, rng, max_chars=student.max_chars)
-        layers = layer_plan(student.enc.config.num_layers + 1)     # embeddings + every block
-        feats, index = layer_positions(student, texts, sel, device=device, layers=layers,
-                                       batch_size=(4 if "large" in name else 8))
-        row_of = {k: r for r, k in enumerate(index)}
-        out = {"n_sent": len(texts), "layers": []}
-        for l in layers:
-            entry = {"layer": int(l)}
+        d.setdefault("n_sent", len(texts))
+        if not d.get("layers"):
+            feats, index = layer_positions(student, texts, sel, device=device, layers=layers,
+                                           batch_size=(4 if big else 8))
+            d["layers"] = _probe_layers(feats, index, items, layers, seed)
+            del feats
+        if not d.get("surface"):
+            d["surface"] = {}
             for lab in LABELS:
-                it = [(row_of[(i, p)], y) for i, p, y in items[lab] if (i, p) in row_of]
+                it = items[lab]
                 if not it:
-                    entry[lab] = None
+                    d["surface"][lab] = None
                     continue
-                rows, y = zip(*it)
-                entry[lab] = probe_metrics(feats[l][list(rows)], y, seed)
-            out["layers"].append(entry)
-        # MLP probe-strength check on layers 1-3 if the linear interior probe never clears random
-        early = [e for e in out["layers"] if 1 <= e["layer"] <= 3 and e.get("interior") and e.get("random")]
-        if early and all(e["interior"]["bacc"] < e["random"]["bacc"] + 0.05 for e in early):
-            out["mlp_check"] = {}
-            for e in early:
-                it = [(row_of[(i, p)], y) for i, p, y in items["interior"] if (i, p) in row_of]
-                rows, y = zip(*it)
-                out["mlp_check"][str(e["layer"])] = probe_metrics(feats[e["layer"]][list(rows)], y,
-                                                                  seed, mlp=True)
-        res["langs"][lang] = out
+                X = surface_features(texts, it, max_chars=student.max_chars)
+                d["surface"][lab] = probe_metrics(X, [y for _, _, y in it], [i for i, _, _ in it], seed)
+        if not d.get("pretrained"):
+            feats, index = layer_positions(pre, texts, sel, device=device, layers=layers,
+                                           batch_size=(4 if big else 8))
+            d["pretrained"] = _probe_layers(feats, index, items, layers, seed)
+            del feats
+        res["langs"][lang] = d
         write_json(outp, res)
-        e1 = next((e for e in out["layers"] if e["layer"] == 1), out["layers"][0])
-        print(f"  {name}/{lang}: layer1 interior bacc={e1['interior']['bacc'] if e1.get('interior') else None}"
-              f" random={e1['random']['bacc'] if e1.get('random') else None} -> saved")
-        del feats
+        e1 = next((e for e in d["layers"] if e["layer"] == 1), d["layers"][0])
+        pk = max((e for e in d["layers"] if e.get("interior")), key=lambda e: e["interior"]["bacc"], default=None)
+        print(f"  {name}/{lang}: interior bacc L1={e1['interior']['bacc'] if e1.get('interior') else None} "
+              f"peak={pk['interior']['bacc'] if pk else None}@L{pk['layer'] if pk else '-'} "
+              f"surface={d['surface']['interior']['bacc'] if d['surface'].get('interior') else None} "
+              f"random={e1['random']['bacc'] if e1.get('random') else None} -> saved")
+
+    if "transfer" not in res and len(res["langs"]) >= 2:
+        res["transfer"] = transfer_matrix(student, par, list(res["langs"]), res, tok, n_sent, seed, device, big)
+        write_json(outp, res)
     print(f"  saved -> {outp}")
+
+
+def transfer_matrix(student, par, langs, res, tok, n_sent, seed, device, big):
+    """Cross-lingual transfer of the INTERIOR-boundary probe at the peak layer, plus a joint probe.
+    Each language is standardized with its own training-split statistics."""
+    from sklearn.metrics import balanced_accuracy_score
+    from sklearn.preprocessing import StandardScaler
+    peak = peak_layer(res)
+    print(f"  transfer pass at peak layer {peak}")
+    data = {}
+    for lang in langs:
+        texts, rng = _lang_sample(par, lang, n_sent, seed)
+        cuts_list = [teacher_cuts(t[:student.max_chars], tok) for t in texts]
+        _, items = build_dataset(texts, cuts_list, lang, rng, max_chars=student.max_chars)
+        it = items["interior"]
+        if len(it) < 40:
+            continue
+        sel = [[] for _ in texts]
+        for i, p, _ in it:
+            sel[i].append(p)
+        sel = [sorted(set(s)) for s in sel]
+        feats, index = layer_positions(student, texts, sel, device=device, layers=[peak],
+                                       batch_size=(4 if big else 8))
+        row_of = {k: r for r, k in enumerate(index)}
+        rows = [(row_of[(i, p)], y, i) for i, p, y in it if (i, p) in row_of]
+        X = feats[peak][[r for r, _, _ in rows]]
+        y, g = np.array([y for _, y, _ in rows]), np.array([i for _, _, i in rows])
+        tr, te = group_split(y, g, seed)
+        if len(set(y[tr].tolist())) < 2 or len(set(y[te].tolist())) < 2:
+            continue
+        sc = StandardScaler().fit(X[tr])
+        data[lang] = {"Xtr": sc.transform(X[tr]), "ytr": y[tr], "Xte": sc.transform(X[te]), "yte": y[te]}
+        del feats
+    from sklearn.linear_model import LogisticRegression
+    clfs = {a: LogisticRegression(max_iter=2000, C=10.0, random_state=seed).fit(data[a]["Xtr"], data[a]["ytr"])
+            for a in data}
+    acc = {a: {b: round(float(balanced_accuracy_score(data[b]["yte"], clfs[a].predict(data[b]["Xte"]))), 3)
+               for b in data} for a in data}
+    ratio = {a: {b: round(acc[a][b] / acc[b][b], 3) if acc[b][b] else None for b in data} for a in data}
+    cap = min(len(d["ytr"]) for d in data.values())
+    rng = np.random.default_rng(seed)
+    parts = [rng.choice(len(d["ytr"]), size=cap, replace=False) for d in data.values()]
+    Xj = np.concatenate([d["Xtr"][ii] for d, ii in zip(data.values(), parts)], 0)
+    yj = np.concatenate([d["ytr"][ii] for d, ii in zip(data.values(), parts)], 0)
+    joint = LogisticRegression(max_iter=2000, C=10.0, random_state=seed).fit(Xj, yj)
+    return {"layer": int(peak), "acc": acc, "ratio": ratio, "within": {b: acc[b][b] for b in data},
+            "joint": {b: round(float(balanced_accuracy_score(data[b]["yte"], joint.predict(data[b]["Xte"]))), 3)
+                      for b in data}}
+
+
+# ----------------------------------------------------------------------------------------------
+def _m(vals, w=9):
+    return f"{np.mean(vals):>{w}.3f}" if vals else f"{'—':>{w}}"
 
 
 def merge():
     d = merge_parts(ANALYSIS)
     M = d["models"]
-    print("\nEXP 5 — EMERGENT SEGMENTATION (balanced accuracy of per-byte-position boundary probes; "
-          "`random` = chance control)")
+    print("\nEXP 5 — EMERGENT SEGMENTATION (balanced accuracy of per-byte-position boundary probes, split by "
+          "sentence; `random` = chance control)")
     for n in BYTE_MODELS:
         r = M.get(n)
         if not r or not r.get("langs"):
             continue
         langs = list(r["langs"])
-        print(f"\n  {n}  (mean over {len([l for l in langs if l not in NO_SPACES])} space-delimited langs"
-              f"{' + zh separately' if 'zh' in langs else ''})")
-        print(f"  {'layer':>6}{'tok_end':>9}{'interior':>10}{'word_end':>10}{'random':>8}"
-              f"{'  | zh tok_end':>14}{'zh random':>11}")
+        sp = [l for l in langs if l not in NO_SPACES]
+        print(f"\n  {n}  (mean over {len(sp)} space-delimited langs; zh separately; "
+              f"'pre' = untouched pretrained ByT5)")
+        print(f"  {'layer':>6}{'tok_end':>9}{'interior':>10}{'pre int':>9}{'word_end':>10}{'random':>8}"
+              f"{'  | zh interior':>15}{'zh pre':>8}")
         layer_ids = [e["layer"] for e in r["langs"][langs[0]]["layers"]]
         for l in layer_ids:
-            vals = {lab: [] for lab in LABELS}
-            zh = {}
+            v = {k: [] for k in ("tok_end", "interior", "pre", "word_end", "random")}
+            zh_v, zh_pre = None, None
             for lang in langs:
                 e = next((x for x in r["langs"][lang]["layers"] if x["layer"] == l), None)
+                p = next((x for x in (r["langs"][lang].get("pretrained") or []) if x["layer"] == l), None)
                 if not e:
                     continue
                 if lang in NO_SPACES:
-                    zh = e
+                    zh_v = e["interior"]["bacc"] if e.get("interior") else None
+                    zh_pre = p["interior"]["bacc"] if p and p.get("interior") else None
                     continue
-                for lab in LABELS:
+                for lab in ("tok_end", "interior", "word_end", "random"):
                     if e.get(lab):
-                        vals[lab].append(e[lab]["bacc"])
-            def m(lab):
-                return f"{np.mean(vals[lab]):>9.3f}" if vals[lab] else f"{'—':>9}"
-            zt = f"{zh['tok_end']['bacc']:>14.3f}" if zh.get("tok_end") else f"{'—':>14}"
-            zr = f"{zh['random']['bacc']:>11.3f}" if zh.get("random") else f"{'—':>11}"
-            print(f"  {l:>6}{m('tok_end')}{m('interior'):>10}{m('word_end'):>10}{m('random')[1:]:>8}{zt}{zr}")
-        mlp = {lang: r["langs"][lang].get("mlp_check") for lang in langs if r["langs"][lang].get("mlp_check")}
-        if mlp:
-            print(f"  MLP probe check ran for: {sorted(mlp)} -> " +
-                  ", ".join(f"{lang}: " + "/".join(f"L{k}={v['bacc']}" for k, v in mc.items())
-                            for lang, mc in mlp.items()))
-    print("\n  reading: interior >> random by layers 1-3 -> redundancy (markers were already known);"
-          " ~random everywhere incl. MLP -> irrelevance (segmentation unused for retrieval).")
+                        v[lab].append(e[lab]["bacc"])
+                if p and p.get("interior"):
+                    v["pre"].append(p["interior"]["bacc"])
+            zt = f"{zh_v:>15.3f}" if zh_v is not None else f"{'—':>15}"
+            zp = f"{zh_pre:>8.3f}" if zh_pre is not None else f"{'—':>8}"
+            print(f"  {l:>6}{_m(v['tok_end'])}{_m(v['interior'], 10)}{_m(v['pre'])}{_m(v['word_end'], 10)}"
+                  f"{_m(v['random'], 8)}{zt}{zp}")
+        sur = [r["langs"][l]["surface"]["interior"]["bacc"] for l in sp
+               if (r["langs"][l].get("surface") or {}).get("interior")]
+        print(f"  surface-statistics baseline (interior, mean over space-delimited langs): {_m(sur, 6).strip()}")
     report_by_language(M)
+    report_transfer(M)
+    print("\n  reading: interior above BOTH the surface baseline and random = the representation carries "
+          "segmentation; trained > pretrained = distillation added some; transfer ratios low within a "
+          "script -> language-specific segmentation (the claim); high within / low across -> script-specific; "
+          "high everywhere -> one shared feature.")
 
 
 def report_by_language(M):
-    """Is the boundary representation Latin/English-centric? Interior-boundary balanced accuracy per
-    language at layer 0 (byte identity only), layer 1, its peak, and the last layer."""
-    print("\n  PER-LANGUAGE interior-boundary decodability (balanced accuracy; random control ~0.50)")
+    print("\n  PER-LANGUAGE interior-boundary decodability: trained model at layer 1 / its peak (layer), "
+          "pretrained at the same peak, surface baseline, random")
     for n in BYTE_MODELS:
         r = M.get(n)
         if not r or not r.get("langs"):
             continue
-        print(f"\n  {n:12}{'lang':>5}{'script':>7}{'L0':>7}{'L1':>7}{'peak':>7}{'@L':>4}{'last':>7}{'random':>8}")
-        rows = {}
+        print(f"\n  {n:12}{'lang':>5}{'script':>7}{'L1':>7}{'peak':>7}{'@L':>4}{'pre@pk':>8}{'surface':>9}{'random':>8}")
+        peaks = {}
         for lang, d in r["langs"].items():
             def get(e, lab):
-                return e[lab]["bacc"] if e.get(lab) else None
+                return e[lab]["bacc"] if e and e.get(lab) else None
             vals = [(e["layer"], get(e, "interior")) for e in d["layers"] if get(e, "interior") is not None]
             if not vals:
                 continue
             by = dict(vals)
             pk = max(vals, key=lambda t: t[1])
+            pre = next((get(e, "interior") for e in (d.get("pretrained") or []) if e["layer"] == pk[0]), None)
+            sur = get(d.get("surface"), "interior") if d.get("surface") else None
             rnd = [get(e, "random") for e in d["layers"] if get(e, "random") is not None]
-            rows[lang] = (by.get(0), by.get(1), pk[1], pk[0], vals[-1][1], float(np.mean(rnd)) if rnd else None)
-            f = lambda v: f"{v:>7.3f}" if v is not None else f"{'-':>7}"  # noqa: E731
-            print(f"  {'':12}{lang:>5}{SCRIPT.get(lang, '?'):>7}{f(rows[lang][0])}{f(rows[lang][1])}{f(pk[1])}"
-                  f"{pk[0]:>4}{f(vals[-1][1])}{f(rows[lang][5]):>8}")
-        lat = [rows[l][2] for l in rows if l in LATIN]
-        non = [rows[l][2] for l in rows if l not in LATIN]
-        en = rows.get("en")
-        print(f"  {'':12}peak mean: Latin-script {np.mean(lat):.3f} ({len(lat)} langs)   non-Latin "
-              f"{np.mean(non):.3f} ({len(non)} langs)   English {en[2] if en else '-'}")
-    print("  reading: Latin/English far above the other scripts -> the boundary representation is script-centric;"
-          " similar peaks -> segmentation emerges regardless of script.")
+            peaks[lang] = pk[1]
+            f = lambda v, w=7: f"{v:>{w}.3f}" if v is not None else f"{'-':>{w}}"  # noqa: E731
+            print(f"  {'':12}{lang:>5}{SCRIPT.get(lang, '?'):>7}{f(by.get(1))}{f(pk[1])}{pk[0]:>4}{f(pre, 8)}"
+                  f"{f(sur, 9)}{f(float(np.mean(rnd)) if rnd else None, 8)}")
+        lat = [v for l, v in peaks.items() if l in LATIN]
+        non = [v for l, v in peaks.items() if l not in LATIN]
+        print(f"  {'':12}peak mean: Latin-script {np.mean(lat):.3f} ({len(lat)})   non-Latin {np.mean(non):.3f} ({len(non)})")
+
+
+def report_transfer(M):
+    print("\n  CROSS-LINGUAL TRANSFER of the interior-boundary probe at the peak layer: acc(A->B) / acc(B->B)"
+          " (rows = trained on A, columns = tested on B); joint = one probe trained on all languages")
+    for n in BYTE_MODELS:
+        r = M.get(n)
+        t = (r or {}).get("transfer")
+        if not t:
+            continue
+        langs = list(t["acc"])
+        corner = "A|B"
+        print(f"\n  {n} (layer {t['layer']})  {corner:>6}" + "".join(f"{b:>6}" for b in langs))
+        for a in langs:
+            print(f"  {'':14}{a:>6}" + "".join(f"{(t['ratio'][a][b] if t['ratio'][a][b] is not None else float('nan')):>6.2f}"
+                                             for b in langs))
+        print(f"  {'':14}{'joint':>6}" + "".join(f"{t['joint'][b] / t['within'][b] if t['within'][b] else float('nan'):>6.2f}"
+                                               for b in langs) + "   (joint / within)")
+        same = [t["ratio"][a][b] for a in langs for b in langs if a != b and SCRIPT[a] == SCRIPT[b]
+                and t["ratio"][a][b] is not None]
+        cross = [t["ratio"][a][b] for a in langs for b in langs if a != b and SCRIPT[a] != SCRIPT[b]
+                 and t["ratio"][a][b] is not None]
+        print(f"  {'':14}mean ratio same-script pairs {np.mean(same) if same else float('nan'):.2f} (n={len(same)})"
+              f"   cross-script pairs {np.mean(cross) if cross else float('nan'):.2f} (n={len(cross)})"
+              f"   within-language {np.mean(list(t['within'].values())):.3f}")
 
 
 def _selftest():
     labs = position_labels("ab cd", cuts=[1, 2], lang="en")     # tokens: a | b | ' cd'
-    # bytes: a0 b1 ' '2 c3 d4 ; candidates = non-space, non-final chars -> bytes [0, 1, 3]
-    assert labs["tok_end"] == ({0, 1}, [0, 1, 3]), labs          # ends after 'a' and after 'b'
-    assert labs["word_end"][0] == {1}, labs                      # 'b' precedes the space
-    assert labs["interior"] == ({0}, [0, 3]), labs               # a|b is in-run; b|' ' is not
-    assert len(labs["random"][0]) == 2 and labs["random"][0] <= {0, 1, 3}
-    class FakeTok:                                               # the real lone-'▁' artifact, mocked
+    assert labs["tok_end"] == ({0, 1}, [0, 1, 3]), labs
+    assert labs["word_end"][0] == {1} and labs["interior"] == ({0}, [0, 3]), labs
+    labs_zh = position_labels("字字字", cuts=[1, 2], lang="zh")
+    assert labs_zh["word_end"][0] is None and labs_zh["tok_end"][0] == {2, 5}, labs_zh
+    labs_te = position_labels("తెలుగు వికీ", cuts=[2, 4], lang="te")
+    assert labs_te["interior"][0] == {5, 11} and labs_te["word_end"][0] == {17}, labs_te
+    class FakeTok:
         def __call__(self, text, **kw):
             return {"input_ids": [7, 6, 8], "offset_mapping": [(0, 2), (3, 4), (3, 6)]}
 
         def convert_ids_to_tokens(self, ids):
             return ["▁ab", "▁", "fox"]
-    assert teacher_cuts("ab fox", FakeTok()) == [2], teacher_cuts("ab fox", FakeTok())  # (3,4) dropped
-    labs2 = position_labels("ab fox", cuts=[2, 4], lang="en")    # what boundary_cuts would have given
-    assert 3 in labs2["interior"][0], labs2                      # -> the bogus 'f|ox' positive it plants
-    labs_zh = position_labels("字字字", cuts=[1, 2], lang="zh")
-    assert labs_zh["word_end"][0] is None and labs_zh["tok_end"][0] == {2, 5}, labs_zh  # 3-byte chars
-    assert labs_zh["interior"] == ({2, 5}, [2, 5]), labs_zh      # CJK ideographs are word chars
-    labs_te = position_labels("తెలుగు వికీ", cuts=[2, 4], lang="te")       # cuts after vowel signs
-    assert labs_te["interior"][0] == {5, 11} and labs_te["word_end"][0] == {17}, labs_te  # Mn/Mc = word chars
-    labs_p = position_labels("a, b", cuts=[1, 2], lang="en")     # a | , | ' b'
-    assert labs_p["tok_end"][0] == {0, 1} and labs_p["interior"][0] == set(), labs_p  # punctuation excluded
-    assert position_labels("a", cuts=[], lang="en") is None
+    assert teacher_cuts("ab fox", FakeTok()) == [2]
     rng = np.random.default_rng(0)
-    sel, items = build_dataset(["ab cd", "ef gh"], [[1, 2], [1, 2]], "en", rng)
-    assert all(len(s) > 0 for s in sel) and len(items["interior"]) == 4, items
-    assert all(isinstance(p, int) for s in sel for p in s)
-    X = rng.standard_normal((400, 16)); y = (rng.random(400) > 0.5).astype(int)
-    X[:, 0] += 3 * y                                     # decodable signal
-    assert probe_metrics(X, y)["bacc"] > 0.9
-    assert abs(probe_metrics(X, rng.permutation(y))["bacc"] - 0.5) < 0.15
-    assert layer_plan(13) == list(range(13)) and 36 in layer_plan(37) and 1 in layer_plan(37)
-    print("selftest OK: byte-position labels (zh/te multibyte, whitespace + punctuation excluded), "
-          "balanced dataset, probes, layer plan")
+    texts = [f"ab cd{i}" for i in range(30)]
+    sel, items = build_dataset(texts, [[1, 2]] * 30, "en", rng)
+    assert all(len(s) > 0 for s in sel) and len(items["interior"]) == 60
+    S = surface_features(texts, items["interior"])
+    assert S.shape == (60, (2 * SURFACE_K + 1) * 256) and S.sum(1).max() <= 2 * SURFACE_K + 1
+    y = [y for _, _, y in items["interior"]]
+    g = [i for i, _, _ in items["interior"]]
+    m = probe_metrics(S, y, g)
+    assert m is not None and m["bacc"] > 0.9 and m["bacc_ci"][0] <= m["bacc"] <= m["bacc_ci"][1], m
+    X = rng.standard_normal((600, 16)); yy = (rng.random(600) > 0.5).astype(int)
+    X[:, 0] += 4 * yy                                            # ~2% Bayes error
+    gg = np.repeat(np.arange(60), 10)
+    assert probe_metrics(X, yy, gg)["bacc"] > 0.9
+    assert abs(probe_metrics(X, rng.permutation(yy), gg)["bacc"] - 0.5) < 0.15
+    tr, te = group_split(yy, gg)
+    assert not (set(gg[tr]) & set(gg[te]))                        # no sentence on both sides
+    assert layer_plan(13) == list(range(13)) and 36 in layer_plan(37)
+    res = {"langs": {"en": {"layers": [{"layer": 0, "interior": {"bacc": 0.6}}, {"layer": 1, "interior": {"bacc": 0.8}}]},
+                     "te": {"layers": [{"layer": 0, "interior": {"bacc": 0.6}}, {"layer": 1, "interior": {"bacc": 0.7}}]}}}
+    assert peak_layer(res) == 1
+    print("selftest OK: labels (zh/te multibyte, punctuation/whitespace excluded), balanced dataset, surface "
+          "features, sentence-grouped probes with bootstrap CI, peak layer")
 
 
 def main():

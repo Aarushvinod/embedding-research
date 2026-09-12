@@ -14,7 +14,7 @@ MAIN = ["byte-small", "subword-small", "byte-base", "subword-base", "byte-large"
 ARMS = ["byte-small", "byte-base", "byte-large"]
 LABELS = [("main", MAIN, "results/retrieval_bgem3"), ("bteacher", ARMS, "results/retrieval_bgem3_bteacher"),
           ("brandom", ARMS, "results/retrieval_bgem3_brandom")]
-INTERP = [("params", MAIN), ("alignuni", MAIN), ("langgeom", MAIN), ("script", MAIN), ("segment", ARMS)]
+INTERP = [("english", MAIN), ("script", MAIN), ("segment", ARMS)]
 
 def load(p):
     try:
@@ -41,17 +41,21 @@ def interp_state(x, m):
     d = load(f"results/interp_{x}_part_{m}.json")
     if not d:
         return "-"
-    if x == "langgeom":
-        v = d.get("variants") or {}
-        got = [k for k in ("none", "mean_diff", "leace") if k in v]
-        ic = (d.get("identity_check") or {}).get("pass")
-        tag = {True: "", False: " LOADER-WARN", None: ""}[ic]
-        return ("done" if len(got) == 3 else f"{len(got)}/3 variants") + tag
+    if x == "english":
+        bat = d.get("battery") or {}
+        if all(e in bat for e in ("en", "random")):
+            return "done"
+        stage = "latent" if "latent" in d else "-"
+        stage = "shift" if "shift" in d else stage
+        nb = len(d.get("belebele") or {})
+        return f"{stage}, belebele {nb}/17" if nb else stage
     if x == "script":
-        return "done" if d.get("roman_battery") else f"partial ({len(d.get('roman_partial') or {})}/5 langs)"
+        conds = d.get("cond") or {}
+        done = sum(len(v.get("langs") or []) for v in conds.values())
+        return "done" if done >= 14 else (f"{done}/14 cond-langs" if done else ("shift" if d.get("shift") else "-"))
     if x == "segment":
         n = len(d.get("langs") or {})
-        return "done" if n >= 10 else f"{n}/10 langs"
+        return "done" if n >= 10 and d.get("transfer") else f"{n}/10 langs" + (" +transfer" if d.get("transfer") else "")
     return "done"
 
 print("== training parts (steps_run/steps) | checkpoint | full-eval part ==")
