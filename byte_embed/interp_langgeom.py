@@ -276,6 +276,23 @@ def merge(n_boot=10000):
                 print(f"  {v:10}{size:6} T Δ(byte)−Δ(subword) = {b[0] - s[0]:+.4f}")
     print("  reading: erasure moves T but not C -> mechanism real; C also drops -> erased subspace "
           "entangled with content (flag).")
+    report_depth(M)
+
+
+def report_depth(M):
+    """Where language identity becomes linearly explicit: per-layer probe accuracy (mean-pooled residual
+    states, 80/20 split, chance 0.10) and the share of variance the language centroids explain."""
+    print("\n  LANGUAGE-ID PROBE BY DEPTH  (layer: probe acc / centroid variance share;  first layer with acc >= 0.9)")
+    for n in MAIN_MODELS:
+        r = M.get(n)
+        if not r or not r.get("layers"):
+            continue
+        L = r["layers"]
+        k = len(L)
+        picks = sorted(set([0, 1, 2, k // 4, k // 2, (3 * k) // 4, k - 1]))
+        first = next((e["layer"] for e in L if e["lang_probe_acc"] >= 0.9), None)
+        print(f"  {n:15}" + "  ".join(f"L{L[i]['layer']}:{L[i]['lang_probe_acc']:.2f}/{L[i]['centroid_var_ratio']:.3f}"
+                                     for i in picks) + f"   >=0.9 at L{first}")
 
 
 def _f(x):

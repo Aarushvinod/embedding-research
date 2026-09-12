@@ -37,7 +37,7 @@ import zlib
 
 import numpy as np
 
-from byte_embed.interp_common import (SCRIPT, byte_offsets, flores_parallel, layer_positions,
+from byte_embed.interp_common import (LATIN, SCRIPT, byte_offsets, flores_parallel, layer_positions,
                                       load_student, merge_parts, models_in, part_path, read_json,
                                       utf8_stdout, write_json)
 
@@ -266,6 +266,39 @@ def merge():
                             for lang, mc in mlp.items()))
     print("\n  reading: interior >> random by layers 1-3 -> redundancy (markers were already known);"
           " ~random everywhere incl. MLP -> irrelevance (segmentation unused for retrieval).")
+    report_by_language(M)
+
+
+def report_by_language(M):
+    """Is the boundary representation Latin/English-centric? Interior-boundary balanced accuracy per
+    language at layer 0 (byte identity only), layer 1, its peak, and the last layer."""
+    print("\n  PER-LANGUAGE interior-boundary decodability (balanced accuracy; random control ~0.50)")
+    for n in BYTE_MODELS:
+        r = M.get(n)
+        if not r or not r.get("langs"):
+            continue
+        print(f"\n  {n:12}{'lang':>5}{'script':>7}{'L0':>7}{'L1':>7}{'peak':>7}{'@L':>4}{'last':>7}{'random':>8}")
+        rows = {}
+        for lang, d in r["langs"].items():
+            def get(e, lab):
+                return e[lab]["bacc"] if e.get(lab) else None
+            vals = [(e["layer"], get(e, "interior")) for e in d["layers"] if get(e, "interior") is not None]
+            if not vals:
+                continue
+            by = dict(vals)
+            pk = max(vals, key=lambda t: t[1])
+            rnd = [get(e, "random") for e in d["layers"] if get(e, "random") is not None]
+            rows[lang] = (by.get(0), by.get(1), pk[1], pk[0], vals[-1][1], float(np.mean(rnd)) if rnd else None)
+            f = lambda v: f"{v:>7.3f}" if v is not None else f"{'-':>7}"  # noqa: E731
+            print(f"  {'':12}{lang:>5}{SCRIPT.get(lang, '?'):>7}{f(rows[lang][0])}{f(rows[lang][1])}{f(pk[1])}"
+                  f"{pk[0]:>4}{f(vals[-1][1])}{f(rows[lang][5]):>8}")
+        lat = [rows[l][2] for l in rows if l in LATIN]
+        non = [rows[l][2] for l in rows if l not in LATIN]
+        en = rows.get("en")
+        print(f"  {'':12}peak mean: Latin-script {np.mean(lat):.3f} ({len(lat)} langs)   non-Latin "
+              f"{np.mean(non):.3f} ({len(non)} langs)   English {en[2] if en else '-'}")
+    print("  reading: Latin/English far above the other scripts -> the boundary representation is script-centric;"
+          " similar peaks -> segmentation emerges regardless of script.")
 
 
 def _selftest():

@@ -138,6 +138,54 @@ def merge():
             x, y = get(b), get(s)
             row.append(f"{label} {x - y:+.4f}" if x is not None and y is not None else f"{label} —")
         print(f"  {size:6}  " + "   ".join(row))
+    report_centricity(M)
+
+
+def hubness(A, X):
+    """English-centricity of a cross-lingual space from the FLORES pair matrices.
+    A[a][b] = translation-pair alignment (lower = closer); X[a][b]["p@1"] = retrieval a->b.
+    Returns means over ordered pairs that involve English vs pairs between two non-English
+    languages, the mean rank of English among each non-English language's partners by alignment
+    (1 = English is its nearest language; 5 = no hub), and how many languages have English nearest."""
+    langs = list(A)
+    p1 = {a: {b: X[a][b]["p@1"] for b in X[a]} for a in X}
+    pairs = [(a, b) for a in langs for b in langs if a != b]
+    en = [(a, b) for a, b in pairs if "en" in (a, b)]
+    non = [(a, b) for a, b in pairs if "en" not in (a, b)]
+    ranks = []
+    for l in langs:
+        if l == "en":
+            continue
+        order = [b for _, b in sorted((A[l][b], b) for b in langs if b != l)]
+        ranks.append(order.index("en") + 1)
+    return {"p1_en": float(np.mean([p1[a][b] for a, b in en])),
+            "p1_non": float(np.mean([p1[a][b] for a, b in non])),
+            "align_en": float(np.mean([A[a][b] for a, b in en])),
+            "align_non": float(np.mean([A[a][b] for a, b in non])),
+            "en_hub_rank": float(np.mean(ranks)), "en_nearest_for": int(sum(r == 1 for r in ranks)),
+            "n_non_en": len(ranks), "p1": p1}
+
+
+def report_centricity(M):
+    from byte_embed.interp_script import script_cells
+    print("\n  ENGLISH-CENTRICITY (FLORES 10-way): pairs involving English vs pairs between two non-English "
+          "languages; hub rank = rank of English among each language's 9 partners by alignment (1 = nearest)")
+    print(f"  {'model':15}{'P@1 en':>8}{'P@1 non':>9}{'align en':>10}{'align non':>11}{'hub rank':>10}{'en nearest':>12}"
+          f"   |{'same-scr':>9}{'cross':>7}{'sw-rw':>7}{'ha-am':>7}{'yo-Lat':>7}  (P@1: same=Latin-Latin pairs)")
+    for n in MAIN_MODELS:
+        r = M.get(n)
+        if not r or not r.get("xling_align") or not r.get("flores_xling"):
+            continue
+        h = hubness(r["xling_align"], r["flores_xling"])
+        sc = script_cells(h["p1"], list(r["xling_align"]))
+        nan = float("nan")
+        print(f"  {n:15}{h['p1_en']:>8.3f}{h['p1_non']:>9.3f}{h['align_en']:>10.3f}{h['align_non']:>11.3f}"
+              f"{h['en_hub_rank']:>10.2f}{h['en_nearest_for']:>8}/{h['n_non_en']:<3}"
+              f"   |{sc['same_script'] if sc['same_script'] is not None else nan:>9.3f}"
+              f"{sc['cross_script'] if sc['cross_script'] is not None else nan:>7.3f}"
+              + "".join(f"{(sc[k] if sc[k] is not None else nan):>7.3f}" for k in ("sw_rw", "ha_am", "yo_latin")))
+    print("  reading: P@1 en >> non and hub rank near 1 -> English-centric; same-script >> cross-script -> "
+          "script-bound (exp 4's cell analysis, computed from exp 2's matrices).")
 
 
 def _selftest():
