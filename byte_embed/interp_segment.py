@@ -394,7 +394,7 @@ def _m(vals, w=9):
     return f"{np.mean(vals):>{w}.3f}" if vals else f"{'—':>{w}}"
 
 
-def merge():
+def merge(metric="auc"):
     d = merge_parts(ANALYSIS, schema=SCHEMA)
     M = d["models"]
     print("\nEXP 5 — EMERGENT SEGMENTATION (balanced accuracy of per-byte-position boundary probes, split by "
@@ -435,7 +435,7 @@ def merge():
                if (r["langs"][l].get("surface") or {}).get("interior")]
         print(f"  surface-statistics baseline (interior, mean over space-delimited langs): {_m(sur, 6).strip()}")
     report_by_language(M)
-    report_transfer(M)
+    report_transfer(M, metric)
     print("\n  reading: interior above BOTH the surface baseline and random = the representation carries "
           "segmentation; trained > pretrained = distillation added some; transfer ratios low within a "
           "script -> language-specific segmentation (the claim); high within / low across -> script-specific; "
@@ -483,41 +483,54 @@ def report_by_language(M):
               + (f"   trained peak − pretrained peak: {np.mean(gap):+.3f}" if gap else ""))
 
 
-def report_transfer(M):
-    print("\n  CROSS-LINGUAL TRANSFER of the interior-boundary probe at the peak layer: "
-          "AUC(A->B) / AUC(B->B) (rows = trained on A, columns = tested on B; threshold-free, so only "
-          "the direction has to transfer); joint = one probe trained on all languages")
+def report_transfer(M, metric="auc"):
+    """`metric='auc'` (default) scores a transferred probe by the ROC-AUC of its decision function —
+    threshold-free, so only the boundary DIRECTION has to carry across languages. `metric='bacc'`
+    uses hard-label balanced accuracy instead, which additionally requires the probe's intercept to
+    transport into the target language's own standardized coordinates; it therefore reads lower, and
+    a cell near 0.5 there can mean 'the direction transferred but the threshold did not'. Both
+    matrices are stored by every run, so this is a reporting switch, not a recompute."""
+    key = {"auc": "auc", "bacc": "acc"}[metric]
+    m = "AUC" if metric == "auc" else "balanced accuracy"
+    print(f"\n  CROSS-LINGUAL TRANSFER of the interior-boundary probe at the peak layer: "
+          f"{m}(A->B) / {m}(B->B) (rows = trained on A, columns = tested on B"
+          + ("; threshold-free, so only the direction has to transfer" if metric == "auc"
+             else "; hard labels, so the probe's INTERCEPT must transport too — reads lower than AUC")
+          + "); joint = one probe trained on all languages")
     for n in BYTE_MODELS:
         r = M.get(n)
         t = (r or {}).get("transfer")
         if not t:
             continue
-        langs = list(t.get("auc") or t["acc"])
+        A = t.get(key) or t.get("acc") or {}
+        langs = list(A)
+        # rebuild the ratio from the requested matrix (the stored one is AUC-based)
+        ratio = {a: {b: (A[a][b] / A[b][b] if A[b][b] else None) for b in langs} for a in langs}
+        within = {b: A[b][b] for b in langs}
         print(f"  {'':14}(computed over {len(t.get('langs') or langs)} languages, "
               f"{t.get('n_sent', '?')} sentences each)")
         corner = "A|B"
         print(f"\n  {n} (layer {t['layer']})  {corner:>6}" + "".join(f"{b:>6}" for b in langs))
         for a in langs:
-            print(f"  {'':14}{a:>6}" + "".join(f"{(t['ratio'][a][b] if t['ratio'][a][b] is not None else float('nan')):>6.2f}"
+            print(f"  {'':14}{a:>6}" + "".join(f"{(ratio[a][b] if ratio[a][b] is not None else float('nan')):>6.2f}"
                                              for b in langs))
-        print(f"  {'':14}{'joint':>6}" + "".join(f"{t['joint'][b] / t['within'][b] if t['within'][b] else float('nan'):>6.2f}"
-                                               for b in langs) + "   (joint / within)")
-        same = [t["ratio"][a][b] for a in langs for b in langs if a != b and SCRIPT[a] == SCRIPT[b]
-                and t["ratio"][a][b] is not None]
-        cross = [t["ratio"][a][b] for a in langs for b in langs if a != b and SCRIPT[a] != SCRIPT[b]
-                 and t["ratio"][a][b] is not None]
-        A = t.get("auc") or {}
+        print(f"  {'':14}{'joint':>6}" + "".join(f"{t['joint'][b] / within[b] if within[b] else float('nan'):>6.2f}"
+                                               for b in langs) + "   (joint / within; joint is always AUC)")
+        same = [ratio[a][b] for a in langs for b in langs if a != b and SCRIPT[a] == SCRIPT[b]
+                and ratio[a][b] is not None]
+        cross = [ratio[a][b] for a in langs for b in langs if a != b and SCRIPT[a] != SCRIPT[b]
+                 and ratio[a][b] is not None]
         raw = lambda pairs: (np.mean([A[a][b] for a, b in pairs]) if pairs and A else float("nan"))  # noqa: E731
         same_p = [(a, b) for a in langs for b in langs if a != b and SCRIPT[a] == SCRIPT[b]]
         cross_p = [(a, b) for a in langs for b in langs if a != b and SCRIPT[a] != SCRIPT[b]]
         print(f"  {'':14}mean ratio same-script pairs {np.mean(same) if same else float('nan'):.2f} (n={len(same)})"
               f"   cross-script pairs {np.mean(cross) if cross else float('nan'):.2f} (n={len(cross)})"
-              f"   within-language AUC {np.mean(list(t['within'].values())):.3f}")
+              f"   within-language {metric} {np.mean(list(within.values())):.3f}")
         # The ratio's denominator is the diagonal at a layer chosen to maximise exactly that, so the
         # RAW AUCs are printed too: the absolute "does the direction transfer at all" reading should
         # rest on them (0.5 = no transfer), not on a ratio with a selected denominator.
-        print(f"  {'':14}raw AUC       same-script {raw(same_p):.3f}   cross-script {raw(cross_p):.3f}"
-              f"   within-language {np.mean(list(t['within'].values())):.3f}   (0.5 = chance)")
+        print(f"  {'':14}raw {metric:<9} same-script {raw(same_p):.3f}   cross-script {raw(cross_p):.3f}"
+              f"   within-language {np.mean(list(within.values())):.3f}   (0.5 = chance)")
 
 
 def _selftest():
@@ -570,13 +583,16 @@ def main():
     ap.add_argument("--langs", default=None, help="comma list (default: all 10)")
     ap.add_argument("--n-sent", type=int, default=None, help="FLORES sentences/lang (500; 300 large)")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--metric", default="auc", choices=["auc", "bacc"],
+                    help="transfer-matrix score in --merge: threshold-free AUC (default) or hard-label "
+                         "balanced accuracy. Both are stored by every run; this is a reporting switch.")
     ap.add_argument("--merge", action="store_true")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         return _selftest()
     if a.merge:
-        return merge()
+        return merge(a.metric)
     langs = a.langs.split(",") if a.langs else None
     names = [a.only] if a.only else [n for n in BYTE_MODELS if n in models_in(a.results)[0]]
     for n in names:
