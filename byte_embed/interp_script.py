@@ -386,17 +386,24 @@ def cell_script(cell):
     return SCRIPT.get(cell[1], "?")
 
 
-def native_advantage_by_script(byte_bm, sub_bm, n_boot=10000, seed=0):
+def native_advantage_by_script(byte_bm, sub_bm, n_boot=10000, seed=0, benchmark="belebele"):
     """byte − subword nDCG@10 per cell from the stored native results, grouped Latin vs non-Latin;
     the contrast (non-Latin mean − Latin mean) bootstrapped over cells within each group.
-    CROSS_CELLS are excluded: CIRAL (English query -> Hausa passage) and AfriQA (native query ->
-    English passage) are labelled by a Latin-script language but are not native-script monolingual
-    retrieval, and they would otherwise make up ~40% of the Latin baseline, so a byte advantage on
-    the cross-lingual axis would move a statistic that claims to be about script."""
+
+    Restricted to ONE benchmark (Belebele by default) for two reasons. Independence: the bootstrap
+    resamples cells, but a language contributes several cells across benchmarks (te appears in both
+    MIRACL and Belebele), and cells from one language share everything that makes it easy or hard,
+    so resampling them as independent draws would make the interval ~40% too narrow. Belebele gives
+    exactly one cell per language — 5 Latin, 5 non-Latin, independent units. Control: Belebele is
+    the same 488 passages translated into all ten languages, so content is held constant and script
+    is what varies; pooling benchmarks would let a benchmark-difficulty difference masquerade as a
+    script effect, since the non-Latin group draws on Amharic-PR and the Latin group does not.
+    `benchmark=None` pools every cell (cross-lingual ones still excluded) — wider, not cleaner."""
     from byte_embed.stats import iter_cells
     b, s = dict(iter_cells(byte_bm)), dict(iter_cells(sub_bm))
     deltas = {c: b[c]["ndcg@10"] - s[c]["ndcg@10"] for c in b
-              if c in s and b[c] and s[c] and tuple(c) not in CROSS_CELLS}
+              if c in s and b[c] and s[c] and tuple(c) not in CROSS_CELLS
+              and (benchmark is None or c[0] == benchmark)}
     non = np.array([v for c, v in deltas.items() if cell_script(c) != "Latn"])
     lat = np.array([v for c, v in deltas.items() if cell_script(c) == "Latn"])
     if not len(non) or not len(lat):
@@ -405,7 +412,8 @@ def native_advantage_by_script(byte_bm, sub_bm, n_boot=10000, seed=0):
     boots = (non[rng.integers(0, len(non), (n_boot, len(non)))].mean(1)
              - lat[rng.integers(0, len(lat), (n_boot, len(lat)))].mean(1))
     lo, hi = np.quantile(boots, [0.025, 0.975])
-    return {"non_latin_mean": round(float(non.mean()), 4), "latin_mean": round(float(lat.mean()), 4),
+    return {"benchmark": benchmark or "all", "n_boot": n_boot,
+            "non_latin_mean": round(float(non.mean()), 4), "latin_mean": round(float(lat.mean()), 4),
             "contrast": round(float(non.mean() - lat.mean()), 4), "ci_low": round(float(lo), 4),
             "ci_high": round(float(hi), 4), "n_non": int(len(non)), "n_latin": int(len(lat)),
             "significant": bool(lo > 0 or hi < 0)}
@@ -442,17 +450,21 @@ def merge(results="results/retrieval_bgem3.json", n_boot=10000, seed=0):
     M = d["models"]
     models = models_in(results)[0]
     print("\nEXP 4 — NATIVE SCRIPT vs ROMANIZED SCRIPT")
-    print("  (1) native-script advantage: byte − subword nDCG@10 per cell (stored 20k-pool results), "
-          "non-Latin vs Latin cells; contrast bootstrapped over cells")
+    print("  (1) native-script advantage: byte − subword nDCG@10 on BELEBELE (the same 488 passages in "
+          "all ten languages, one cell per language, so the bootstrap units are independent and content "
+          "is held constant); non-Latin vs Latin, contrast bootstrapped over languages")
     for size in ("small", "base", "large"):
         b, s = models.get(f"byte-{size}"), models.get(f"subword-{size}")
         if not (b and s):
             continue
-        r = native_advantage_by_script(b, s, n_boot)
-        if r:
-            print(f"  {size:6} non-Latin cells {r['non_latin_mean']:+.4f} (n={r['n_non']})   Latin cells "
-                  f"{r['latin_mean']:+.4f} (n={r['n_latin']})   contrast {r['contrast']:+.4f} "
-                  f"[{r['ci_low']:+.3f},{r['ci_high']:+.3f}]{' *' if r['significant'] else ''}")
+        for bench in ("belebele", None):
+            r = native_advantage_by_script(b, s, n_boot, benchmark=bench)
+            if r:
+                print(f"  {size:6} {r['benchmark']:9} non-Latin {r['non_latin_mean']:+.4f} (n={r['n_non']})"
+                      f"   Latin {r['latin_mean']:+.4f} (n={r['n_latin']})   contrast {r['contrast']:+.4f} "
+                      f"[{r['ci_low']:+.3f},{r['ci_high']:+.3f}]{' *' if r['significant'] else ''}"
+                      + ("" if bench else "   <- all cells pooled: units are NOT independent, read the CI "
+                                          "as optimistic"))
     print("\n  (2) romanized − native, nDCG@10 (paired bootstrap over queries; RR = both sides romanized, "
           "RN = romanized queries vs native passages)")
     per = {}
@@ -551,9 +563,11 @@ def _selftest():
     zero = {"qa_retrieval": {"afriqa": {"per_lang": {l: {"ndcg@10": 0.0} for l in ("rw", "ha", "sw", "yo")}},
                              "ciral": {"per_lang": {"ha": {"ndcg@10": 0.0}}}},
             "belebele": {l: {"ndcg@10": 0.8} for l in SCRIPT}}
-    rr = native_advantage_by_script(cross, zero, n_boot=200)
-    assert rr["n_latin"] == 5 and rr["n_non"] == 5, rr      # the 5 cross-lingual cells held out
+    rr = native_advantage_by_script(cross, zero, n_boot=200)          # Belebele only by default
+    assert rr["benchmark"] == "belebele" and rr["n_latin"] == 5 and rr["n_non"] == 5, rr
     assert abs(rr["contrast"] - 0.1) < 1e-9, rr
+    ra = native_advantage_by_script(cross, zero, n_boot=200, benchmark=None)
+    assert ra["n_latin"] == 5 and ra["n_non"] == 5, ra      # the 5 cross-lingual cells still held out
     print("selftest OK: Buckwalter, romanization guard, cached romanizer, diff-in-diff, script contrast")
 
 

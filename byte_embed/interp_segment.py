@@ -443,13 +443,18 @@ def merge():
 
 
 def report_by_language(M):
-    print("\n  PER-LANGUAGE interior-boundary decodability: trained model at layer 1 / its peak (layer), "
-          "pretrained at the same peak, surface baseline, random")
+    print("\n  PER-LANGUAGE interior-boundary decodability: trained model at layer 1 / at its peak "
+          "(layer), the PRETRAINED encoder both at that same layer and at its OWN peak, surface "
+          "baseline, random.")
+    print("  (the trained model's peak is an argmax over test scores; scoring the pretrained encoder "
+          "only there would hand the trained model its best layer and the baseline an imposed one, so "
+          "the pretrained argmax is shown too — the honest 'what distillation added' is peak vs pre-peak.)")
     for n in BYTE_MODELS:
         r = M.get(n)
         if not r or not r.get("langs"):
             continue
-        print(f"\n  {n:12}{'lang':>5}{'script':>7}{'L1':>7}{'peak':>7}{'@L':>4}{'pre@pk':>8}{'surface':>9}{'random':>8}")
+        print(f"\n  {n:12}{'lang':>5}{'script':>7}{'L1':>7}{'peak':>7}{'@L':>4}{'pre@pk':>8}"
+              f"{'pre peak':>9}{'@L':>4}{'surface':>9}{'random':>8}")
         peaks = {}
         for lang, d in r["langs"].items():
             def get(e, lab):
@@ -460,15 +465,22 @@ def report_by_language(M):
             by = dict(vals)
             pk = max(vals, key=lambda t: t[1])
             pre = next((get(e, "interior") for e in (d.get("pretrained") or []) if e["layer"] == pk[0]), None)
+            pre_vals = [(e["layer"], get(e, "interior")) for e in (d.get("pretrained") or [])
+                        if get(e, "interior") is not None]
+            pre_pk = max(pre_vals, key=lambda t: t[1]) if pre_vals else None
             sur = get(d.get("surface"), "interior") if d.get("surface") else None
             rnd = [get(e, "random") for e in d["layers"] if get(e, "random") is not None]
-            peaks[lang] = pk[1]
+            peaks[lang] = (pk[1], pre_pk[1] if pre_pk else None)
             f = lambda v, w=7: f"{v:>{w}.3f}" if v is not None else f"{'-':>{w}}"  # noqa: E731
             print(f"  {'':12}{lang:>5}{SCRIPT.get(lang, '?'):>7}{f(by.get(1))}{f(pk[1])}{pk[0]:>4}{f(pre, 8)}"
+                  f"{f(pre_pk[1] if pre_pk else None, 9)}{(pre_pk[0] if pre_pk else '-'):>4}"
                   f"{f(sur, 9)}{f(float(np.mean(rnd)) if rnd else None, 8)}")
-        lat = [v for l, v in peaks.items() if l in LATIN]
-        non = [v for l, v in peaks.items() if l not in LATIN]
-        print(f"  {'':12}peak mean: Latin-script {np.mean(lat):.3f} ({len(lat)})   non-Latin {np.mean(non):.3f} ({len(non)})")
+        lat = [v for l, (v, _) in peaks.items() if l in LATIN]
+        non = [v for l, (v, _) in peaks.items() if l not in LATIN]
+        gap = [v - p for v, p in peaks.values() if p is not None]
+        print(f"  {'':12}peak mean: Latin-script {np.mean(lat):.3f} ({len(lat)})   non-Latin "
+              f"{np.mean(non):.3f} ({len(non)})"
+              + (f"   trained peak − pretrained peak: {np.mean(gap):+.3f}" if gap else ""))
 
 
 def report_transfer(M):
@@ -494,9 +506,18 @@ def report_transfer(M):
                 and t["ratio"][a][b] is not None]
         cross = [t["ratio"][a][b] for a in langs for b in langs if a != b and SCRIPT[a] != SCRIPT[b]
                  and t["ratio"][a][b] is not None]
+        A = t.get("auc") or {}
+        raw = lambda pairs: (np.mean([A[a][b] for a, b in pairs]) if pairs and A else float("nan"))  # noqa: E731
+        same_p = [(a, b) for a in langs for b in langs if a != b and SCRIPT[a] == SCRIPT[b]]
+        cross_p = [(a, b) for a in langs for b in langs if a != b and SCRIPT[a] != SCRIPT[b]]
         print(f"  {'':14}mean ratio same-script pairs {np.mean(same) if same else float('nan'):.2f} (n={len(same)})"
               f"   cross-script pairs {np.mean(cross) if cross else float('nan'):.2f} (n={len(cross)})"
               f"   within-language AUC {np.mean(list(t['within'].values())):.3f}")
+        # The ratio's denominator is the diagonal at a layer chosen to maximise exactly that, so the
+        # RAW AUCs are printed too: the absolute "does the direction transfer at all" reading should
+        # rest on them (0.5 = no transfer), not on a ratio with a selected denominator.
+        print(f"  {'':14}raw AUC       same-script {raw(same_p):.3f}   cross-script {raw(cross_p):.3f}"
+              f"   within-language {np.mean(list(t['within'].values())):.3f}   (0.5 = chance)")
 
 
 def _selftest():
