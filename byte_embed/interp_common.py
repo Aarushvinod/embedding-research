@@ -31,8 +31,11 @@ MAIN_MODELS = ["byte-small", "subword-small", "byte-base", "subword-base",
 SCRIPT = {"te": "Telu", "bn": "Beng", "am": "Ethi", "zh": "Hans", "ar": "Arab",
           "sw": "Latn", "yo": "Latn", "ha": "Latn", "rw": "Latn", "en": "Latn"}
 LATIN = [l for l, s in SCRIPT.items() if s == "Latn"]
-FLORES_CACHE = "flores_devtest_10.json"
 DEPTH_FRACS = (0.25, 0.5, 0.75, 1.0)
+# The five CROSS-LINGUAL cells of the 20k battery: CIRAL takes English queries against Hausa
+# passages, AfriQA takes native queries against ENGLISH passages. They are not native-script
+# monolingual retrieval, so every by-script or monolingual statistic has to hold them out.
+CROSS_CELLS = {("ciral", "ha"), ("afriqa", "rw"), ("afriqa", "ha"), ("afriqa", "sw"), ("afriqa", "yo")}
 
 
 # ----------------------------------------------------------------------------------------------
@@ -47,14 +50,29 @@ def merged_path(analysis):
 
 
 def read_json(p):
+    """None if absent OR unreadable. A preemption that killed a non-atomic writer (or a full disk)
+    can leave a truncated file; treating it as absent makes the caller redo that stage, which every
+    stage is built to do — raising instead would wedge the model on every later requeue. Same
+    recovery miracl._build_pool does for a half-written pool cache."""
     p = Path(p)
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        print(f"  [interp] unreadable {p} (preempted write?) -> treating as absent, redoing that stage")
+        return None
 
 
 def write_json(p, obj):
+    """ATOMIC: serialize, write a sibling .tmp, then os.replace. These files are rewritten after
+    every sub-step of a multi-hour preemptible job, so a plain write_text leaves a wide window in
+    which SIGKILL truncates the only record of that model's finished work."""
     p = Path(p)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(p)
 
 
 def utf8_stdout():
@@ -69,23 +87,43 @@ def utf8_stdout():
                 pass
 
 
+_MODELS_CACHE: dict = {}
+
+
 def models_in(results="results/retrieval_bgem3.json", main_only=True):
     """(models, teacher, teacher_dim) across the merged results + part files; main grid only by
-    default (boundary arms are dropped)."""
-    from byte_embed.full_eval import _models_in
-    models, teacher, tdim = _models_in(results)
-    if main_only:
-        models = {n: bm for n, bm in models.items() if n in MAIN_MODELS and not bm.get("boundary")}
-    return models, teacher, tdim
+    default (boundary arms are dropped). MEMOIZED per (results, main_only): `_models_in` re-parses
+    the merged file AND every part file (each carrying per-query blocks) on every call, and the
+    `--merge` / figure paths call it once per model per table — a dozen-plus full re-reads of the
+    same megabytes. Every caller treats the result as read-only, and these files do not change
+    while a merge or figure process runs."""
+    key = (str(results), main_only)
+    if key not in _MODELS_CACHE:
+        from byte_embed.full_eval import _models_in
+        models, teacher, tdim = _models_in(results)
+        if main_only:
+            models = {n: bm for n, bm in models.items() if n in MAIN_MODELS and not bm.get("boundary")}
+        _MODELS_CACHE[key] = (models, teacher, tdim)
+    return _MODELS_CACHE[key]
 
 
-def merge_parts(analysis):
-    """Glob the analysis' part files into one dict keyed by model; write the merged file."""
-    out = {"models": {}}
+def merge_parts(analysis, schema=None):
+    """Glob the analysis' part files into one dict keyed by model; write the merged file. When the
+    caller passes its SCHEMA, part files from an older contract are SKIPPED WITH A WARNING rather
+    than silently merged — run_one discards them on the write path, but a model that has not been
+    re-run yet still has its old file on disk, and mixing the two would publish one table built from
+    two different definitions."""
+    out, stale = {"models": {}}, []
     for f in sorted(glob.glob(str(part_path(analysis, "*")))):
-        d = json.loads(Path(f).read_text(encoding="utf-8"))
-        if "model" in d:
-            out["models"][d["model"]] = d
+        d = read_json(f)                      # one unreadable part must not kill the merge job
+        if not d or "model" not in d:
+            continue
+        if schema is not None and d.get("schema") != schema:
+            stale.append(f"{d['model']} (schema {d.get('schema')})")
+            continue
+        out["models"][d["model"]] = d
+    if stale:
+        print(f"  [merge] SKIPPED {len(stale)} stale part file(s) — rerun them: {', '.join(stale)}")
     write_json(merged_path(analysis), out)
     return out
 
@@ -188,10 +226,17 @@ def make_encode(student, device="cuda", transform=None, batch_size=128, hook=Non
     """encode_fn: list[str] -> np.ndarray [n, d] (L2-normalized), with an optional TEXT transform
     (e.g. romanization) applied first and an optional activation edit `hook=(block, fn)` installed
     for the forward pass — the closure shape the eval battery expects (run_lowresource.py:152-154).
-    Queries and passages go through the same closure, so an edit applies to both sides."""
+    Queries and passages go through the same closure, so an edit applies to both sides.
+
+    The TRANSFORM is applied AFTER the model's own character truncation, not before: romanization
+    expands a string (one Han character becomes 2-6 pinyin characters, Indic syllables 1->2-3), so
+    transforming first and letting `forward` cut the result to MAX_CHARS would feed the romanized
+    arm a third of the passage the native arm saw — turning a script contrast into a content-deletion
+    contrast. Truncating the SOURCE first keeps both arms on the same span of text."""
     def enc(xs):
         if transform is not None:
-            xs = [transform(x) for x in xs]
+            mc = getattr(student, "max_chars", None)
+            xs = [transform(x[:mc] if mc else x) for x in xs]
         if hook is None:
             E = student.encode(xs, batch_size=batch_size, device=device)
         else:
@@ -270,9 +315,16 @@ def layer_positions(student, texts, sel, device="cuda", layers=None, batch_size=
 def block_states(student, texts, blocks, per_text=10, device="cuda", batch_size=8, seed=0):
     """Randomly sampled per-position output states of the requested encoder BLOCKS (the hook
     points `block_hook` edits) -> ({block: float32 [N, d]}, index [(text_idx, pos)]). `per_text`
-    positions per text, drawn uniformly from the unpadded sequence minus the final </s> slot."""
+    positions per text, drawn uniformly from the UNPADDED sequence, </s> included: `block_hook`
+    edits every position of the tensor, and </s> has attention_mask 1 — it is attended to by every
+    later block and pooled into the final embedding. T5 end-of-sequence states are activation
+    outliers, so excluding them from the fit while still editing them would apply an
+    out-of-distribution displacement at a position the pooler reads. Padding is edited too but is
+    masked out of both attention and pooling, so it cannot affect any score."""
     import torch
 
+    if not texts:
+        raise ValueError("block_states: no texts")
     rng = np.random.default_rng(seed)
     store, index = {b: [] for b in blocks}, []
     with torch.inference_mode(), record_blocks(student, blocks) as rec:
@@ -282,7 +334,7 @@ def block_states(student, texts, blocks, per_text=10, device="cuda", batch_size=
             student.enc(**b)
             lens = b["attention_mask"].sum(1).tolist()
             for k in range(len(bt)):
-                n_real = max(int(lens[k]) - 1, 1)                     # exclude </s>
+                n_real = max(int(lens[k]), 1)                         # </s> included (see docstring)
                 pos = sorted(rng.choice(n_real, size=min(per_text, n_real), replace=False).tolist())
                 pt = torch.as_tensor(pos, device=device)
                 for bl in blocks:
@@ -311,17 +363,22 @@ def byte_offsets(text, max_chars=None):
 # ----------------------------------------------------------------------------------------------
 # data
 # ----------------------------------------------------------------------------------------------
-def flores_parallel(langs=None, cache_dir="checkpoints"):
-    """{lang: [1012 sentences]} — the FLORES-200 devtest table is one row per parallel sentence,
-    so row i is the same content in every language. Asserts every language is present."""
+def flores_cache_name(split):
+    return f"flores_{split}_10.json"
+
+
+def flores_parallel(langs=None, cache_dir="checkpoints", split="devtest"):
+    """{lang: [sentences]} — the FLORES-200 table is one row per parallel sentence, so row i is the
+    same content in every language. Asserts every language is present. `split` selects devtest (the
+    default, 1012 rows, what every experiment scores on) or dev; each is cached separately."""
     from byte_embed.config import FLORES_CODE, STUDY_LANGS
     langs = list(langs or STUDY_LANGS)
-    cp = Path(cache_dir) / FLORES_CACHE
+    cp = Path(cache_dir) / flores_cache_name(split)
     cached = read_json(cp) or {}
     if all(l in cached for l in langs):
         return {l: cached[l] for l in langs}
     from datasets import load_dataset
-    d = load_dataset("mteb/flores", "default", split="devtest")
+    d = load_dataset("mteb/flores", "default", split=split)
     missing = [l for l in langs if FLORES_CODE.get(l) not in d.column_names]
     assert not missing, f"FLORES devtest lacks columns for {missing}"
     par = {l: list(d[FLORES_CODE[l]]) for l in langs}
@@ -396,7 +453,9 @@ def rank1_torch_fn(a, b, mu, device):
     tmu = torch.as_tensor(mu, device=device, dtype=torch.float32)
 
     def fn(x):
-        return x - ((x.float() - tmu) @ tb).unsqueeze(-1) * ta
+        # .to(x.dtype): the edit must not change the block output's dtype, or the next block sees a
+        # different precision than the unedited pass it is compared against (and half/bf16 would raise).
+        return (x - ((x.float() - tmu) @ tb).unsqueeze(-1) * ta).to(x.dtype)
     return fn
 
 
@@ -452,6 +511,12 @@ def _selftest():
     ra, rb, _ = rank1_eraser(W, Wp, mu3, rng.standard_normal(d))  # random direction leaves the concept
     assert _probe_acc(apply_rank1(X, ra, rb, mu3), en) > 0.95
     assert depth_blocks(12) == [2, 5, 8, 11] and depth_blocks(8) == [1, 3, 5, 7] and depth_blocks(36) == [8, 17, 26, 35]
+    try:                                   # SCRIPT must stay in step with the FLORES codes
+        from byte_embed.config import FLORES_CODE, STUDY_LANGS
+        assert all(SCRIPT[l] == FLORES_CODE[l].split("_")[1] for l in STUDY_LANGS), SCRIPT
+        assert set(SCRIPT) == set(STUDY_LANGS)
+    except ImportError:
+        pass
     assert byte_offsets("aé字") == ([0, 1, 3], 6)
     texts, lang, sid = flores_flat({"en": ["a", "b"], "te": ["c", "d"]})
     assert texts == ["a", "b", "c", "d"] and lang.tolist() == ["en", "en", "te", "te"] and sid.tolist() == [0, 1, 0, 1]

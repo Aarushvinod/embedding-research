@@ -3,8 +3,11 @@
 Claim under test: byte models develop segmentation on their own, and different languages develop
 their own rather than sharing one structure imposed by a subword tokenizer.
 
-Setup: all ten languages, 500 FLORES sentences each; per-byte-position residual states at every
-layer (0 = embeddings, then every block); per-position labels
+Setup: all ten languages, 500 FLORES sentences each (300 for byte-large, whose per-position
+extraction is ~3x the cost); per-byte-position residual states at every layer (0 = embeddings, then
+every block) for small/base — byte-large has 37 states, so it is probed on a subsampled grid (layers
+0-4 densely, then every third, plus the last; see `layer_plan`) and its curve is coarser than the
+other two models'; per-position labels
   tok_end   last byte of a BGE-M3 (teacher-tokenizer) token, with the standalone-'▁' correction
             (`teacher_cuts`: the XLM-R fast tokenizer gives a lone '▁' the span of the NEXT word's
             first character, which would plant a bogus boundary one character into 1-6% of words);
@@ -21,9 +24,12 @@ Robustness: (a) a surface-statistics baseline — the same probe on a one-hot wi
 around the position, no model; (b) the same probes on the untouched PRETRAINED ByT5 encoder, so
 what distillation added is separated from what ByT5 already had.
 Core result — cross-lingual transfer at the peak layer: a probe trained on language A tested on
-held-out sentences of language B for all 100 pairs, reported as acc(A->B) / acc(B->B) (each
-language standardized with its own statistics, so the matrix tests whether the boundary DIRECTION
-transfers), plus one joint probe trained on all languages and scored per language.
+held-out sentences of language B for all 100 pairs, reported as AUC(A->B) / AUC(B->B). Each language
+is standardized with its own statistics and the score is the threshold-free ROC-AUC of the probe's
+decision function, NOT its hard-label accuracy: A's intercept is meaningless in B's re-centred
+coordinates, so an accuracy-based matrix would report "no transfer" whenever only the bias failed to
+carry over. Balanced accuracy is recorded alongside for reference. One joint probe trained on all
+languages is scored per language as well.
 
 Pre-registered readings: within-language accuracy must beat the surface baseline and the random
 control for the representation to count as carrying segmentation; the pretrained comparison says
@@ -46,8 +52,8 @@ import zlib
 import numpy as np
 
 from byte_embed.interp_common import (LATIN, SCRIPT, byte_offsets, flores_parallel, layer_positions,
-                                      load_student, merge_parts, models_in, part_path, read_json,
-                                      utf8_stdout, write_json)
+                                      load_student, merge_parts, models_in, n_blocks, part_path,
+                                      read_json, utf8_stdout, write_json)
 
 ANALYSIS = "segment"
 SCHEMA = 2                         # bumped when the part-file contents change meaning
@@ -243,7 +249,15 @@ def run_one(name, results, ckpt_dir, device, langs=None, n_sent=None, seed=0):
     if bm.get("kind") != "byte":
         print(f"  [segment] {name} is not a byte model -> skip")
         return
-    pre = load_student(name, results, ckpt_dir, device, pretrained_only=True)[0]
+    # The pretrained baseline is a SECOND full encoder resident on the same GPU. Load it on first
+    # use, so a resumed run whose languages are all done (only `transfer` left) never pays for it.
+    pre = None
+
+    def pretrained():
+        nonlocal pre
+        if pre is None:
+            pre = load_student(name, results, ckpt_dir, device, pretrained_only=True)[0]
+        return pre
     from byte_embed.boundaries import _teacher_tok
     tok = _teacher_tok()
     par = flores_parallel(cache_dir=ckpt_dir)
@@ -254,7 +268,7 @@ def run_one(name, results, ckpt_dir, device, langs=None, n_sent=None, seed=0):
     n_sent = n_sent or (300 if "large" in name else 500)
     big = "large" in name
     res.update(kind="byte", steps_run=bm.get("steps_run"), n_sent=n_sent)
-    layers = layer_plan(student.enc.config.num_layers + 1)     # embeddings + every block
+    layers = layer_plan(n_blocks(student) + 1)                 # embeddings + every block
 
     for lang in langs:
         d = res["langs"].get(lang) or {}
@@ -282,7 +296,7 @@ def run_one(name, results, ckpt_dir, device, langs=None, n_sent=None, seed=0):
                 X = surface_features(texts, it, max_chars=student.max_chars)
                 d["surface"][lab] = probe_metrics(X, [y for _, _, y in it], [i for i, _, _ in it], seed)
         if not d.get("pretrained"):
-            feats, index = layer_positions(pre, texts, sel, device=device, layers=layers,
+            feats, index = layer_positions(pretrained(), texts, sel, device=device, layers=layers,
                                            batch_size=(4 if big else 8))
             d["pretrained"] = _probe_layers(feats, index, items, layers, seed)
             del feats
@@ -295,18 +309,32 @@ def run_one(name, results, ckpt_dir, device, langs=None, n_sent=None, seed=0):
               f"surface={d['surface']['interior']['bacc'] if d['surface'].get('interior') else None} "
               f"random={e1['random']['bacc'] if e1.get('random') else None} -> saved")
 
-    if "transfer" not in res and len(res["langs"]) >= 2:
-        res["transfer"] = transfer_matrix(student, par, list(res["langs"]), res, tok, n_sent, seed, device, big)
-        write_json(outp, res)
+    # Recompute when the LANGUAGE SET or the sample size changed: the documented fast path
+    # (`--langs en,zh --n-sent 50`) would otherwise pin a 2x2 matrix computed from 50 sentences that
+    # the later full run never revisits, while status.sh and the figures present it as the 10x10.
+    want = {"langs": sorted(res["langs"]), "n_sent": int(n_sent)}
+    have = {k: (res.get("transfer") or {}).get(k) for k in want}
+    if len(res["langs"]) >= 2 and have != want:
+        if res.get("transfer"):
+            print(f"  transfer: recomputing - was {have}, now {want}")
+        t = transfer_matrix(student, par, list(res["langs"]), res, tok, n_sent, seed, device, big)
+        if t:                      # only persist a real matrix, so a skipped/degenerate pass retries
+            res["transfer"] = {**t, **want}
+            write_json(outp, res)
     print(f"  saved -> {outp}")
 
 
 def transfer_matrix(student, par, langs, res, tok, n_sent, seed, device, big):
     """Cross-lingual transfer of the INTERIOR-boundary probe at the peak layer, plus a joint probe.
     Each language is standardized with its own training-split statistics."""
-    from sklearn.metrics import balanced_accuracy_score
+    from sklearn.metrics import balanced_accuracy_score, roc_auc_score
     from sklearn.preprocessing import StandardScaler
+    # peak_layer is None when no layer has a usable interior probe; layers=[None] then raises
+    # TypeError inside _select_layers at the very end of a multi-hour job.
     peak = peak_layer(res)
+    if peak is None:
+        print("  transfer: no usable interior probe at any layer -> skipped")
+        return None
     print(f"  transfer pass at peak layer {peak}")
     data = {}
     for lang in langs:
@@ -332,20 +360,32 @@ def transfer_matrix(student, par, langs, res, tok, n_sent, seed, device, big):
         sc = StandardScaler().fit(X[tr])
         data[lang] = {"Xtr": sc.transform(X[tr]), "ytr": y[tr], "Xte": sc.transform(X[te]), "yte": y[te]}
         del feats
+    if len(data) < 2:              # `cap = min(...)` below is a ValueError on an empty `data`, and a
+        print(f"  transfer: only {len(data)} language(s) usable at layer {peak} -> skipped")
+        return None                # 1x1 matrix carries no transfer signal anyway
     from sklearn.linear_model import LogisticRegression
     clfs = {a: LogisticRegression(max_iter=2000, C=10.0, random_state=seed).fit(data[a]["Xtr"], data[a]["ytr"])
             for a in data}
+    # AUC of the decision function, not hard-label accuracy: each language is standardized with its
+    # OWN statistics, so probe A's intercept does not transport to B's coordinates and a thresholded
+    # score would read "no transfer" when only the bias failed to carry.
+    auc = {a: {b: round(float(roc_auc_score(data[b]["yte"], clfs[a].decision_function(data[b]["Xte"]))), 3)
+               for b in data} for a in data}
     acc = {a: {b: round(float(balanced_accuracy_score(data[b]["yte"], clfs[a].predict(data[b]["Xte"]))), 3)
                for b in data} for a in data}
-    ratio = {a: {b: round(acc[a][b] / acc[b][b], 3) if acc[b][b] else None for b in data} for a in data}
+    ratio = {a: {b: round(auc[a][b] / auc[b][b], 3) if auc[b][b] else None for b in data} for a in data}
+    # one subsample per language, seeded by (seed, lang): the joint probe must not depend on the
+    # order in which languages happened to finish (a requeue reorders `res["langs"]`).
     cap = min(len(d["ytr"]) for d in data.values())
-    rng = np.random.default_rng(seed)
-    parts = [rng.choice(len(d["ytr"]), size=cap, replace=False) for d in data.values()]
-    Xj = np.concatenate([d["Xtr"][ii] for d, ii in zip(data.values(), parts)], 0)
-    yj = np.concatenate([d["ytr"][ii] for d, ii in zip(data.values(), parts)], 0)
+    parts = {l: np.random.default_rng([seed, zlib.crc32(l.encode("utf-8"))])
+             .choice(len(d["ytr"]), size=cap, replace=False) for l, d in data.items()}
+    Xj = np.concatenate([data[l]["Xtr"][ii] for l, ii in parts.items()], 0)
+    yj = np.concatenate([data[l]["ytr"][ii] for l, ii in parts.items()], 0)
     joint = LogisticRegression(max_iter=2000, C=10.0, random_state=seed).fit(Xj, yj)
-    return {"layer": int(peak), "acc": acc, "ratio": ratio, "within": {b: acc[b][b] for b in data},
-            "joint": {b: round(float(balanced_accuracy_score(data[b]["yte"], joint.predict(data[b]["Xte"]))), 3)
+    return {"layer": int(peak), "auc": auc, "acc": acc, "ratio": ratio,
+            "within": {b: auc[b][b] for b in data},
+            "within_bacc": {b: acc[b][b] for b in data},
+            "joint": {b: round(float(roc_auc_score(data[b]["yte"], joint.decision_function(data[b]["Xte"]))), 3)
                       for b in data}}
 
 
@@ -355,7 +395,7 @@ def _m(vals, w=9):
 
 
 def merge():
-    d = merge_parts(ANALYSIS)
+    d = merge_parts(ANALYSIS, schema=SCHEMA)
     M = d["models"]
     print("\nEXP 5 — EMERGENT SEGMENTATION (balanced accuracy of per-byte-position boundary probes, split by "
           "sentence; `random` = chance control)")
@@ -432,14 +472,17 @@ def report_by_language(M):
 
 
 def report_transfer(M):
-    print("\n  CROSS-LINGUAL TRANSFER of the interior-boundary probe at the peak layer: acc(A->B) / acc(B->B)"
-          " (rows = trained on A, columns = tested on B); joint = one probe trained on all languages")
+    print("\n  CROSS-LINGUAL TRANSFER of the interior-boundary probe at the peak layer: "
+          "AUC(A->B) / AUC(B->B) (rows = trained on A, columns = tested on B; threshold-free, so only "
+          "the direction has to transfer); joint = one probe trained on all languages")
     for n in BYTE_MODELS:
         r = M.get(n)
         t = (r or {}).get("transfer")
         if not t:
             continue
-        langs = list(t["acc"])
+        langs = list(t.get("auc") or t["acc"])
+        print(f"  {'':14}(computed over {len(t.get('langs') or langs)} languages, "
+              f"{t.get('n_sent', '?')} sentences each)")
         corner = "A|B"
         print(f"\n  {n} (layer {t['layer']})  {corner:>6}" + "".join(f"{b:>6}" for b in langs))
         for a in langs:
@@ -453,7 +496,7 @@ def report_transfer(M):
                  and t["ratio"][a][b] is not None]
         print(f"  {'':14}mean ratio same-script pairs {np.mean(same) if same else float('nan'):.2f} (n={len(same)})"
               f"   cross-script pairs {np.mean(cross) if cross else float('nan'):.2f} (n={len(cross)})"
-              f"   within-language {np.mean(list(t['within'].values())):.3f}")
+              f"   within-language AUC {np.mean(list(t['within'].values())):.3f}")
 
 
 def _selftest():

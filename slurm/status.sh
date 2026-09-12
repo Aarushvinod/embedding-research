@@ -15,6 +15,17 @@ ARMS = ["byte-small", "byte-base", "byte-large"]
 LABELS = [("main", MAIN, "results/retrieval_bgem3"), ("bteacher", ARMS, "results/retrieval_bgem3_bteacher"),
           ("brandom", ARMS, "results/retrieval_bgem3_brandom")]
 INTERP = [("english", MAIN), ("script", MAIN), ("segment", ARMS)]
+# Ask each experiment for its own plan size instead of hardcoding it here (numpy-only imports).
+try:
+    from byte_embed.interp_script import cond_cells
+    SCRIPT_CELLS = cond_cells()
+except Exception:                                        # noqa: BLE001 — status must never fail
+    SCRIPT_CELLS = 19
+try:
+    from byte_embed.interp_english import n_belebele_cells
+    EN_CELLS = n_belebele_cells()
+except Exception:                                        # noqa: BLE001
+    EN_CELLS = 18
 
 def load(p):
     try:
@@ -43,16 +54,19 @@ def interp_state(x, m):
         return "-"
     if x == "english":
         bat = d.get("battery") or {}
-        if all(e in bat for e in ("en", "random")):
+        if all(e in bat for e in ("none", "en", "random")):
             return "done"
         stage = "latent" if "latent" in d else "-"
         stage = "shift" if "shift" in d else stage
         nb = len(d.get("belebele") or {})
-        return f"{stage}, belebele {nb}/17" if nb else stage
+        ic = (d.get("identity_check") or {}).get("verdict", "")
+        tag = " LOADER-WARN" if ic.startswith("WARN") else ""
+        return (f"{stage}, belebele {nb}/{EN_CELLS}{tag}" if nb else stage)
     if x == "script":
         conds = d.get("cond") or {}
         done = sum(len(v.get("langs") or []) for v in conds.values())
-        return "done" if done >= 14 else (f"{done}/14 cond-langs" if done else ("shift" if d.get("shift") else "-"))
+        tot = SCRIPT_CELLS
+        return "done" if done >= tot else (f"{done}/{tot} cond-langs" if done else ("shift" if d.get("shift") else "-"))
     if x == "segment":
         n = len(d.get("langs") or {})
         return "done" if n >= 10 and d.get("transfer") else f"{n}/10 langs" + (" +transfer" if d.get("transfer") else "")
