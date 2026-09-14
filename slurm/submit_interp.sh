@@ -83,9 +83,15 @@ total=0; ALL_IDS=(); REJECTED=()
 if [ "$MODE" = model ]; then
   for m in $MODELS; do
     cmd=""
+    # Run every experiment even if an earlier one fails, but REMEMBER the failures and exit
+     # non-zero at the end. Chaining with a bare ';' made the job's exit status that of the LAST
+     # command only, so an experiment that died reported COMPLETED and sacct showed nothing wrong.
+    cmd="FAILED_EXPS=;"
     for exp in $(exps_for "$m"); do
-      cmd+="python -u -m byte_embed.interp_$exp --only $m; "     # ';' so one failure does not stop the rest
+      cmd+=" python -u -m byte_embed.interp_$exp --only $m || FAILED_EXPS=\"\$FAILED_EXPS $exp\";"
     done
+    cmd+=' if [ -n "$FAILED_EXPS" ]; then echo "[job] FAILED experiments:$FAILED_EXPS"; exit 1; fi;'
+    cmd="${cmd# }"
     [ -z "$cmd" ] && continue
     cflag=(); c="$(cons_for "$m")"; [ -n "$c" ] && cflag=(--constraint="$c")
     # `|| true`: under `set -e` a single QOS rejection (MaxWall, CPU/mem caps) would abort the whole

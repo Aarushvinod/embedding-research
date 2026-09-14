@@ -307,24 +307,28 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False):   # no
             if not todo:
                 continue
             rz = Romanizer(lang, ckpt_dir, scheme)
-            pq, pp = pool_texts(lang, ckpt_dir)
-            bq, bp = belebele_texts(lang)
             try:
+                # Inside the try: a missing pool cache, an unavailable Belebele config or a
+                # romanizer that refuses its output must cost THIS (scheme, language) and nothing
+                # else. Outside it, the raise propagated out of run_one and killed the process
+                # mid-loop, so the remaining languages were never attempted and the part file gave
+                # no clue which one had failed.
+                pq, pp = pool_texts(lang, ckpt_dir)
+                bq, bp = belebele_texts(lang)
                 rz.many(pq + bq)                              # queries (both conditions)
                 if "RR" in todo:
                     rz.many(pp + bp)                          # passages: RR only (20k texts per language)
-            except SystemExit as e:
+            except (SystemExit, Exception) as e:              # noqa: B014 — SystemExit is not an Exception
                 # A romanizer failure must not take the remaining languages down with it: record the
                 # skip (so it is not retried and the completion count can still close), keep going,
                 # and re-raise at the END so the job still reports failure.
-                print(f"  [script] {scheme}:{lang}: {e} -> recorded as skipped")
+                print(f"  [script] {scheme}:{lang}: {type(e).__name__}: {e} -> recorded as skipped")
                 for cond in todo:
                     blk = cond_block(res, f"{scheme}:{cond}")
                     blk["langs"].append(lang)
                     blk.setdefault("skipped", {})[lang] = str(e)
                 write_json(outp, res)
-                if scheme == "uroman":
-                    failures.append(f"{scheme}:{lang}: {e}")
+                failures.append(f"{scheme}:{lang}: {type(e).__name__}: {e}")
                 continue
             for cond in todo:
                 trans = rz if cond == "RR" else QueryOnly(rz, set(pq) | set(bq))
@@ -351,7 +355,10 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False):   # no
         write_json(outp, res)
     print(f"  saved -> {outp}")
     if failures:
-        raise SystemExit("[script] romanization failed for: " + "; ".join(failures))
+        # Every other language's work is already on disk; exit non-zero so the job is not reported
+        # as a success, and name what to fix.
+        raise SystemExit("[script] these (scheme, language) cells failed and were recorded as "
+                         "skipped: " + "; ".join(failures))
 
 
 def score_lang(block, enc_c, lang, ckpt_dir):
