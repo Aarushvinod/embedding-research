@@ -32,6 +32,7 @@ Requires `uroman` (pip install uroman) — hard failure if absent, never a silen
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import numpy as np
@@ -78,11 +79,16 @@ class Romanizer:
     (`checkpoints/translit_{scheme}_{lang}.json`) so the 20k-passage pools are romanized once; used
     as the text transform inside the eval battery, where it only romanizes cache misses."""
 
+    #  sentence-ish boundaries, CJK and Latin: chunks small enough to isolate a crashing fragment
+    #  while keeping romanization context, since romanization is local.
+    CHUNK = re.compile(r"([。．！？；、，,.!?;\n]+)")
+
     def __init__(self, lang, cache_dir="checkpoints", scheme="uroman", engine=None):
         self.lang, self.scheme = lang, scheme
         self.cp = Path(cache_dir) / f"translit_{scheme}_{lang}.json"
         self.cache = read_json(self.cp) or {}
         self._engine, self.dirty = engine, 0
+        self.chunked, self.per_char, self.unromanized = 0, 0, 0
 
     def engine(self):
         if self._engine is None:
@@ -108,16 +114,57 @@ class Romanizer:
     def __call__(self, text):
         r = self.cache.get(text)
         if r is None:
-            r = self.engine()(text)
+            r = self._romanize(text)
             self.cache[text] = r
             self.dirty += 1
             if self.dirty >= 5000:
                 self.flush()
         return r
 
+    def _romanize(self, text):
+        """Romanize one text, degrading only as far as the failure forces.
+
+        uroman 1.3.1.1 raises `AttributeError: 'Edge' object has no attribute 'value'` from inside
+        `add_numbers` on some inputs (seen on Chinese MIRACL passages); the exception escaped and
+        killed the experiment for every remaining language. A crash on one text says nothing about
+        the rest of the text, so: retry in punctuation-delimited chunks, then character by character,
+        and only if BOTH fail leave that fragment in its native script — where `check_romanized`
+        counts it, and refuses the whole language if too much survives unromanized."""
+        eng = self.engine()
+        try:
+            return eng(text)
+        except Exception:                                    # noqa: BLE001 — any engine bug
+            pass
+        self.chunked += 1
+        out = []
+        for part in self.CHUNK.split(text):
+            if not part:
+                continue
+            try:
+                out.append(eng(part))
+                continue
+            except Exception:                                # noqa: BLE001
+                pass
+            self.per_char += 1
+            try:
+                out.append("".join(c if c.isspace() else eng(c) for c in part))
+            except Exception:                                # noqa: BLE001
+                self.unromanized += 1
+                out.append(part)                             # native; the guard will see it
+        return "".join(out)
+
+    def report(self):
+        if self.chunked:
+            return (f"{self.scheme}:{self.lang}: engine crashed on {self.chunked} text(s) -> "
+                    f"{self.per_char} fragment(s) romanized character-by-character, "
+                    f"{self.unromanized} left native")
+        return None
+
     def many(self, texts):
         out = [self(t) for t in texts]
         self.flush()
+        if self.report():
+            print("  [script] " + self.report())
         check_romanized(out, self.lang, native=texts)
         return out
 
@@ -143,17 +190,19 @@ def _source_script_left(text, lang):
 def check_romanized(rom, lang, native=None, min_frac=0.99):
     """Refuse to score garbage: no letter of the source script may survive, nothing may romanize to
     the empty string, and anything that HAD source-script letters must come back with an ASCII
-    letter. Texts that never had any — numbers, punctuation, already-Latin strings — are trivially
-    'already romanized'; demanding an ASCII letter of those tripped the 1% budget on whole 20k pools
-    (MIRACL passages contain plenty of numeric/punctuation-only rows) and aborted the experiment.
+    ASCII alphanumeric. Texts that never had any — numbers, punctuation, already-Latin strings — are
+    trivially 'already romanized'; demanding ASCII of those tripped the 1% budget on whole 20k pools
+    (MIRACL passages carry plenty of numeric/punctuation-only rows) and aborted the experiment.
+    ALPHAnumeric, not alphabetic: a Chinese numeral string romanizes to digits ('一二三四五' ->
+    '12345'), which is correct output with no Latin letter in it.
     `native` = the source texts, so 'had letters' is read off the input rather than guessed."""
     n_bad = 0
     for i, r in enumerate(rom):
         src = native[i] if native is not None else r
         if not r or _source_script_left(r, lang):                  # empty, or source script survived
             n_bad += 1
-        elif _source_script_left(src, lang) and not any(c.isascii() and c.isalpha() for c in r):
-            n_bad += 1                                             # letters went in, none came out
+        elif _source_script_left(src, lang) and not any(c.isascii() and c.isalnum() for c in r):
+            n_bad += 1                             # source text went in, no ASCII came out at all
     frac = 1.0 - n_bad / max(len(rom), 1)
     if frac < min_frac:
         raise SystemExit(f"romanization for {lang} produced unusable output for {1 - frac:.1%} "
@@ -330,6 +379,10 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False):   # no
                 write_json(outp, res)
                 failures.append(f"{scheme}:{lang}: {type(e).__name__}: {e}")
                 continue
+            if rz.report():
+                res.setdefault("engine_fallbacks", {})[f"{scheme}:{lang}"] = {
+                    "texts_crashed": rz.chunked, "fragments_per_char": rz.per_char,
+                    "fragments_left_native": rz.unromanized}
             for cond in todo:
                 trans = rz if cond == "RR" else QueryOnly(rz, set(pq) | set(bq))
                 enc_c = make_encode(student, device, transform=trans, batch_size=bs)
@@ -528,6 +581,7 @@ def merge(results="results/retrieval_bgem3.json", n_boot=10000, seed=0):
 def _selftest():
     assert buckwalter("العربية") == "AlErbyp" and buckwalter("٢٠٢٣ ok") == "2023 ok"
     assert check_romanized(["telugu vakyam", "inko"], "te") == 1.0
+    assert check_romanized(["12345"], "zh", native=["一二三四五"]) == 1.0   # numerals -> digits is fine
     for bad in (["", "", "ok"], ["ok తెలుగు", "ok"]):
         try:
             check_romanized(bad, "te")
@@ -535,6 +589,21 @@ def _selftest():
         except SystemExit:
             pass
     assert check_romanized(["AlErbyp hy"], "ar") == 1.0
+    class Crashy:
+        """Mimics the uroman add_numbers bug: dies on any text containing a digit."""
+        def __call__(self, t):
+            if any(c.isdigit() for c in t):
+                raise AttributeError("'Edge' object has no attribute 'value'")
+            return "rom:" + t
+    rz2 = Romanizer("te", cache_dir="results/_selftest_tmp", engine=Crashy())
+    assert rz2._romanize("abc") == "rom:abc" and rz2.chunked == 0        # clean path untouched
+    got = rz2._romanize("abc. d1e. fgh")                                  # middle chunk has a digit
+    assert got.startswith("rom:abc") and "rom: fgh" in got, got
+    assert rz2.chunked == 1 and rz2.per_char == 1 and rz2.unromanized == 1, (rz2.chunked, rz2.per_char, rz2.unromanized)
+    assert "1" in got, got            # the un-romanizable fragment is kept, not silently dropped
+    assert rz2.report() and "crashed on 1" in rz2.report()
+    rz2.cp.unlink(missing_ok=True)
+
     class Fake:
         def __call__(self, t):
             return "rom:" + t
