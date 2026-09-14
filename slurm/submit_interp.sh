@@ -111,7 +111,10 @@ fi
 report_rejected() {
   [ "${#REJECTED[@]}" -eq 0 ] && return 0
   echo "REJECTED by the scheduler (nothing queued for these): ${REJECTED[*]}"
-  echo "  usually a QOS cap - try a lower MAX_HOURS, CPUS/MEM, or a different PARTITION/QOS."
+  echo "  read the sbatch error above: 'QOS'/'accounting policy' -> lower MAX_HOURS or CPUS/MEM;"
+  echo "  'node configuration is not available' -> this partition has no node matching the GPU or"
+  echo "  constraint asked for (e.g. no Hopper on tron): set BIG_CONSTRAINT= or GRES_BYTE=, or use"
+  echo "  another PARTITION. 'sinfo -p <part> -o \"%.20N %.5c %.9m %.30f %.30G\" | sort -u' lists them."
   return 1
 }
 if [ "${#ALL_IDS[@]}" -eq 0 ]; then echo "nothing submitted"; report_rejected; exit $?; fi

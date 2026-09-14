@@ -72,6 +72,37 @@ def interp_state(x, m):
         return "done" if n >= 10 and d.get("transfer") else f"{n}/10 langs" + (" +transfer" if d.get("transfer") else "")
     return "done"
 
+def interp_detail(x, m):
+    """One line per model naming the finished units, so a partial run says WHERE it stopped."""
+    d = load(f"results/interp_{x}_part_{m}.json")
+    if not d:
+        return None
+    if x == "english":
+        bel = d.get("belebele") or {}
+        cb = d.get("chosen_block")
+        depths = sorted({int(k.split(":")[0]) for k in bel if ":" in k})
+        cols = sorted(k.split(":")[1] for k in bel if k.startswith(f"{cb}:"))
+        return (f"block {cb} of {d.get('n_blocks')}; belebele cells {len(bel)}/{EN_CELLS} "
+                f"[{'none ' if 'none' in bel else ''}depths {depths}; columns at cb: {' '.join(cols)}]; "
+                f"battery {sorted(d.get('battery') or {})}")
+    if x == "script":
+        cond = d.get("cond") or {}
+        parts = [f"{k}:{'+'.join(v.get('langs') or []) or '-'}"
+                 + (f" (skipped {sorted((v.get('skipped') or {}))})" if v.get("skipped") else "")
+                 for k, v in sorted(cond.items())]
+        return f"shift {len(d.get('shift') or {})} cells; " + "  ".join(parts)
+    if x == "segment":
+        langs = d.get("langs") or {}
+        done = [l for l, v in langs.items() if v.get("layers") and v.get("surface") and v.get("pretrained")]
+        partial = [l for l in langs if l not in done]
+        t = d.get("transfer")
+        return (f"langs complete {'+'.join(done) or '-'}"
+                + (f"; partial {'+'.join(partial)}" if partial else "")
+                + (f"; transfer {len(t.get('langs') or t.get('acc') or [])} langs @ layer {t['layer']}"
+                   if t else "; transfer not yet run"))
+    return None
+
+
 print("== training parts (steps_run/steps) | checkpoint | full-eval part ==")
 print(f"  {'label':9}{'model':15}{'train':>16}{'ckpt':>8}{'full-eval':>11}")
 for label, models, base in LABELS:
@@ -91,6 +122,13 @@ for m in MAIN:
     print(f"  {m:15}" + "".join(f"{(interp_state(x, m) if m in ms else ''):>18}" for x, ms in INTERP))
 merged_i = [x for x, _ in INTERP if os.path.exists(f"results/interp_{x}.json")]
 print(f"  merged: {merged_i or '-'}")
+for x, ms in INTERP:
+    rows = [(m, interp_detail(x, m)) for m in ms]
+    rows = [(m, t) for m, t in rows if t]
+    if rows:
+        print(f"\n  -- {x} detail --")
+        for m, t in rows:
+            print(f"     {m:15}{t}")
 
 print("\n== jobs (squeue: byteembed / be-* / fe-* / in-*) ==")
 try:
@@ -102,6 +140,11 @@ except (OSError, subprocess.CalledProcessError) as e:
 rows = [l.split("|") for l in out.splitlines() if re.match(r"^\d+\|(byteembed|be-|fe-|in-)", l)]
 if not rows and out is not None:
     print("  none queued or running")
+STATE_NOTE = {"TIMEOUT": "hit the wall clock — resubmit, it resumes from the part file",
+              "FAILED": "non-zero exit — read slurm-<name>-<id>.out",
+              "OUT_OF_MEMORY": "raise --mem or lower the batch size",
+              "CANCELLED": "cancelled (scavenger preemption without requeue, or by hand)",
+              "NODE_FAIL": "node died — resubmit"}
 for jid, name, state, t, reason in rows:
     info = ""
     logs = sorted(glob.glob(f"slurm-{name}-{jid}.out"))
@@ -114,4 +157,28 @@ for jid, name, state, t, reason in rows:
         if steps:
             info += f"  step {steps[-1][0]}/{steps[-1][1]}"
     print(f"  {jid:>9} {name:22} {state:9} {t:>11} {reason:24}{info}")
+
+print("\n== finished interp/eval jobs in the last 3 days (sacct) ==")
+try:
+    fin = subprocess.run(["sacct", "-u", os.environ.get("USER", ""), "-S", "now-3days", "-X", "-P", "-n",
+                          "--format=JobID,JobName%30,State,Elapsed,ExitCode"],
+                         capture_output=True, text=True, check=True).stdout
+except (OSError, subprocess.CalledProcessError) as e:
+    fin = ""
+    print(f"  (sacct unavailable: {e})")
+seen = set()
+for line in fin.splitlines():
+    f = line.split("|")
+    if len(f) < 5 or not re.match(r"^(in-|fe-|be-|byteembed)", f[1]):
+        continue
+    if f[0] in {r[0] for r in rows}:            # still queued/running: already listed above
+        continue
+    key = (f[1], f[0])
+    if key in seen:
+        continue
+    seen.add(key)
+    note = STATE_NOTE.get(f[2].split()[0], "")
+    print(f"  {f[0]:>9} {f[1]:30} {f[2]:14} {f[3]:>10} exit={f[4]:8}{note}")
+if fin and not seen:
+    print("  none finished in this window")
 PY
