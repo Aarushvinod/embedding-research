@@ -255,7 +255,9 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
     # A part file written before this key existed was fitted on devtest, the historical default, so
     # absence is NOT "no opinion": treating it as such would let stage A refit on the new pool while
     # stages B-E stayed cached from the old one, and the depth columns would silently be a mixture.
-    prior = res.get("flores_split") or ("devtest" if res.get("latent") else None)
+    # `"latent" in res`, not res.get("latent"): an empty dict is falsy, which would read a legacy
+    # part file as having no opinion and re-open exactly the mixing this guard exists to prevent.
+    prior = res.get("flores_split") or ("devtest" if "latent" in res else None)
     if prior not in (None, flores_split):
         raise SystemExit(
             f"[english] {outp} holds stages fitted on FLORES '{prior}' but '{flores_split}' was "
