@@ -17,6 +17,7 @@ Pure-numpy helpers (rank-1 LEACE erasers, byte offsets, part-file IO) self-test 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import glob
 import json
 from contextlib import contextmanager
@@ -312,9 +313,12 @@ def layer_positions(student, texts, sel, device="cuda", layers=None, batch_size=
             for l, v in store.items()}, index
 
 
-def block_states(student, texts, blocks, per_text=10, device="cuda", batch_size=8, seed=0):
+def block_states(student, texts, blocks, per_text=10, device="cuda", batch_size=8, seed=0, hook=None):
     """Randomly sampled per-position output states of the requested encoder BLOCKS (the hook
     points `block_hook` edits) -> ({block: float32 [N, d]}, index [(text_idx, pos)]). `per_text`
+    `hook=(block, fn)` installs an activation edit for these passes, so the SAME positions can be
+    re-read with the intervention active — which is how the erasure is verified at the block it is
+    applied to and at the blocks after it.
     positions per text, drawn uniformly from the UNPADDED sequence, </s> included: `block_hook`
     edits every position of the tensor, and </s> has attention_mask 1 — it is attended to by every
     later block and pooled into the final embedding. T5 end-of-sequence states are activation
@@ -327,7 +331,8 @@ def block_states(student, texts, blocks, per_text=10, device="cuda", batch_size=
         raise ValueError("block_states: no texts")
     rng = np.random.default_rng(seed)
     store, index = {b: [] for b in blocks}, []
-    with torch.inference_mode(), record_blocks(student, blocks) as rec:
+    edit = block_hook(student, hook[0], hook[1]) if hook else contextlib.nullcontext()
+    with torch.inference_mode(), edit, record_blocks(student, blocks) as rec:
         for i in range(0, len(texts), batch_size):
             bt = texts[i:i + batch_size]
             b = tokenize_like_forward(student, bt, device)

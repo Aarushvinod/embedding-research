@@ -54,7 +54,7 @@ import argparse
 
 import numpy as np
 
-from byte_embed.interp_common import (CROSS_CELLS, MAIN_MODELS, block_states, depth_blocks,
+from byte_embed.interp_common import (CROSS_CELLS, MAIN_MODELS, apply_rank1, block_states, depth_blocks,
                                       flores_flat, flores_parallel, leace_direction, load_student,
                                       make_encode, merge_parts, models_in, n_blocks, part_path,
                                       rank1_eraser, rank1_torch_fn, read_json, stored_results,
@@ -161,7 +161,8 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
         if res:
             print(f"  [english] {name}: part file schema {res.get('schema')} != {SCHEMA} -> recomputing")
         res = {"schema": SCHEMA}
-    if res.get("battery") and all(e in res["battery"] for e in (NONE, "en", "random")):
+    if (res.get("battery") and all(e in res["battery"] for e in (NONE, "en", "random"))
+            and res.get("erasure_check")):
         print(f"=== {ANALYSIS}/{name}: already done -> skip ===")
         return
     loaded = load_student(name, results, ckpt_dir, device)
@@ -223,6 +224,37 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
         write_json(outp, res)
         print("  shift (cos edited vs original) under English erasure: " +
               " ".join(f"{l}:{v:.3f}" for l, v in res["shift"]["en"].items()))
+    # ---- stage B2: DOES THE ERASURE ACTUALLY ERASE? Re-read the states with the hook active and
+    # re-run the English-vs-rest probe at the block it is applied to and at the last block. Without
+    # this, "erasing English changed nothing" is indistinguishable from "the erasure did nothing":
+    # the LEACE map is correct by construction (it equalises the class means, verified numerically in
+    # interp_common's selftest) and the output cosines show English moving while other languages do
+    # not, but neither shows the concept is UNRECOVERABLE where it matters, nor whether later blocks
+    # rebuild it from other features.
+    if "erasure_check" not in res:
+        last = n - 1
+        want = sorted({cb, last})
+        chk = {}
+        for tag, hk in (("unedited", None), ("erased", (cb, rank1_torch_fn(*fits[cb]["en"], device)))):
+            st, idx = block_states(student, texts, want, per_text=PER_TEXT, device=device,
+                                   batch_size=(4 if big else 8), seed=seed, hook=hk)
+            rows = np.array([t for t, _ in idx])
+            for b in want:
+                chk.setdefault(str(b), {})[tag] = latent_probe(st[b], lang[rows], fit_ids[sid[rows]], seed)
+            del st
+        res["erasure_check"] = {
+            "block": cb, "last_block": last,
+            "at_intervention": {t: chk[str(cb)][t]["bacc"] for t in ("unedited", "erased")},
+            "at_last_block": {t: chk[str(last)][t]["bacc"] for t in ("unedited", "erased")},
+            "p_en_non_english": {t: round(non_en_mean(chk[str(cb)][t]["p_en"]), 4)
+                                 for t in ("unedited", "erased")}}
+        ec = res["erasure_check"]
+        print(f"  [erasure check] English probe bacc at block {cb}: "
+              f"{ec['at_intervention']['unedited']} -> {ec['at_intervention']['erased']} "
+              f"(0.5 = erased); at the last block {last}: "
+              f"{ec['at_last_block']['unedited']} -> {ec['at_last_block']['erased']} "
+              f"(near 0.5 = it does not come back)")
+        write_json(outp, res)
     if skip_battery:
         return
 
@@ -405,6 +437,13 @@ def merge(results="results/retrieval_bgem3.json", n_boot=2000, seed=0):
               + "  ".join(f"b{b}: {non_en_mean(r['latent'][str(b)]['p_en']):.3f}/"
                           f"{(r['latent'][str(b)]['p_en'].get('en') or float('nan')):.3f}/"
                           f"{r['latent'][str(b)]['bacc']}" for b in blocks))
+        ec = r.get("erasure_check")
+        if ec:
+            ai, al = ec["at_intervention"], ec["at_last_block"]
+            print(f"    erasure check: English probe balanced accuracy at the intervention block "
+                  f"{ec['block']}: {ai['unedited']} -> {ai['erased']}; carried to the last block "
+                  f"{ec['last_block']}: {al['unedited']} -> {al['erased']}  (0.5 = English not "
+                  f"linearly recoverable; a high value at the last block means later blocks rebuild it)")
         ic = r.get("identity_check")
         if ic:
             print(f"    loader check (unedited vs stored): max|dnDCG@10|={ic['max_abs_diff']} "
@@ -525,6 +564,9 @@ def _selftest():
     assert abs(s["excess"]["mean"] + 0.08) < 1e-9 and s["excess"]["significant"], s["excess"]
     assert abs(s["random"]["mean"]) < 1e-9 and not s["random"]["significant"]
     assert abs(en_by_depth(r, n_boot=200)[5]["mean"] + 0.09) < 1e-9
+    # the eraser must make English unrecoverable on the data it was fitted on
+    Xe = apply_rank1(X, *fits["en"])
+    assert latent_probe(Xe, lang_rows, fit_mask)["bacc"] < 0.7 < latent_probe(X, lang_rows, fit_mask)["bacc"]
     ic = identity_check({"te": {"ndcg@10": 0.700}}, {"te": {"ndcg@10": 0.702}})
     assert ic["verdict"] == "PASS" and ic["cells"] == 1
     assert identity_check({"te": {"ndcg@10": 0.7}}, None)["verdict"].startswith("no stored")
