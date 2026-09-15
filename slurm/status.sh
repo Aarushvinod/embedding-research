@@ -87,8 +87,13 @@ def interp_detail(x, m):
         # without it a part file with a full battery reads as finished while the verification that
         # the intervention actually removes English -- and is not rebuilt downstream -- is absent.
         ec = d.get("erasure_check")
-        eck = (f"erasure_check b{ec['block']} {ec['at_intervention']} -> last b{ec['last_block']} "
-               f"{ec['at_last_block']}" if ec else "erasure_check MISSING")
+        eck = (f"erasure_check b{ec['block']} {ec['at_intervention']}"
+               + (f" -> last b{ec['last_block']} {ec['at_last_block']}"
+                  if ec["last_block"] != ec["block"] else " (== last block: says nothing about rebuild)")
+               if ec else "erasure_check MISSING")
+        rs = d.get("reinstatement")
+        eck += ("; reinstatement b%s %s" % (rs["block"], {b: v["erased"] for b, v in rs["at"].items()})
+                if rs else "; reinstatement MISSING")
         return (f"block {cb} of {d.get('n_blocks')}; belebele cells {len(bel)}/{EN_CELLS} "
                 f"[{'none ' if 'none' in bel else ''}depths {depths}; columns at cb: {' '.join(cols)}]; "
                 f"battery {sorted(d.get('battery') or {})}; {eck}")

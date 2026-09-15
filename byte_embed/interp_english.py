@@ -162,7 +162,7 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
             print(f"  [english] {name}: part file schema {res.get('schema')} != {SCHEMA} -> recomputing")
         res = {"schema": SCHEMA}
     if (res.get("battery") and all(e in res["battery"] for e in (NONE, "en", "random"))
-            and res.get("erasure_check")):
+            and res.get("erasure_check") and res.get("reinstatement")):
         print(f"=== {ANALYSIS}/{name}: already done -> skip ===")
         return
     loaded = load_student(name, results, ckpt_dir, device)
@@ -254,6 +254,29 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
               f"(0.5 = erased); at the last block {last}: "
               f"{ec['at_last_block']['unedited']} -> {ec['at_last_block']['erased']} "
               f"(near 0.5 = it does not come back)")
+        write_json(outp, res)
+    # ---- stage B3: IS IT REBUILT? The pre-registered `choose_block` rule turns out to select the
+    # LAST block in every model (non-English positions look steadily more English-like with depth),
+    # so stage B2 compares the intervention block against itself and can say nothing about whether
+    # later blocks restore the concept. Erasing at the SHALLOWEST depth instead leaves the whole
+    # upper encoder free to rebuild, which is the only setting where that question has an answer.
+    # The unedited side is read from stage A's `latent`, which probed the same positions under the
+    # same seed with no hook, so only the hooked pass is new.
+    if "reinstatement" not in res and len(blocks) > 1:
+        early = blocks[0]
+        st, idx = block_states(student, texts, blocks, per_text=PER_TEXT, device=device,
+                               batch_size=(4 if big else 8), seed=seed,
+                               hook=(early, rank1_torch_fn(*fits[early]["en"], device)))
+        rows = np.array([t for t, _ in idx])
+        res["reinstatement"] = {"block": early, "at": {
+            str(b): {"unedited": (res["latent"].get(str(b)) or {}).get("bacc"),
+                     "erased": latent_probe(st[b], lang[rows], fit_ids[sid[rows]], seed)["bacc"]}
+            for b in blocks}}
+        del st
+        at = res["reinstatement"]["at"]
+        print(f"  [reinstatement] English erased at block {early}; probe bacc by depth "
+              + "  ".join(f"b{b}: {at[str(b)]['unedited']}->{at[str(b)]['erased']}" for b in blocks)
+              + "   (stays ~0.5 = gone for good; climbs back = later blocks rebuild it)")
         write_json(outp, res)
     if skip_battery:
         return
@@ -518,6 +541,16 @@ def merge(results="results/retrieval_bgem3.json", n_boot=2000, seed=0):
                   f"{ec['block']}: {ai['unedited']} -> {ai['erased']}; carried to the last block "
                   f"{ec['last_block']}: {al['unedited']} -> {al['erased']}  (0.5 = English not "
                   f"linearly recoverable; a high value at the last block means later blocks rebuild it)")
+        rs = r.get("reinstatement")
+        if rs:
+            at = rs["at"]
+            blks = sorted(at, key=int)
+            print(f"    reinstatement: English erased at the SHALLOWEST block {rs['block']}, probe "
+                  f"balanced accuracy unedited->erased by depth "
+                  + "  ".join(f"b{b}: {at[b]['unedited']}->{at[b]['erased']}" for b in blks))
+            back = [b for b in blks if int(b) > rs["block"] and (at[b]["erased"] or 0) > 0.7]
+            print(f"      -> {'REBUILT at ' + ', '.join('b' + b for b in back) if back else 'not rebuilt'}"
+                  f" (>0.7 = the concept is linearly recoverable again downstream of the edit)")
         ic = r.get("identity_check")
         if ic:
             print(f"    loader check (unedited vs stored): max|dnDCG@10|={ic['max_abs_diff']} "
