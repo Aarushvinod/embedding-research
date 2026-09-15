@@ -643,8 +643,61 @@ def merge(results="results/retrieval_bgem3.json", n_boot=10000, seed=0):
         print(f"  {n:15}" + "  ".join(f"{k}:{v['cos_mean']:.3f} L{v['dist_to_latin_native']:.2f}→{v['dist_to_latin_roman']:.2f}"
                                      for k, v in r["shift"].items() if v))
     report_ranking(M)
+    report_per_lang(M)
     print("\n  reading: larger byte advantage on non-Latin cells + a larger byte drop under RR/RN -> better for "
           "native scripts, paid for on romanized input; no differential drop -> the advantage comes free.")
+
+
+SHORT = {"byte-small": "b-sm", "subword-small": "s-sm", "byte-base": "b-base",
+         "subword-base": "s-base", "byte-large": "b-lg", "subword-large": "s-lg", TEACHER: "BGE-M3"}
+
+
+def per_lang_table(M, scheme="uroman", conds=CONDITIONS):
+    """{(benchmark, lang): {condition: {model: raw nDCG@10}}} for one romanization scheme.
+
+    Unlike section (5) nothing is averaged and nothing is intersected: a cell a model never scored is
+    simply absent from that cell's row, because the question here is "who is best on THIS language",
+    not "who is best overall on a matched population"."""
+    from byte_embed.stats import iter_cells
+    out = {}
+    for n in SCRIPT_MODELS:
+        cond = (M.get(n) or {}).get("cond") or {}
+        for k in [NN] + [f"{scheme}:{c}" for c in conds]:
+            blk = cond.get(k)
+            if not blk:
+                continue
+            for c, m in iter_cells(blk):
+                if m and m.get("ndcg@10") is not None:
+                    out.setdefault(c, {}).setdefault(k, {})[n] = m["ndcg@10"]
+    return out
+
+
+def report_per_lang(M):
+    print("\n  PER-LANGUAGE RAW nDCG@10 -- every model ranked within each cell, best first.")
+    print("     NN = native, RR = both sides romanized, RN = romanized query vs native passage.")
+    wins = {}
+    for scheme in ("uroman", "buckwalter", "pinyin"):
+        tab = per_lang_table(M, scheme)
+        if not tab:
+            continue
+        print(f"\n    --- {scheme} ---")
+        for cell in sorted(tab):
+            for k in [NN] + [f"{scheme}:{c}" for c in CONDITIONS]:
+                row = tab[cell].get(k) or {}
+                if not row:
+                    continue
+                rank = sorted(row.items(), key=lambda kv: -kv[1])
+                wins.setdefault((scheme, k.split(":")[-1]), {}).setdefault(rank[0][0], 0)
+                wins[(scheme, k.split(":")[-1])][rank[0][0]] += 1
+                tag = "NN" if k == NN else k.split(":")[1]
+                print(f"    {cell[0][:6]}-{cell[1]:<3} {tag:<2} "
+                      + "  ".join(f"{SHORT.get(m, m)} {v:.3f}" for m, v in rank))
+    if wins:
+        print("\n    cells won (rank 1) per condition:")
+        for (scheme, cond), w in sorted(wins.items()):
+            tot = sum(w.values())
+            print(f"    {scheme:11}{cond:<3} " + "  ".join(
+                f"{SHORT.get(m, m)} {c}/{tot}" for m, c in sorted(w.items(), key=lambda kv: -kv[1])))
 
 
 def condition_means(M, scheme="uroman", conds=CONDITIONS):
@@ -777,6 +830,11 @@ def _selftest():
                 "miracl": {"per_lang": {}}, "qa_retrieval": {"amharicpr": {"per_lang": {}}}}
     Mx = {"byte-small": {"cond": {NN: _blk(0.80), "uroman:RR": _blk(0.40), "uroman:RN": _blk(0.20)}},
           TEACHER: {"cond": {NN: _blk(0.90), "uroman:RR": _blk(0.27), "uroman:RN": _blk(0.09)}}}
+    pl = per_lang_table(Mx)
+    assert ("belebele", "te") in pl and ("belebele", "ar") in pl, sorted(pl)
+    # raw levels, not deltas: the NN row must carry each model's own native score
+    assert pl[("belebele", "te")][NN] == {"byte-small": 0.80, TEACHER: 0.90}, pl[("belebele", "te")][NN]
+    assert pl[("belebele", "te")]["uroman:RR"] == {"byte-small": 0.40, TEACHER: 0.27}
     sh, rws = condition_means(Mx)
     assert len(sh) == 2 and len(rws) == 2, (sh, rws)
     by = {r["model"]: r for r in rws}
