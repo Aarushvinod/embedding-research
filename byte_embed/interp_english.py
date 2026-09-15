@@ -70,8 +70,15 @@ ALL_EN = "all:en"                  # English erased at EVERY encoder block simul
 ALL_RND = "all:random"             # the same count of random rank-1 edits at the same blocks                      # the unedited pass: baseline + loader identity check
 
 
-def fits_path(name):
-    return part_path(ANALYSIS, name).with_suffix(".erasers.npz")
+def _split_suffix(kind, split):
+    """Eraser sidecars are keyed by FLORES split, because the split IS the fitting set: a
+    `--flores-split dev` run must not reuse directions fitted on devtest. devtest keeps the original
+    filename so finished runs stay cached."""
+    return f".{kind}.npz" if split == "devtest" else f".{kind}-{split}.npz"
+
+
+def fits_path(name, split="devtest"):
+    return part_path(ANALYSIS, name).with_suffix(_split_suffix("erasers", split))
 
 
 def embeds_path(name):
@@ -92,8 +99,8 @@ def fit_erasers(X, lang_rows, langs, seed=0, block=0):
     return out
 
 
-def fits_all_path(name):
-    return Path(f"results/interp_{ANALYSIS}_fitsall_{name}.npz")
+def fits_all_path(name, split="devtest"):
+    return part_path(ANALYSIS, name).with_suffix(_split_suffix("erasers-all", split))
 
 
 def fit_all_blocks(student, texts, lang, sid, fit_ids, n, device, big, seed, path, chunk=4):
@@ -211,6 +218,14 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
     n = n_blocks(student)
     blocks = depth_blocks(n)
     res["n_blocks"], res["blocks"] = n, blocks
+    # Every eraser in this part file was fitted on ONE split; combining stages fitted on different
+    # text would make the depth columns incomparable, so say so rather than proceed.
+    if res.get("flores_split") not in (None, flores_split):
+        raise SystemExit(
+            f"[english] {outp} holds stages fitted on FLORES '{res['flores_split']}' but "
+            f"'{flores_split}' was requested. Move or delete that part file (and its .erasers*.npz "
+            f"sidecars) to refit from scratch on the new split.")
+    res["flores_split"] = flores_split
     par = flores_parallel(cache_dir=ckpt_dir, split=flores_split)
     langs = list(par)
     texts, lang, sid = flores_flat(par)
@@ -222,7 +237,7 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
     bs_enc = 32 if bm.get("kind") == "byte" else 128
 
     # ---- stage A: states at four depths -> erasers + latent-English probe -> chosen block
-    if "latent" not in res or not fits_path(name).exists():
+    if "latent" not in res or not fits_path(name, flores_split).exists():
         states, index = block_states(student, texts, blocks, per_text=PER_TEXT, device=device,
                                      batch_size=(4 if big else 8), seed=seed)
         rows_text = np.array([t for t, _ in index])
@@ -234,12 +249,12 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
             res["latent"][str(b)] = latent_probe(X, lang_rows, fit_mask, seed)
             print(f"  block {b:>2}: English probe bacc={res['latent'][str(b)]['bacc']}  "
                   f"mean P(en) of non-English positions={non_en_mean(res['latent'][str(b)]['p_en']):.3f}")
-        save_fits(fits_path(name), fits)
+        save_fits(fits_path(name, flores_split), fits)
         del states
         res["chosen_block"] = choose_block(res["latent"], blocks)
         write_json(outp, res)
         print(f"  chosen block: {res['chosen_block']} of {n}")
-    fits = load_fits(fits_path(name))
+    fits = load_fits(fits_path(name, flores_split))
     cb = res["chosen_block"]
 
     def encoder(block, eraser):
@@ -323,7 +338,7 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
     # and the retrieval numbers that follow are a real test of whether the model needs it.
     if "all_depth_probe" not in res:
         fa = fit_all_blocks(student, texts, lang, sid, fit_ids, n, device, big, seed,
-                            fits_all_path(name))
+                            fits_all_path(name, flores_split))
         st, idx = block_states(student, texts, blocks, per_text=PER_TEXT, device=device,
                                batch_size=(4 if big else 8), seed=seed,
                                hook=[(b, rank1_torch_fn(*fa[b]["en"], device)) for b in range(n)])
@@ -387,7 +402,7 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
     # ---- stage E: the all-depth arm scored on Belebele and the full battery, against a control that
     # is matched site for site. n simultaneous edits do n times the damage, so a drop here means
     # nothing unless the same number of random rank-1 edits at the same blocks is subtracted off.
-    fa = load_fits(fits_all_path(name))
+    fa = load_fits(fits_all_path(name, flores_split))
 
     def all_encoder(eraser):
         return make_encode(student, device, batch_size=bs_enc,
@@ -821,6 +836,10 @@ def _selftest():
     assert abs(sad["excess"]["mean"] + 0.04) < 1e-9, sad["excess"]
     assert sad["en"]["n_lang"] == 2, "English itself must be held out of the population"
     assert all_depth_summary({"belebele": {NONE: _bel(0.0)}}) is None      # arm absent -> no row
+    # devtest keeps the legacy filename (finished runs stay cached); any other split gets its own,
+    # so the flag cannot hand back directions fitted on different text.
+    assert fits_path("m") == fits_path("m", "devtest") != fits_path("m", "dev")
+    assert fits_all_path("m") != fits_all_path("m", "dev") != fits_path("m", "dev")
     ic = identity_check({"te": {"ndcg@10": 0.700}}, {"te": {"ndcg@10": 0.702}})
     assert ic["verdict"] == "PASS" and ic["cells"] == 1
     assert identity_check({"te": {"ndcg@10": 0.7}}, None)["verdict"].startswith("no stored")
