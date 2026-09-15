@@ -16,17 +16,28 @@ LABELS = [("main", MAIN, "results/retrieval_bgem3"), ("bteacher", ARMS, "results
           ("brandom", ARMS, "results/retrieval_bgem3_brandom")]
 SCRIPT_M = MAIN + ["BGE-M3"]           # exp 4 also runs the teacher (BGE-M3) as its ceiling arm
 INTERP = [("english", MAIN), ("script", SCRIPT_M), ("segment", ARMS)]
+
+
 # Ask each experiment for its own plan size instead of hardcoding it here (numpy-only imports).
+def en_total(d):
+    """Belebele cells a FINISHED exp 3 part file should hold. Once the single-block arms are pruned
+    that is 3 -- the unedited baseline plus the two all-depth arms -- not the full plan, so a pruned
+    file stops reporting itself as 1/20 forever."""
+    return 3 if d.get("pruned_single_block") else EN_CELLS
 try:
     from byte_embed.interp_script import cond_cells
     SCRIPT_CELLS = cond_cells()
 except Exception:                                        # noqa: BLE001 — status must never fail
     SCRIPT_CELLS = 19
 try:
-    from byte_embed.interp_english import n_english_cells
+    from byte_embed.interp_english import english_done, n_english_cells
     EN_CELLS = n_english_cells()
 except Exception:                                        # noqa: BLE001
     EN_CELLS = 20
+
+    def english_done(d):                    # conservative fallback: never claim done blindly
+        bat = d.get("battery") or {}
+        return bool(bat and "all:en" in bat and "all:random" in bat and "reinstatement" in d)
 
 def load(p):
     try:
@@ -54,15 +65,14 @@ def interp_state(x, m):
     if not d:
         return "-"
     if x == "english":
-        bat = d.get("battery") or {}
-        if all(e in bat for e in ("none", "en", "random")):
+        if english_done(d):
             return "done"
         stage = "latent" if "latent" in d else "-"
         stage = "shift" if "shift" in d else stage
         nb = len(d.get("belebele") or {})
         ic = (d.get("identity_check") or {}).get("verdict", "")
         tag = " LOADER-WARN" if ic.startswith("WARN") else ""
-        return (f"{stage}, belebele {nb}/{EN_CELLS}{tag}" if nb else stage)
+        return (f"{stage}, belebele {nb}/{en_total(d)}{tag}" if nb else stage)
     if x == "script":
         conds = d.get("cond") or {}
         done = sum(len(v.get("langs") or []) for v in conds.values())
@@ -81,8 +91,12 @@ def interp_detail(x, m):
     if x == "english":
         bel = d.get("belebele") or {}
         cb = d.get("chosen_block")
-        depths = sorted({int(k.split(":")[0]) for k in bel if ":" in k})
+        # Only the NUMERIC prefixes are depths: the all-depth arms are keyed "all:en" / "all:random",
+        # which int() cannot parse -- this crashed status.sh outright once the first part file was
+        # pruned and the all-depth arms landed.
+        depths = sorted({int(k.split(":")[0]) for k in bel if ":" in k and k.split(":")[0].isdigit()})
         cols = sorted(k.split(":")[1] for k in bel if k.startswith(f"{cb}:"))
+        alld = sorted(k for k in bel if k.startswith("all:")) or ["none yet"]
         # erasure_check is the whole point of the stage-B2 rerun, so it has to be visible here:
         # without it a part file with a full battery reads as finished while the verification that
         # the intervention actually removes English -- and is not rebuilt downstream -- is absent.
@@ -99,8 +113,9 @@ def interp_detail(x, m):
         rs = d.get("reinstatement")
         eck += ("; reinstatement b%s %s" % (rs["block"], {b: v["erased"] for b, v in rs["at"].items()})
                 if rs else "; reinstatement MISSING")
-        return (f"block {cb} of {d.get('n_blocks')}; belebele cells {len(bel)}/{EN_CELLS} "
-                f"[{'none ' if 'none' in bel else ''}depths {depths}; columns at cb: {' '.join(cols)}]; "
+        return (f"block {cb} of {d.get('n_blocks')}; belebele cells {len(bel)}/{en_total(d)} "
+                f"[{'none ' if 'none' in bel else ''}depths {depths}; columns at cb: {' '.join(cols)}; "
+                f"all-depth: {' '.join(alld)}]; "
                 f"battery {sorted(d.get('battery') or {})}; {eck}")
     if x == "script":
         cond = d.get("cond") or {}

@@ -140,6 +140,24 @@ def single_block_arms(res):
     return (NONE,) if res.get(PRUNED) else (NONE, "en", "random")
 
 
+def english_done(res):
+    """Whether an exp 3 part file is complete. run_one's early exit and status.sh both read this,
+    so the two cannot drift -- status.sh used to call a file done as soon as the battery held the
+    single-block arms, which reported models with no all-depth arm at all as finished.
+
+    A pruned file is not required to carry `erasure_check`: it was dropped deliberately as the
+    degenerate single-block arm, and demanding it back would have stage B2 recompute the very thing
+    the prune removed."""
+    bat = res.get("battery") or {}
+    # Key PRESENCE throughout: a stage that recorded an empty dict is falsy, and `.get()` would read
+    # it as never having run -- the same trap that broke the FLORES split guard.
+    return bool(bat
+                and all(e in bat for e in single_block_arms(res))
+                and all(k in bat for k in (ALL_EN, ALL_RND))
+                and "reinstatement" in res
+                and (res.get(PRUNED) or "erasure_check" in res))
+
+
 def prune_single_block(models=None):
     """Remove every result produced by erasing at ONE block, and mark the part files.
 
@@ -278,9 +296,7 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
         if res:
             print(f"  [english] {name}: part file schema {res.get('schema')} != {SCHEMA} -> recomputing")
         res = {"schema": SCHEMA}
-    if (res.get("battery") and all(e in res["battery"] for e in single_block_arms(res))
-            and res.get("erasure_check") and res.get("reinstatement")
-            and all(k in res["battery"] for k in (ALL_EN, ALL_RND))):
+    if english_done(res):
         print(f"=== {ANALYSIS}/{name}: already done -> skip ===")
         return
     loaded = load_student(name, results, ckpt_dir, device)
@@ -374,7 +390,7 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
     # interp_common's selftest) and the output cosines show English moving while other languages do
     # not, but neither shows the concept is UNRECOVERABLE where it matters, nor whether later blocks
     # rebuild it from other features.
-    if "erasure_check" not in res:
+    if "erasure_check" not in res and not res.get(PRUNED):
         last = n - 1
         want = sorted({cb, last})
         chk = {}
@@ -957,6 +973,16 @@ def _selftest():
     # devtest keeps the legacy filename (finished runs stay cached); any other split gets its own,
     # so the flag cannot hand back directions fitted on different text.
     assert single_block_arms({}) == (NONE, "en", "random")
+    full = {"battery": {NONE: {}, "en": {}, "random": {}, ALL_EN: {}, ALL_RND: {}},
+            "erasure_check": {}, "reinstatement": {}}
+    assert english_done(full)
+    assert not english_done({**full, "battery": {k: v for k, v in full["battery"].items()
+                                                 if k != ALL_EN}}), "missing all-depth arm != done"
+    assert not english_done({k: v for k, v in full.items() if k != "reinstatement"})
+    # pruned: the single-block arms and erasure_check are gone ON PURPOSE and must not block `done`
+    pruned = {PRUNED: True, "battery": {NONE: {}, ALL_EN: {}, ALL_RND: {}}, "reinstatement": {}}
+    assert english_done(pruned), "a pruned file with the all-depth arm is finished"
+    assert not english_done({**pruned, "battery": {NONE: {}}}), "pruned but no all-depth arm"
     assert single_block_arms({PRUNED: True}) == (NONE,)     # pruned -> stage D stops at the baseline
     assert flores_splits("devtest") == ["devtest"] and flores_splits("dev+devtest") == ["dev", "devtest"]
     assert fits_path("m") == fits_path("m", "devtest") != fits_path("m", "dev")
