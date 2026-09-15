@@ -73,7 +73,8 @@ MIRACL_LANGS = ["en", "zh", "ar", "te", "bn", "sw", "yo"]
 QA_BENCH = ("amharicpr", "ciral", "afriqa")
 NONE = "none"
 ALL_EN = "all:en"                  # English erased at EVERY encoder block simultaneously
-ALL_RND = "all:random"             # the same count of random rank-1 edits at the same blocks                      # the unedited pass: baseline + loader identity check
+ALL_RND = "all:random"             # the same count of random rank-1 edits at the same blocks
+FIT_TAG = "sequential-per-arm"     # all_depth_fit marker; bumped when the fitting contract changes                      # the unedited pass: baseline + loader identity check
 
 
 def _split_suffix(kind, split):
@@ -158,7 +159,7 @@ def english_done(res):
                 # never applied, so it is not a finished result. Without this the early exit in
                 # run_one fires before purge_stale_all_depth is ever reached and the job returns in
                 # three seconds having done nothing -- which is exactly what happened.
-                and res.get("all_depth_fit") == "sequential"
+                and res.get("all_depth_fit") == FIT_TAG
                 and "reinstatement" in res
                 and (res.get(PRUNED) or "erasure_check" in res))
 
@@ -210,23 +211,31 @@ def fit_all_blocks(student, texts, lang, sid, fit_ids, n, device, big, seed, pat
     construction: block b+1 rebuilds the concept from whatever survived, and eraser b+1 -- fitted on
     that rebuilt distribution -- removes it again.
 
-    n passes instead of ceil(n/4), halved back by passing only the fit-half sentences, which is the
-    only text fit_erasers ever saw. Each pass records ONE block, so memory stays flat."""
+    The random control gets its OWN chain rather than riding the English one. It is installed at eval
+    time with random edits upstream, so fitting it under English-edited activations would leave its
+    whitener and mu describing a distribution that never arrives -- the same mis-specification, in the
+    one number that makes this arm interpretable. A mis-centred rank-1 edit adds a constant offset on
+    top of removing its direction, so it plausibly damages MORE than a correctly centred one, which
+    would inflate the control and drag the English excess toward zero.
+
+    2n passes over the fit-half sentences, which is the only text fit_erasers ever saw. Each pass
+    records ONE block, so memory stays flat."""
     if path.exists():
         return load_fits(path)
     keep = [i for i, s in enumerate(sid) if fit_ids[s]]
     ftexts, flang = [texts[i] for i in keep], lang[keep]
-    allfit = np.ones(len(ftexts), dtype=bool)          # every row here is a fitting row
-    fits, hooks = {}, []
-    for b in range(n):
-        st, idx = block_states(student, ftexts, [b], per_text=PER_TEXT, device=device,
-                               batch_size=(4 if big else 8), seed=seed, hook=hooks or None)
-        rows = np.array([t for t, _ in idx])
-        fits[b] = fit_erasers(st[b], flang[rows], ["en"], seed, block=b)
-        del st
-        hooks.append((b, rank1_torch_fn(*fits[b]["en"], device)))
-        if b % 4 == 0 or b == n - 1:
-            print(f"  [all-depth] eraser fitted for block {b} of {n} (with {b} upstream edit(s) live)")
+    fits = {b: {} for b in range(n)}
+    for arm in ("en", "random"):
+        hooks = []
+        for b in range(n):
+            st, idx = block_states(student, ftexts, [b], per_text=PER_TEXT, device=device,
+                                   batch_size=(4 if big else 8), seed=seed, hook=hooks or None)
+            rows = np.array([t for t, _ in idx])
+            e = fit_erasers(st[b], flang[rows], ["en"], seed, block=b)[arm]
+            del st
+            fits[b][arm] = e
+            hooks.append((b, rank1_torch_fn(*e, device)))
+        print(f"  [all-depth] {arm!r} chain fitted through all {n} blocks")
     save_fits(path, fits)
     return fits
 
@@ -237,7 +246,7 @@ def purge_stale_all_depth(res, outp):
     Those numbers are not merely imprecise: the intervention they describe was not applied, since the
     erasers below the first block were fitted for distributions that never arrived. Anything without
     `all_depth_fit == "sequential"` predates the fix and has to be recomputed."""
-    if res.get("all_depth_fit") == "sequential" or "all_depth_probe" not in res:
+    if res.get("all_depth_fit") == FIT_TAG or "all_depth_probe" not in res:
         return False
     res.pop("all_depth_probe", None)
     for k in (ALL_EN, ALL_RND):
@@ -249,7 +258,7 @@ def purge_stale_all_depth(res, outp):
 
 
 def fits_all_path(name, split="devtest"):
-    return part_path(ANALYSIS, name).with_suffix(_split_suffix("erasers-allseq", split))
+    return part_path(ANALYSIS, name).with_suffix(_split_suffix("erasers-allseq2", split))
 
 
 def latent_probe(X, lang_rows, fit_mask, seed=0):
@@ -489,7 +498,7 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
                      "erased": latent_probe(st[b], lang[rows], fit_ids[sid[rows]], seed)["bacc"]}
             for b in blocks}
         del st
-        res["all_depth_fit"] = "sequential"
+        res["all_depth_fit"] = FIT_TAG
         ad = res["all_depth_probe"]
         print(f"  [all-depth] English erased at ALL {n} blocks; probe bacc by depth "
               + "  ".join(f"b{b}: {ad[str(b)]['unedited']}->{ad[str(b)]['erased']}" for b in blocks))
@@ -1010,7 +1019,7 @@ def _selftest():
     # so the flag cannot hand back directions fitted on different text.
     assert single_block_arms({}) == (NONE, "en", "random")
     full = {"battery": {NONE: {}, "en": {}, "random": {}, ALL_EN: {}, ALL_RND: {}},
-            "erasure_check": {}, "reinstatement": {}, "all_depth_fit": "sequential"}
+            "erasure_check": {}, "reinstatement": {}, "all_depth_fit": FIT_TAG}
     assert english_done(full)
     assert not english_done({**full, "battery": {k: v for k, v in full["battery"].items()
                                                  if k != ALL_EN}}), "missing all-depth arm != done"
@@ -1018,9 +1027,10 @@ def _selftest():
     # pruned: the single-block arms and erasure_check are gone ON PURPOSE and must not block `done`
     pruned = {PRUNED: True, "battery": {NONE: {}, ALL_EN: {}, ALL_RND: {}}, "reinstatement": {}}
     assert not english_done(pruned), "no all_depth_fit marker -> stacked -> not finished"
-    pruned = {**pruned, "all_depth_fit": "sequential"}
+    pruned = {**pruned, "all_depth_fit": FIT_TAG}
     assert english_done(pruned), "a pruned file with a SEQUENTIAL all-depth arm is finished"
     assert not english_done({**pruned, "all_depth_fit": "stacked"}), "stacked arm must re-run"
+    assert not english_done({**pruned, "all_depth_fit": "sequential"}), "single-chain arm must re-run"
     assert not english_done({**full, "all_depth_fit": None}), "unmarked arm must re-run"
     assert not english_done({**pruned, "battery": {NONE: {}}}), "pruned but no all-depth arm"
     assert single_block_arms({PRUNED: True}) == (NONE,)     # pruned -> stage D stops at the baseline
