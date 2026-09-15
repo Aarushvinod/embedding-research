@@ -190,32 +190,61 @@ def prune_single_block(models=None):
     return out
 
 
-def fits_all_path(name, split="devtest"):
-    return part_path(ANALYSIS, name).with_suffix(_split_suffix("erasers-all", split))
+def fit_all_blocks(student, texts, lang, sid, fit_ids, n, device, big, seed, path):
+    """A rank-1 English eraser and a site-matched random control at EVERY block, fitted
+    SEQUENTIALLY with the upstream erasers already installed.
 
+    Fitting every block on unedited activations and then stacking the maps does not work, and the
+    failure is measurable rather than theoretical: on byte-small the block-2 eraser alone takes the
+    English probe to 0.500, but with erasers also live at blocks 0 and 1 the probe at block 2 reads
+    0.960. A LEACE map equalises the class means of the distribution it was fitted on; an upstream
+    edit changes what arrives, so `mu` and the direction are mis-specified and the map stops erasing.
 
-def fit_all_blocks(student, texts, lang, sid, fit_ids, n, device, big, seed, path, chunk=4):
-    """A rank-1 English eraser and a site-matched random control at EVERY encoder block.
+    Fitting block b while blocks 0..b-1 are already active makes each map valid for the activations
+    that actually reach it. The probe is then at chance right after every block's own edit by
+    construction: block b+1 rebuilds the concept from whatever survived, and eraser b+1 -- fitted on
+    that rebuilt distribution -- removes it again.
 
-    Fitted in chunks of blocks: holding n blocks x ~100k sampled positions x d floats at once is tens
-    of gigabytes on the larger backbones, and the erasers are independent per block, so chunking
-    changes no number. Only English and the random control are fitted here -- the nine per-language
-    columns belong to the chosen-block matrix -- which keeps it to two LEACE solves per block."""
+    n passes instead of ceil(n/4), halved back by passing only the fit-half sentences, which is the
+    only text fit_erasers ever saw. Each pass records ONE block, so memory stays flat."""
     if path.exists():
         return load_fits(path)
-    fits = {}
-    for s in range(0, n, chunk):
-        grp = list(range(s, min(s + chunk, n)))
-        st, idx = block_states(student, texts, grp, per_text=PER_TEXT, device=device,
-                               batch_size=(4 if big else 8), seed=seed)
+    keep = [i for i, s in enumerate(sid) if fit_ids[s]]
+    ftexts, flang = [texts[i] for i in keep], lang[keep]
+    allfit = np.ones(len(ftexts), dtype=bool)          # every row here is a fitting row
+    fits, hooks = {}, []
+    for b in range(n):
+        st, idx = block_states(student, ftexts, [b], per_text=PER_TEXT, device=device,
+                               batch_size=(4 if big else 8), seed=seed, hook=hooks or None)
         rows = np.array([t for t, _ in idx])
-        lr, fm = lang[rows], fit_ids[sid[rows]]
-        for b in grp:
-            fits[b] = fit_erasers(st[b][fm], lr[fm], ["en"], seed, block=b)
+        fits[b] = fit_erasers(st[b], flang[rows], ["en"], seed, block=b)
         del st
-        print(f"  [all-depth] erasers fitted for blocks {grp[0]}-{grp[-1]} of {n}")
+        hooks.append((b, rank1_torch_fn(*fits[b]["en"], device)))
+        if b % 4 == 0 or b == n - 1:
+            print(f"  [all-depth] eraser fitted for block {b} of {n} (with {b} upstream edit(s) live)")
     save_fits(path, fits)
     return fits
+
+
+def purge_stale_all_depth(res, outp):
+    """Drop all-depth results produced by the non-composing stacked fit.
+
+    Those numbers are not merely imprecise: the intervention they describe was not applied, since the
+    erasers below the first block were fitted for distributions that never arrived. Anything without
+    `all_depth_fit == "sequential"` predates the fix and has to be recomputed."""
+    if res.get("all_depth_fit") == "sequential" or "all_depth_probe" not in res:
+        return False
+    res.pop("all_depth_probe", None)
+    for k in (ALL_EN, ALL_RND):
+        (res.get("belebele") or {}).pop(k, None)
+        (res.get("battery") or {}).pop(k, None)
+    print("  [all-depth] discarding results from the stacked (non-composing) fit -> recomputing")
+    write_json(outp, res)
+    return True
+
+
+def fits_all_path(name, split="devtest"):
+    return part_path(ANALYSIS, name).with_suffix(_split_suffix("erasers-allseq", split))
 
 
 def latent_probe(X, lang_rows, fit_mask, seed=0):
@@ -442,6 +471,7 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
     # with no encoder left after it. This one holds at all n blocks at once. The probe is then read at
     # the four depths: if it sits at chance everywhere, English is unavailable throughout the encoder
     # and the retrieval numbers that follow are a real test of whether the model needs it.
+    purge_stale_all_depth(res, outp)
     if "all_depth_probe" not in res:
         fa = fit_all_blocks(student, texts, lang, sid, fit_ids, n, device, big, seed,
                             fits_all_path(name, flores_split))
@@ -454,6 +484,7 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
                      "erased": latent_probe(st[b], lang[rows], fit_ids[sid[rows]], seed)["bacc"]}
             for b in blocks}
         del st
+        res["all_depth_fit"] = "sequential"
         ad = res["all_depth_probe"]
         print(f"  [all-depth] English erased at ALL {n} blocks; probe bacc by depth "
               + "  ".join(f"b{b}: {ad[str(b)]['unedited']}->{ad[str(b)]['erased']}" for b in blocks))

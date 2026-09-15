@@ -108,7 +108,8 @@ def interp_detail(x, m):
         if d.get("pruned_single_block"):
             eck += "; single-block arms PRUNED"
         ad = d.get("all_depth_probe")
-        eck += ("; all-depth %s" % {b: v["erased"] for b, v in ad.items()} if ad
+        eck += ("; all-depth[%s] %s" % (d.get("all_depth_fit", "STACKED-stale"),
+                                        {b: v["erased"] for b, v in ad.items()}) if ad
                 else "; all-depth MISSING")
         rs = d.get("reinstatement")
         eck += ("; reinstatement b%s %s" % (rs["block"], {b: v["erased"] for b, v in rs["at"].items()})
