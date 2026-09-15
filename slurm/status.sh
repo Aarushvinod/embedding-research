@@ -14,7 +14,8 @@ MAIN = ["byte-small", "subword-small", "byte-base", "subword-base", "byte-large"
 ARMS = ["byte-small", "byte-base", "byte-large"]
 LABELS = [("main", MAIN, "results/retrieval_bgem3"), ("bteacher", ARMS, "results/retrieval_bgem3_bteacher"),
           ("brandom", ARMS, "results/retrieval_bgem3_brandom")]
-INTERP = [("english", MAIN), ("script", MAIN), ("segment", ARMS)]
+SCRIPT_M = MAIN + ["BGE-M3"]           # exp 4 also runs the teacher (BGE-M3) as its ceiling arm
+INTERP = [("english", MAIN), ("script", SCRIPT_M), ("segment", ARMS)]
 # Ask each experiment for its own plan size instead of hardcoding it here (numpy-only imports).
 try:
     from byte_embed.interp_script import cond_cells
@@ -118,7 +119,7 @@ print(f"  {'baseline':9}{'bge-m3':15}{'':>16}{'':>8}{base_fe:>11}   full-eval me
 
 print("\n== interp parts (results/interp_<x>_part_<model>.json) ==")
 print(f"  {'model':15}" + "".join(f"{x:>18}" for x, _ in INTERP))
-for m in MAIN:
+for m in SCRIPT_M:
     print(f"  {m:15}" + "".join(f"{(interp_state(x, m) if m in ms else ''):>18}" for x, ms in INTERP))
 merged_i = [x for x, _ in INTERP if os.path.exists(f"results/interp_{x}.json")]
 print(f"  merged: {merged_i or '-'}")

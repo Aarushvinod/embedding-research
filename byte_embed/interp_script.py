@@ -14,6 +14,12 @@ Measurements (te, bn, am, ar, zh; both architectures, all sizes):
      pypinyin) controls for the transliteration choice.
   3. Representation level: per-sentence cosine between native and romanized FLORES encodings, and
      each language's centroid distance to the Latin cluster, native vs romanized.
+  4. BGE-M3 itself runs every condition as the CEILING arm. Without it a student's "34% of native
+     retained" is uninterpretable, and -- more important -- there is no way to separate brittleness
+     the students CREATED from brittleness they INHERITED from the distillation target. It is also
+     a subword (XLM-R) model larger than subword-large, so it doubles as the strong-subword
+     reference point. It is a ceiling for THIS target, not an oracle: nothing here was trained on
+     romanized text, and a model that was would beat all of them.
 Statistics: paired bootstrap over queries for RR−NN and RN−NN; the difference-in-differences
 (byte's drop minus subword's drop) with its own bootstrap interval is the statistic for the
 trade-off. Only the DIFFERENCE is interpretable: romanization destroys information for everyone.
@@ -43,6 +49,9 @@ from byte_embed.interp_common import (CROSS_CELLS, LATIN, MAIN_MODELS, SCRIPT, f
 
 ANALYSIS = "script"
 SCHEMA = 3                         # bumped when the part-file contents change meaning
+TEACHER = "BGE-M3"                 # the frozen distillation target, run as the ceiling arm
+TEACHER_ID = "BAAI/bge-m3"
+SCRIPT_MODELS = MAIN_MODELS + [TEACHER]
 NN = "NN"                          # the native pass through THIS loader: baseline + identity check
 ROMAN_LANGS = ["te", "bn", "am", "ar", "zh"]
 ISO3 = {"te": "tel", "bn": "ben", "am": "amh", "ar": "ara", "zh": "zho"}
@@ -292,16 +301,53 @@ def cond_block(res, key):
                                         "qa_retrieval": {"amharicpr": {"per_lang": {}}}})
 
 
+class TeacherEncoder:
+    """BGE-M3 in the shape `make_encode` expects: `.max_chars` + `.encode(texts, batch_size, device)`.
+
+    Exp 4 never installs an activation hook -- it only ever needs an encoder -- so the teacher drops
+    into the same plumbing as a student with nothing else changed.
+
+    `encode` re-truncates to max_chars because ByteStudent.forward does (model.py:80-81) and the arms
+    have to be built identically. Note what that means for the romanized conditions, for students and
+    teacher alike: make_encode cuts the SOURCE to 512 characters and romanizes that span, then this
+    cut takes the first 512 characters of the RESULT -- and romanization expands text, so a romanized
+    passage covers less of the source span than its native counterpart. The byte-vs-subword contrast
+    is unaffected (both see the same 512 romanized characters), but part of the absolute native ->
+    romanized drop is a content effect rather than a script effect."""
+
+    def __init__(self, model_id=TEACHER_ID, device="cuda"):
+        from sentence_transformers import SentenceTransformer
+
+        from byte_embed.model import MAX_CHARS
+        self.max_chars = MAX_CHARS
+        self._m = SentenceTransformer(model_id, device=device)
+
+    def encode(self, texts, batch_size=128, device=None):     # noqa: ARG002 -- placed at construction
+        if self.max_chars:
+            texts = [t[:self.max_chars] for t in texts]
+        return self._m.encode(texts, batch_size=batch_size, normalize_embeddings=True,
+                              convert_to_numpy=True, show_progress_bar=False)
+
+
+def load_for(name, results, ckpt_dir, device):
+    """(encoder-object, model-meta), for a student or for the teacher. None when the student has no
+    checkpoint yet. The teacher comes straight from the hub, so it needs no entry in `results`."""
+    if name == TEACHER:
+        return TeacherEncoder(device=device), {"kind": "teacher", "backbone": TEACHER_ID}
+    loaded = load_student(name, results, ckpt_dir, device)
+    return None if loaded is None else (loaded[0], loaded[1])
+
+
 # ----------------------------------------------------------------------------------------------
 def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False):   # noqa: ARG001 (seed: reserved)
     outp = part_path(ANALYSIS, name)
     res = read_json(outp) or {}
     if res.get("schema") != SCHEMA:          # first-round part files (different keys) are discarded
         res = {"schema": SCHEMA}
-    loaded = load_student(name, results, ckpt_dir, device)
+    loaded = load_for(name, results, ckpt_dir, device)
     if loaded is None:
         return
-    student, bm, _ = loaded
+    student, bm = loaded
     bs = 32 if bm.get("kind") == "byte" else 128
     enc = make_encode(student, device, batch_size=bs)
     res.update(model=name, kind=bm.get("kind"), steps_run=bm.get("steps_run"))
@@ -528,7 +574,7 @@ def merge(results="results/retrieval_bgem3.json", n_boot=10000, seed=0):
     print("\n  (2) romanized − native, nDCG@10 (paired bootstrap over queries; RR = both sides romanized, "
           "RN = romanized queries vs native passages)")
     per = {}
-    for n in MAIN_MODELS:
+    for n in SCRIPT_MODELS:
         r = M.get(n)
         if not (r and r.get("cond")):
             continue
@@ -566,16 +612,98 @@ def merge(results="results/retrieval_bgem3.json", n_boot=10000, seed=0):
             rows = diff_in_diff(rb["cond"][key], bb, rs["cond"][key], bs_, n_boot, seed)
             cells = "  ".join(f"{c[0][:6]}-{c[1]}:{x['delta']:+.3f}{'*' if x['significant'] else ''}" for c, x in rows)
             print(f"  {size:6} {key:14}{cells}")
+    tr = M.get(TEACHER)
+    tb = baseline_for(tr, TEACHER, results)[0] if (tr and tr.get("cond")) else None
+    if tb:
+        print(f"\n      vs the TEACHER ({TEACHER}, the model every student was distilled from): the "
+              f"student's drop − the teacher's drop. Positive = the student keeps more of its own "
+              f"native score than its target kept of its own; ~0 = the brittleness was INHERITED "
+              f"rather than caused by the student's tokenization.")
+        for n in MAIN_MODELS:
+            rn = M.get(n)
+            if not (rn and rn.get("cond")):
+                continue
+            bn = baseline_for(rn, n, results)[0]
+            if not bn:
+                continue
+            for key in sorted(set(rn["cond"]) & set(tr["cond"])):
+                if key == NN:
+                    continue
+                rows = diff_in_diff(rn["cond"][key], bn, tr["cond"][key], tb, n_boot, seed)
+                if rows:
+                    cells = "  ".join(f"{c[0][:6]}-{c[1]}:{x['delta']:+.3f}{'*' if x['significant'] else ''}"
+                                      for c, x in rows)
+                    print(f"  {n:15}{key:14}{cells}")
     print("\n  (4) representation shift: cos(native, romanized) per sentence; centroid distance to the Latin "
           "cluster native → romanized")
-    for n in MAIN_MODELS:
+    for n in SCRIPT_MODELS:
         r = M.get(n)
         if not r or not r.get("shift"):
             continue
         print(f"  {n:15}" + "  ".join(f"{k}:{v['cos_mean']:.3f} L{v['dist_to_latin_native']:.2f}→{v['dist_to_latin_roman']:.2f}"
                                      for k, v in r["shift"].items() if v))
-    print("  reading: larger byte advantage on non-Latin cells + a larger byte drop under RR/RN -> better for "
+    report_ranking(M)
+    print("\n  reading: larger byte advantage on non-Latin cells + a larger byte drop under RR/RN -> better for "
           "native scripts, paid for on romanized input; no differential drop -> the advantage comes free.")
+
+
+def condition_means(M, scheme="uroman", conds=CONDITIONS):
+    """(shared cells, per-model rows) for one romanization scheme: mean nDCG@10 under NN / RR / RN,
+    and the fraction of each model's OWN native score retained, averaged per cell.
+
+    Both are reported because they answer different questions and do disagree. The absolute mean
+    says who is best on that input; the retained fraction says who degrades least. A model can top
+    the absolute table on the strength of its native representation while shedding more of it than
+    a weaker rival -- ranking on either one alone invites the opposite conclusion from the other.
+
+    Cells are intersected across every model AND every condition, so no column is averaged over a
+    different set of languages than the one beside it: a (scheme, language) that a romanizer refused
+    for one model drops out of the table for all of them rather than quietly shifting one mean."""
+    from byte_embed.stats import iter_cells
+    keys = [NN] + [f"{scheme}:{c}" for c in conds]
+    got = {}
+    for n in SCRIPT_MODELS:
+        blocks = [((M.get(n) or {}).get("cond") or {}).get(k) for k in keys]
+        if any(b is None for b in blocks):
+            continue
+        got[n] = {k: {c: m["ndcg@10"] for c, m in iter_cells(b)
+                      if m and m.get("ndcg@10") is not None} for k, b in zip(keys, blocks)}
+    if not got:
+        return [], []
+    shared = sorted(set.intersection(*(set(cells[k]) for cells in got.values() for k in keys)))
+    if not shared:
+        return [], []
+    rows = []
+    for n, cells in got.items():
+        nat = np.array([cells[NN][c] for c in shared], dtype=float)
+        safe = np.where(nat > 0, nat, np.nan)
+        row = {"model": n, "NN": float(nat.mean())}
+        for c_ in conds:
+            v = np.array([cells[f"{scheme}:{c_}"][c] for c in shared], dtype=float)
+            row[c_] = float(v.mean())
+            row[c_ + "_ret"] = float(np.nanmean(v / safe))
+        row["mean_ret"] = float(np.mean([row[c_ + "_ret"] for c_ in conds]))
+        rows.append(row)
+    return shared, rows
+
+
+def report_ranking(M):
+    print("\n  (5) OVERALL RANKING -- every model, averaged over the cells all of them scored.")
+    print("      absolute = mean nDCG@10 on that input (who is best); retained = per-cell "
+          "romanized/native, averaged (who degrades least). Different questions -- both are ranked.")
+    for scheme in ("uroman", "buckwalter", "pinyin"):
+        shared, rows = condition_means(M, scheme)
+        if not rows:
+            continue
+        langs = ", ".join(sorted({c[1] for c in shared}))
+        print(f"\n    {scheme}  ({len(shared)} cells shared by {len(rows)} models: {langs})")
+        print(f"    {'':4}{'model':15}{'NN':>8}{'RR':>8}{'RN':>8}   {'RR ret':>8}{'RN ret':>8}{'mean ret':>10}")
+        for i, r in enumerate(sorted(rows, key=lambda x: -x["mean_ret"]), 1):
+            print(f"    {i:<4}{r['model']:15}{r['NN']:>8.3f}{r['RR']:>8.3f}{r['RN']:>8.3f}   "
+                  f"{r['RR_ret']:>7.1%}{r['RN_ret']:>8.1%}{r['mean_ret']:>10.1%}")
+        for label, key in (("native (NN)", "NN"), ("absolute RR", "RR"), ("absolute RN", "RN")):
+            print(f"    by {label:14}" + "  >  ".join(x["model"]
+                                                     for x in sorted(rows, key=lambda x: -x[key])))
 
 
 def _selftest():
@@ -644,7 +772,23 @@ def _selftest():
     assert abs(rr["contrast"] - 0.1) < 1e-9, rr
     ra = native_advantage_by_script(cross, zero, n_boot=200, benchmark=None)
     assert ra["n_latin"] == 5 and ra["n_non"] == 5, ra      # the 5 cross-lingual cells still held out
-    print("selftest OK: Buckwalter, romanization guard, cached romanizer, diff-in-diff, script contrast")
+    def _blk(v):
+        return {"belebele": {"te": {"ndcg@10": v}, "ar": {"ndcg@10": v}},
+                "miracl": {"per_lang": {}}, "qa_retrieval": {"amharicpr": {"per_lang": {}}}}
+    Mx = {"byte-small": {"cond": {NN: _blk(0.80), "uroman:RR": _blk(0.40), "uroman:RN": _blk(0.20)}},
+          TEACHER: {"cond": {NN: _blk(0.90), "uroman:RR": _blk(0.27), "uroman:RN": _blk(0.09)}}}
+    sh, rws = condition_means(Mx)
+    assert len(sh) == 2 and len(rws) == 2, (sh, rws)
+    by = {r["model"]: r for r in rws}
+    assert abs(by["byte-small"]["RR_ret"] - 0.50) < 1e-9 and abs(by[TEACHER]["RR_ret"] - 0.30) < 1e-9
+    # The teacher wins on absolutes and loses on retention: exactly the disagreement the table exists
+    # to surface, and the reason ranking on a single number would invert the conclusion.
+    assert by[TEACHER]["NN"] > by["byte-small"]["NN"] and by[TEACHER]["RR"] < by["byte-small"]["RR"]
+    assert max(rws, key=lambda r: r["mean_ret"])["model"] == "byte-small"
+    Mx["subword-base"] = {"cond": {NN: _blk(0.7), "uroman:RR": _blk(0.3)}}      # missing uroman:RN
+    assert len(condition_means(Mx)[1]) == 2, "a model missing a condition must drop out entirely"
+    print("selftest OK: Buckwalter, romanization guard, cached romanizer, diff-in-diff, script "
+          "contrast, ranking")
 
 
 def main():
@@ -664,7 +808,8 @@ def main():
         return _selftest()
     if a.merge:
         return merge(a.results, a.n_boot, a.seed)
-    names = [a.only] if a.only else [n for n in MAIN_MODELS if n in models_in(a.results)[0]]
+    names = [a.only] if a.only else (
+        [n for n in MAIN_MODELS if n in models_in(a.results)[0]] + [TEACHER])
     for n in names:
         run_one(n, a.results, a.ckpt_dir, a.device, a.seed, a.skip_battery)
 
