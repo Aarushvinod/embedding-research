@@ -154,6 +154,11 @@ def english_done(res):
     return bool(bat
                 and all(e in bat for e in single_block_arms(res))
                 and all(k in bat for k in (ALL_EN, ALL_RND))
+                # An all-depth arm built from STACKED erasers describes an intervention that was
+                # never applied, so it is not a finished result. Without this the early exit in
+                # run_one fires before purge_stale_all_depth is ever reached and the job returns in
+                # three seconds having done nothing -- which is exactly what happened.
+                and res.get("all_depth_fit") == "sequential"
                 and "reinstatement" in res
                 and (res.get(PRUNED) or "erasure_check" in res))
 
@@ -1005,14 +1010,18 @@ def _selftest():
     # so the flag cannot hand back directions fitted on different text.
     assert single_block_arms({}) == (NONE, "en", "random")
     full = {"battery": {NONE: {}, "en": {}, "random": {}, ALL_EN: {}, ALL_RND: {}},
-            "erasure_check": {}, "reinstatement": {}}
+            "erasure_check": {}, "reinstatement": {}, "all_depth_fit": "sequential"}
     assert english_done(full)
     assert not english_done({**full, "battery": {k: v for k, v in full["battery"].items()
                                                  if k != ALL_EN}}), "missing all-depth arm != done"
     assert not english_done({k: v for k, v in full.items() if k != "reinstatement"})
     # pruned: the single-block arms and erasure_check are gone ON PURPOSE and must not block `done`
     pruned = {PRUNED: True, "battery": {NONE: {}, ALL_EN: {}, ALL_RND: {}}, "reinstatement": {}}
-    assert english_done(pruned), "a pruned file with the all-depth arm is finished"
+    assert not english_done(pruned), "no all_depth_fit marker -> stacked -> not finished"
+    pruned = {**pruned, "all_depth_fit": "sequential"}
+    assert english_done(pruned), "a pruned file with a SEQUENTIAL all-depth arm is finished"
+    assert not english_done({**pruned, "all_depth_fit": "stacked"}), "stacked arm must re-run"
+    assert not english_done({**full, "all_depth_fit": None}), "unmarked arm must re-run"
     assert not english_done({**pruned, "battery": {NONE: {}}}), "pruned but no all-depth arm"
     assert single_block_arms({PRUNED: True}) == (NONE,)     # pruned -> stage D stops at the baseline
     assert flores_splits("devtest") == ["devtest"] and flores_splits("dev+devtest") == ["dev", "devtest"]
