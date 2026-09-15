@@ -531,6 +531,15 @@ def report_transfer(M, metric="auc"):
         # rest on them (0.5 = no transfer), not on a ratio with a selected denominator.
         print(f"  {'':14}raw {metric:<9} same-script {raw(same_p):.3f}   cross-script {raw(cross_p):.3f}"
               f"   within-language {np.mean(list(within.values())):.3f}   (0.5 = chance)")
+        # RAW per language. The ratio matrix divides by within[B], so a language whose OWN probe is
+        # weak shows inflated ratios into it and deflated ratios out of it — indistinguishable from
+        # "this language is the hub" unless the raw numbers are shown.
+        print(f"  {'':14}{'lang':>5}{'within':>8}{'into':>8}{'out of':>8}{'into-out':>10}"
+              f"   (raw {metric}; `within` low => its ratios are inflated)")
+        for l in langs:
+            into = np.mean([A[a][l] for a in langs if a != l])
+            out = np.mean([A[l][b] for b in langs if b != l])
+            print(f"  {'':14}{l:>5}{within[l]:>8.3f}{into:>8.3f}{out:>8.3f}{into - out:>+10.3f}")
 
 
 def _selftest():
