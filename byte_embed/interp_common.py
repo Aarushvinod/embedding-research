@@ -223,6 +223,26 @@ def record_blocks(student, blocks):
             h.remove()
 
 
+def hook_pairs(hook):
+    """Normalise `hook` to a list of (block, fn): accepts None, one (block, fn), or a list of them."""
+    if not hook:
+        return []
+    return [hook] if isinstance(hook[0], (int, np.integer)) else list(hook)
+
+
+@contextmanager
+def block_hooks(student, hook):
+    """Install one activation edit, or SEVERAL at once.
+
+    Several is what an all-depth erasure needs: editing a single block leaves every block above it
+    free to reconstruct the concept from features the edit did not touch, so an intervention meant to
+    show a concept is load-bearing has to hold at every block simultaneously."""
+    with contextlib.ExitStack() as stack:
+        for b, fn in hook_pairs(hook):
+            stack.enter_context(block_hook(student, b, fn))
+        yield
+
+
 def make_encode(student, device="cuda", transform=None, batch_size=128, hook=None):
     """encode_fn: list[str] -> np.ndarray [n, d] (L2-normalized), with an optional TEXT transform
     (e.g. romanization) applied first and an optional activation edit `hook=(block, fn)` installed
@@ -238,11 +258,8 @@ def make_encode(student, device="cuda", transform=None, batch_size=128, hook=Non
         if transform is not None:
             mc = getattr(student, "max_chars", None)
             xs = [transform(x[:mc] if mc else x) for x in xs]
-        if hook is None:
+        with block_hooks(student, hook):
             E = student.encode(xs, batch_size=batch_size, device=device)
-        else:
-            with block_hook(student, hook[0], hook[1]):
-                E = student.encode(xs, batch_size=batch_size, device=device)
         return l2norm(np.asarray(E, dtype=np.float32))
     return enc
 
@@ -316,7 +333,8 @@ def layer_positions(student, texts, sel, device="cuda", layers=None, batch_size=
 def block_states(student, texts, blocks, per_text=10, device="cuda", batch_size=8, seed=0, hook=None):
     """Randomly sampled per-position output states of the requested encoder BLOCKS (the hook
     points `block_hook` edits) -> ({block: float32 [N, d]}, index [(text_idx, pos)]). `per_text`
-    `hook=(block, fn)` installs an activation edit for these passes, so the SAME positions can be
+    `hook=(block, fn)`, or a list of such pairs, installs activation edits for these passes, so the
+    SAME positions can be
     re-read with the intervention active — which is how the erasure is verified at the block it is
     applied to and at the blocks after it.
     positions per text, drawn uniformly from the UNPADDED sequence, </s> included: `block_hook`
@@ -331,7 +349,7 @@ def block_states(student, texts, blocks, per_text=10, device="cuda", batch_size=
         raise ValueError("block_states: no texts")
     rng = np.random.default_rng(seed)
     store, index = {b: [] for b in blocks}, []
-    edit = block_hook(student, hook[0], hook[1]) if hook else contextlib.nullcontext()
+    edit = block_hooks(student, hook)
     with torch.inference_mode(), edit, record_blocks(student, blocks) as rec:
         for i in range(0, len(texts), batch_size):
             bt = texts[i:i + batch_size]
@@ -525,8 +543,38 @@ def _selftest():
     assert byte_offsets("aé字") == ([0, 1, 3], 6)
     texts, lang, sid = flores_flat({"en": ["a", "b"], "te": ["c", "d"]})
     assert texts == ["a", "b", "c", "d"] and lang.tolist() == ["en", "en", "te", "te"] and sid.tolist() == [0, 1, 0, 1]
+    # multi-site hooks: every requested block must be edited, and all handles removed on exit.
+    assert hook_pairs(None) == [] and len(hook_pairs((3, id))) == 1 and len(hook_pairs([(0, id), (2, id)])) == 2
+
+    class FakeBlock:
+        def __init__(self):
+            self.fns = []
+
+        def register_forward_hook(self, fn):
+            self.fns.append(fn)
+            h = type("H", (), {"remove": lambda _s, _b=self, _f=fn: _b.fns.remove(_f)})()
+            return h
+    blocks = [FakeBlock() for _ in range(3)]
+    fake = type("S", (), {})()
+    fake.enc = type("E", (), {})()
+    fake.enc.encoder = type("Enc", (), {})()
+    fake.enc.encoder.block = blocks
+    with block_hooks(fake, [(0, id), (2, id)]):
+        assert [len(b.fns) for b in blocks] == [1, 0, 1], [len(b.fns) for b in blocks]
+    assert [len(b.fns) for b in blocks] == [0, 0, 0], "hooks must be removed on exit"
+    with block_hooks(fake, (1, id)):
+        assert [len(b.fns) for b in blocks] == [0, 1, 0]
+    with block_hooks(fake, None):
+        assert [len(b.fns) for b in blocks] == [0, 0, 0]
+    # the edit really reaches the tensor, and survives the T5Block tuple shape
+    got = []
+    with block_hooks(fake, [(0, lambda x: x * 2)]):
+        got.append(blocks[0].fns[0](None, None, (10,))[0])
+        got.append(blocks[0].fns[0](None, None, 10))
+    assert got == [20, 20], got
     print("selftest OK: rank-1 LEACE erases a binary concept to chance and equals the general closed "
-          "form; random direction is inert; depth blocks, byte offsets, flores_flat verified")
+          "form; random direction is inert; depth blocks, byte offsets, flores_flat, multi-site "
+          "hooks verified")
 
 
 def main():

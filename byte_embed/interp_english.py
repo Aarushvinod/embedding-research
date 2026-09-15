@@ -65,7 +65,9 @@ SCHEMA = 1                         # bumped when the part-file contents change m
 PER_TEXT = 10                      # sampled positions per FLORES sentence per depth
 MIRACL_LANGS = ["en", "zh", "ar", "te", "bn", "sw", "yo"]
 QA_BENCH = ("amharicpr", "ciral", "afriqa")
-NONE = "none"                      # the unedited pass: baseline + loader identity check
+NONE = "none"
+ALL_EN = "all:en"                  # English erased at EVERY encoder block simultaneously
+ALL_RND = "all:random"             # the same count of random rank-1 edits at the same blocks                      # the unedited pass: baseline + loader identity check
 
 
 def fits_path(name):
@@ -88,6 +90,34 @@ def fit_erasers(X, lang_rows, langs, seed=0, block=0):
     rng = np.random.default_rng([seed, int(block)])
     out["random"] = rank1_eraser(W, Wp, mu, rng.standard_normal(X.shape[1]))
     return out
+
+
+def fits_all_path(name):
+    return Path(f"results/interp_{ANALYSIS}_fitsall_{name}.npz")
+
+
+def fit_all_blocks(student, texts, lang, sid, fit_ids, n, device, big, seed, path, chunk=4):
+    """A rank-1 English eraser and a site-matched random control at EVERY encoder block.
+
+    Fitted in chunks of blocks: holding n blocks x ~100k sampled positions x d floats at once is tens
+    of gigabytes on the larger backbones, and the erasers are independent per block, so chunking
+    changes no number. Only English and the random control are fitted here -- the nine per-language
+    columns belong to the chosen-block matrix -- which keeps it to two LEACE solves per block."""
+    if path.exists():
+        return load_fits(path)
+    fits = {}
+    for s in range(0, n, chunk):
+        grp = list(range(s, min(s + chunk, n)))
+        st, idx = block_states(student, texts, grp, per_text=PER_TEXT, device=device,
+                               batch_size=(4 if big else 8), seed=seed)
+        rows = np.array([t for t, _ in idx])
+        lr, fm = lang[rows], fit_ids[sid[rows]]
+        for b in grp:
+            fits[b] = fit_erasers(st[b][fm], lr[fm], ["en"], seed, block=b)
+        del st
+        print(f"  [all-depth] erasers fitted for blocks {grp[0]}-{grp[-1]} of {n}")
+    save_fits(path, fits)
+    return fits
 
 
 def latent_probe(X, lang_rows, fit_mask, seed=0):
@@ -149,8 +179,15 @@ def belebele_plan(blocks, cb, langs):
 
 
 def n_belebele_cells(n_langs=10, n_depths=4):
-    """How many Belebele cells a complete run writes (status.sh reads this)."""
+    """Cells the chosen-block PLAN writes; belebele_plan is asserted against this, so they cannot
+    drift apart."""
     return 1 + 2 + (n_langs - 1) + 2 * (n_depths - 1)
+
+
+def n_english_cells(n_langs=10, n_depths=4):
+    """Every Belebele cell a finished run holds: the chosen-block plan plus the two all-depth arms,
+    which stage E writes rather than the plan. status.sh reads this one."""
+    return n_belebele_cells(n_langs, n_depths) + 2
 
 
 # ----------------------------------------------------------------------------------------------
@@ -162,7 +199,8 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
             print(f"  [english] {name}: part file schema {res.get('schema')} != {SCHEMA} -> recomputing")
         res = {"schema": SCHEMA}
     if (res.get("battery") and all(e in res["battery"] for e in (NONE, "en", "random"))
-            and res.get("erasure_check") and res.get("reinstatement")):
+            and res.get("erasure_check") and res.get("reinstatement")
+            and all(k in res["battery"] for k in (ALL_EN, ALL_RND))):
         print(f"=== {ANALYSIS}/{name}: already done -> skip ===")
         return
     loaded = load_student(name, results, ckpt_dir, device)
@@ -278,6 +316,27 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
               + "  ".join(f"b{b}: {at[str(b)]['unedited']}->{at[str(b)]['erased']}" for b in blocks)
               + "   (stays ~0.5 = gone for good; climbs back = later blocks rebuild it)")
         write_json(outp, res)
+    # ---- stage B4: the ALL-DEPTH erasure, and proof that it leaves nothing to rebuild from.
+    # `choose_block` selects the last block in every model, so every single-site arm above is an edit
+    # with no encoder left after it. This one holds at all n blocks at once. The probe is then read at
+    # the four depths: if it sits at chance everywhere, English is unavailable throughout the encoder
+    # and the retrieval numbers that follow are a real test of whether the model needs it.
+    if "all_depth_probe" not in res:
+        fa = fit_all_blocks(student, texts, lang, sid, fit_ids, n, device, big, seed,
+                            fits_all_path(name))
+        st, idx = block_states(student, texts, blocks, per_text=PER_TEXT, device=device,
+                               batch_size=(4 if big else 8), seed=seed,
+                               hook=[(b, rank1_torch_fn(*fa[b]["en"], device)) for b in range(n)])
+        rows = np.array([t for t, _ in idx])
+        res["all_depth_probe"] = {
+            str(b): {"unedited": (res["latent"].get(str(b)) or {}).get("bacc"),
+                     "erased": latent_probe(st[b], lang[rows], fit_ids[sid[rows]], seed)["bacc"]}
+            for b in blocks}
+        del st
+        ad = res["all_depth_probe"]
+        print(f"  [all-depth] English erased at ALL {n} blocks; probe bacc by depth "
+              + "  ".join(f"b{b}: {ad[str(b)]['unedited']}->{ad[str(b)]['erased']}" for b in blocks))
+        write_json(outp, res)
     if skip_battery:
         return
 
@@ -323,6 +382,36 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
                              "miracl": eval_miracl_langs(enc, MIRACL_LANGS, n_queries=250,
                                                          distractors=20000, cache_dir=ckpt_dir),
                              "qa_retrieval": qa}
+        write_json(outp, res)
+
+    # ---- stage E: the all-depth arm scored on Belebele and the full battery, against a control that
+    # is matched site for site. n simultaneous edits do n times the damage, so a drop here means
+    # nothing unless the same number of random rank-1 edits at the same blocks is subtracted off.
+    fa = load_fits(fits_all_path(name))
+
+    def all_encoder(eraser):
+        return make_encode(student, device, batch_size=bs_enc,
+                           hook=[(b, rank1_torch_fn(*fa[b][eraser], device)) for b in range(n)])
+    for key, er in ((ALL_EN, "en"), (ALL_RND, "random")):
+        if key not in res["belebele"]:
+            print(f"=== {name}: Belebele, {er!r} erased at ALL {n} blocks ===")
+            cells = eval_battery(all_encoder(er), STUDY_LANGS)["belebele"]
+            if not any(cells.values()):
+                raise SystemExit(f"[english] every Belebele language returned None for {key}.")
+            res["belebele"][key] = cells
+            write_json(outp, res)
+        if key in res["battery"]:
+            continue
+        print(f"=== {name}: full battery, {er!r} erased at ALL {n} blocks ===")
+        enc = all_encoder(er)
+        qa = eval_qa_retrieval(enc, benchmarks=QA_BENCH, n_queries=250, distractors=20000,
+                               cache_dir=ckpt_dir)
+        if not any((bd or {}).get("per_lang") for bd in qa.values()):
+            raise SystemExit(f"[english] every QA benchmark returned None for {key}.")
+        res["battery"][key] = {"belebele": res["belebele"][key],
+                               "miracl": eval_miracl_langs(enc, MIRACL_LANGS, n_queries=250,
+                                                           distractors=20000, cache_dir=ckpt_dir),
+                               "qa_retrieval": qa}
         write_json(outp, res)
     print(f"  saved -> {outp}")
 
@@ -506,6 +595,38 @@ def report_hubness(results="results/retrieval_bgem3.json"):
               "one; the P@1 gap is weak by construction and should only corroborate.")
 
 
+def all_depth_summary(r, n_boot=2000, seed=0):
+    """The all-depth arm on Belebele, over the non-English languages, against the UNEDITED pass:
+      en      effect of erasing English at every block
+      random  effect of the same number of random rank-1 edits at the same blocks   <- matched null
+      excess  paired (en - random) per query                                        <- the headline
+    Only `excess` is interpretable: n simultaneous edits damage the representation whatever direction
+    they point in, and `random` is what measures that damage."""
+    if NONE not in r.get("belebele", {}) or ALL_EN not in r.get("belebele", {}):
+        return None
+    en_v, rnd_v, exc_v = [], [], []
+    for l, c in r["belebele"][NONE].items():
+        if l == "en" or not c:
+            continue
+        base = _pq(r, NONE, l)
+        if not base:
+            continue
+        keys = sorted(base)
+
+        def dv(key):
+            got = _pq(r, key, l)
+            return np.array([got[k] - base[k] for k in keys if k in got]) if got else None
+        d_en, d_rnd = dv(ALL_EN), dv(ALL_RND)
+        if d_en is not None and len(d_en):
+            en_v.append(d_en)
+        if d_rnd is not None and len(d_rnd):
+            rnd_v.append(d_rnd)
+        if d_en is not None and d_rnd is not None and len(d_en) == len(d_rnd):
+            exc_v.append(d_en - d_rnd)
+    return {"en": _boot(en_v, n_boot, seed), "random": _boot(rnd_v, n_boot, seed),
+            "excess": _boot(exc_v, n_boot, seed)}
+
+
 def _f(x, w=9, p=4):
     if isinstance(x, dict):
         x = x.get("mean")
@@ -541,6 +662,19 @@ def merge(results="results/retrieval_bgem3.json", n_boot=2000, seed=0):
                   f"{ec['block']}: {ai['unedited']} -> {ai['erased']}; carried to the last block "
                   f"{ec['last_block']}: {al['unedited']} -> {al['erased']}  (0.5 = English not "
                   f"linearly recoverable; a high value at the last block means later blocks rebuild it)")
+        ad = r.get("all_depth_probe")
+        if ad:
+            blks = sorted(ad, key=int)
+            print(f"    ALL-DEPTH erasure ({r.get('n_blocks')} blocks at once): probe bacc "
+                  + "  ".join(f"b{b}: {ad[b]['unedited']}->{ad[b]['erased']}" for b in blks)
+                  + "   (chance everywhere = English is unavailable throughout the encoder)")
+        s_ad = all_depth_summary(r, n_boot, seed)
+        if s_ad and s_ad.get("excess"):
+            print(f"      Belebele, non-English languages: English erased everywhere "
+                  f"{_f(s_ad['en'])}  {_ci(s_ad['en'])};  site-matched random "
+                  f"{_f(s_ad['random'])}  {_ci(s_ad['random'])}")
+            print(f"      -> EXCESS over the matched control {_f(s_ad['excess'])}  "
+                  f"{_ci(s_ad['excess'])}   (the only interpretable number here)")
         rs = r.get("reinstatement")
         if rs:
             at = rs["at"]
@@ -675,6 +809,18 @@ def _selftest():
     # the eraser must make English unrecoverable on the data it was fitted on
     Xe = apply_rank1(X, *fits["en"])
     assert latent_probe(Xe, lang_rows, fit_mask)["bacc"] < 0.7 < latent_probe(X, lang_rows, fit_mask)["bacc"]
+    # all_depth_summary: only `excess` is interpretable, so it must subtract the matched control.
+    # English costs 0.10 here and the site-matched random control 0.06 -> excess must be -0.04, NOT
+    # the -0.10 a report that ignored the control would print.
+    def _bel(off):
+        return {l: {"ndcg@10": 0.8 + off, "per_query": {f"q{i}": 0.8 + off for i in range(40)}}
+                for l in ("te", "bn", "en")}
+    rad = {"belebele": {NONE: _bel(0.0), ALL_EN: _bel(-0.10), ALL_RND: _bel(-0.06)}}
+    sad = all_depth_summary(rad, n_boot=200)
+    assert abs(sad["en"]["mean"] + 0.10) < 1e-9 and abs(sad["random"]["mean"] + 0.06) < 1e-9, sad
+    assert abs(sad["excess"]["mean"] + 0.04) < 1e-9, sad["excess"]
+    assert sad["en"]["n_lang"] == 2, "English itself must be held out of the population"
+    assert all_depth_summary({"belebele": {NONE: _bel(0.0)}}) is None      # arm absent -> no row
     ic = identity_check({"te": {"ndcg@10": 0.700}}, {"te": {"ndcg@10": 0.702}})
     assert ic["verdict"] == "PASS" and ic["cells"] == 1
     assert identity_check({"te": {"ndcg@10": 0.7}}, None)["verdict"].startswith("no stored")

@@ -23,10 +23,10 @@ try:
 except Exception:                                        # noqa: BLE001 — status must never fail
     SCRIPT_CELLS = 19
 try:
-    from byte_embed.interp_english import n_belebele_cells
-    EN_CELLS = n_belebele_cells()
+    from byte_embed.interp_english import n_english_cells
+    EN_CELLS = n_english_cells()
 except Exception:                                        # noqa: BLE001
-    EN_CELLS = 18
+    EN_CELLS = 20
 
 def load(p):
     try:
@@ -91,6 +91,9 @@ def interp_detail(x, m):
                + (f" -> last b{ec['last_block']} {ec['at_last_block']}"
                   if ec["last_block"] != ec["block"] else " (== last block: says nothing about rebuild)")
                if ec else "erasure_check MISSING")
+        ad = d.get("all_depth_probe")
+        eck += ("; all-depth %s" % {b: v["erased"] for b, v in ad.items()} if ad
+                else "; all-depth MISSING")
         rs = d.get("reinstatement")
         eck += ("; reinstatement b%s %s" % (rs["block"], {b: v["erased"] for b, v in rs["at"].items()})
                 if rs else "; reinstatement MISSING")
