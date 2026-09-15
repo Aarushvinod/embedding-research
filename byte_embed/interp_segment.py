@@ -61,6 +61,7 @@ LABELS = ("tok_end", "interior", "word_end", "random")
 BYTE_MODELS = ["byte-small", "byte-base", "byte-large"]
 NO_SPACES = {"zh"}
 SURFACE_K = 4                      # bytes of context on each side for the surface baseline
+TRANSFER_V = 2                     # transfer-stage contract; bump to recompute JUST that stage
 
 
 # ----------------------------------------------------------------------------------------------
@@ -312,7 +313,7 @@ def run_one(name, results, ckpt_dir, device, langs=None, n_sent=None, seed=0):
     # Recompute when the LANGUAGE SET or the sample size changed: the documented fast path
     # (`--langs en,zh --n-sent 50`) would otherwise pin a 2x2 matrix computed from 50 sentences that
     # the later full run never revisits, while status.sh and the figures present it as the 10x10.
-    want = {"langs": sorted(res["langs"]), "n_sent": int(n_sent)}
+    want = {"langs": sorted(res["langs"]), "n_sent": int(n_sent), "tv": TRANSFER_V}
     have = {k: (res.get("transfer") or {}).get(k) for k in want}
     if len(res["langs"]) >= 2 and have != want:
         if res.get("transfer"):
@@ -322,6 +323,58 @@ def run_one(name, results, ckpt_dir, device, langs=None, n_sent=None, seed=0):
             res["transfer"] = {**t, **want}
             write_json(outp, res)
     print(f"  saved -> {outp}")
+
+
+def _fit_auc(Xtr, ytr, Xte, yte, seed=0):
+    """AUC of a linear probe's decision function; None when a split is single-class."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.metrics import roc_auc_score
+    if len(set(np.asarray(ytr).tolist())) < 2 or len(set(np.asarray(yte).tolist())) < 2:
+        return None
+    clf = LogisticRegression(max_iter=2000, C=10.0, random_state=seed).fit(Xtr, ytr)
+    return float(roc_auc_score(yte, clf.decision_function(Xte)))
+
+
+def _draw(d, n, seed, tag):
+    rng = np.random.default_rng([seed, zlib.crc32(tag.encode("utf-8"))])
+    ii = rng.choice(len(d["ytr"]), size=min(n, len(d["ytr"])), replace=False)
+    return d["Xtr"][ii], d["ytr"][ii]
+
+
+def uniqueness(data, seed=0):
+    """Per language: how much of its boundary structure a policy trained on the OTHER languages
+    cannot predict.
+
+        unique(l) = 1 - (AUC(shared -> l) - 0.5) / (AUC(within-l) - 0.5)
+
+    Leave-one-out, because a shared probe that saw `l` can memorise `l`'s idiosyncrasies and
+    understate uniqueness. Every probe is trained on the SAME number of samples -- `m`, the smallest
+    language's training set -- so the per-language values are comparable to each other as well as to
+    each other's within-probe; the shared probe draws m/(L-1) from each other language.
+
+    0 = fully shared: a policy that never saw this language does as well as its own. That is what a
+    single subword vocabulary gives by construction, since one merge table is applied to every
+    language. 1 = nothing about it is predictable from the others."""
+    langs = sorted(data)
+    if len(langs) < 3:
+        return None
+    m = min(len(data[l]["ytr"]) for l in langs)
+    per = max(m // (len(langs) - 1), 1)
+    out = {}
+    for l in langs:
+        Xw, yw = _draw(data[l], m, seed, f"within:{l}")
+        parts = [_draw(data[o], per, seed, f"loo:{l}:{o}") for o in langs if o != l]
+        w = _fit_auc(Xw, yw, data[l]["Xte"], data[l]["yte"], seed)
+        s = _fit_auc(np.concatenate([p[0] for p in parts], 0),
+                     np.concatenate([p[1] for p in parts], 0),
+                     data[l]["Xte"], data[l]["yte"], seed)
+        if w is None or s is None or w <= 0.5:
+            out[l] = None
+            continue
+        # clamp a below-chance shared probe at 0 excess, so `unique` stays in [0, 1]
+        out[l] = {"within": round(w, 3), "shared": round(s, 3), "n_train": int(m),
+                  "unique": round(1.0 - max(s - 0.5, 0.0) / (w - 0.5), 3)}
+    return out
 
 
 def transfer_matrix(student, par, langs, res, tok, n_sent, seed, device, big):
@@ -336,7 +389,7 @@ def transfer_matrix(student, par, langs, res, tok, n_sent, seed, device, big):
         print("  transfer: no usable interior probe at any layer -> skipped")
         return None
     print(f"  transfer pass at peak layer {peak}")
-    data = {}
+    data, sdata = {}, {}
     for lang in langs:
         texts, rng = _lang_sample(par, lang, n_sent, seed)
         cuts_list = [teacher_cuts(t[:student.max_chars], tok) for t in texts]
@@ -351,14 +404,22 @@ def transfer_matrix(student, par, langs, res, tok, n_sent, seed, device, big):
         feats, index = layer_positions(student, texts, sel, device=device, layers=[peak],
                                        batch_size=(4 if big else 8))
         row_of = {k: r for r, k in enumerate(index)}
-        rows = [(row_of[(i, p)], y, i) for i, p, y in it if (i, p) in row_of]
-        X = feats[peak][[r for r, _, _ in rows]]
-        y, g = np.array([y for _, y, _ in rows]), np.array([i for _, _, i in rows])
+        kept = [(i, p, y) for i, p, y in it if (i, p) in row_of]
+        X = feats[peak][[row_of[(i, p)] for i, p, _ in kept]]
+        y = np.array([y for _, _, y in kept])
+        g = np.array([i for i, _, _ in kept])
         tr, te = group_split(y, g, seed)
         if len(set(y[tr].tolist())) < 2 or len(set(y[te].tolist())) < 2:
             continue
         sc = StandardScaler().fit(X[tr])
         data[lang] = {"Xtr": sc.transform(X[tr]), "ytr": y[tr], "Xte": sc.transform(X[te]), "yte": y[te]}
+        # The same measure on raw local characters, on the SAME rows and the SAME split: the floor
+        # that orthographic disjointness alone forces. It is a no-model policy driven purely by
+        # characters -- which is what a single shared subword vocabulary amounts to.
+        S = surface_features(texts, kept, max_chars=student.max_chars)
+        ss = StandardScaler().fit(S[tr])
+        sdata[lang] = {"Xtr": ss.transform(S[tr]), "ytr": y[tr],
+                       "Xte": ss.transform(S[te]), "yte": y[te]}
         del feats
     if len(data) < 2:              # `cap = min(...)` below is a ValueError on an empty `data`, and a
         print(f"  transfer: only {len(data)} language(s) usable at layer {peak} -> skipped")
@@ -382,7 +443,21 @@ def transfer_matrix(student, par, langs, res, tok, n_sent, seed, device, big):
     Xj = np.concatenate([data[l]["Xtr"][ii] for l, ii in parts.items()], 0)
     yj = np.concatenate([data[l]["ytr"][ii] for l, ii in parts.items()], 0)
     joint = LogisticRegression(max_iter=2000, C=10.0, random_state=seed).fit(Xj, yj)
+    # The joint probe above is trained on `cap` PER LANGUAGE -- roughly L times a within-language
+    # probe -- so joint/within near 1 is what extra data buys, not evidence of a shared policy. This
+    # one is trained on the same total as a within-language probe.
+    mcap = max(cap // max(len(data) - 1, 1), 1)
+    mparts = {l: np.random.default_rng([seed, zlib.crc32(("m" + l).encode("utf-8"))])
+              .choice(len(d["ytr"]), size=min(mcap, len(d["ytr"])), replace=False)
+              for l, d in data.items()}
+    jm = LogisticRegression(max_iter=2000, C=10.0, random_state=seed).fit(
+        np.concatenate([data[l]["Xtr"][ii] for l, ii in mparts.items()], 0),
+        np.concatenate([data[l]["ytr"][ii] for l, ii in mparts.items()], 0))
     return {"layer": int(peak), "auc": auc, "acc": acc, "ratio": ratio,
+            "joint_matched": {b: round(float(roc_auc_score(
+                data[b]["yte"], jm.decision_function(data[b]["Xte"]))), 3) for b in data},
+            "uniqueness": uniqueness(data, seed),
+            "uniqueness_surface": uniqueness(sdata, seed),
             "within": {b: auc[b][b] for b in data},
             "within_bacc": {b: acc[b][b] for b in data},
             "joint": {b: round(float(roc_auc_score(data[b]["yte"], joint.decision_function(data[b]["Xte"]))), 3)
@@ -436,6 +511,7 @@ def merge(metric="auc"):
         print(f"  surface-statistics baseline (interior, mean over space-delimited langs): {_m(sur, 6).strip()}")
     report_by_language(M)
     report_transfer(M, metric)
+    report_uniqueness(M)
     print("\n  reading: interior above BOTH the surface baseline and random = the representation carries "
           "segmentation; trained > pretrained = distillation added some; transfer ratios low within a "
           "script -> language-specific segmentation (the claim); high within / low across -> script-specific; "
@@ -481,6 +557,41 @@ def report_by_language(M):
         print(f"  {'':12}peak mean: Latin-script {np.mean(lat):.3f} ({len(lat)})   non-Latin "
               f"{np.mean(non):.3f} ({len(non)})"
               + (f"   trained peak − pretrained peak: {np.mean(gap):+.3f}" if gap else ""))
+
+
+def report_uniqueness(M):
+    print("\n  SEGMENTATION UNIQUENESS -- of each language's boundary structure, how much a policy "
+          "trained on the\n  OTHER nine cannot predict. 0 = fully shared, which is what ONE subword "
+          "vocabulary gives by\n  construction; `surface` is the same measure on raw local characters, "
+          "the floor that orthographic\n  disjointness alone forces. EXCESS = model - surface is the "
+          "part that is not just the writing system.")
+    for n, r in M.items():
+        t = r.get("transfer") or {}
+        u, us = t.get("uniqueness"), t.get("uniqueness_surface")
+        if not u:
+            continue
+        langs = [l for l in sorted(u) if u[l]]
+        print(f"\n  {n} (layer {t.get('layer')}, {u[langs[0]]['n_train']} training rows per probe)")
+        print(f"    {'lang':>6}{'within':>9}{'shared':>9}{'unique':>9}{'surf-uniq':>12}{'EXCESS':>9}")
+        ex = []
+        for l in langs:
+            su = (us or {}).get(l)
+            e = u[l]["unique"] - su["unique"] if su else None
+            if e is not None:
+                ex.append(e)
+            print(f"    {l:>6}{u[l]['within']:>9.3f}{u[l]['shared']:>9.3f}{u[l]['unique']:>9.3f}"
+                  f"{(su['unique'] if su else float('nan')):>12.3f}"
+                  f"{(e if e is not None else float('nan')):>+9.3f}")
+        mu = np.mean([u[l]["unique"] for l in langs])
+        ms = np.mean([us[l]["unique"] for l in langs if (us or {}).get(l)]) if us else float("nan")
+        print(f"    {'MEAN':>6}{'':>9}{'':>9}{mu:>9.3f}{ms:>12.3f}"
+              f"{(np.mean(ex) if ex else float('nan')):>+9.3f}")
+        jm = t.get("joint_matched")
+        if jm:
+            w = t.get("within") or {}
+            rel = [jm[l] / w[l] for l in jm if w.get(l)]
+            print(f"    sample-matched joint / within: {np.mean(rel):.3f}   (the unmatched `joint` row "
+                  f"above is trained on ~{len(langs)}x more data and is not comparable)")
 
 
 def report_transfer(M, metric="auc"):
@@ -542,6 +653,29 @@ def report_transfer(M, metric="auc"):
             print(f"  {'':14}{l:>5}{within[l]:>8.3f}{into:>8.3f}{out:>8.3f}{into - out:>+10.3f}")
 
 
+def _uniqtest():
+    """Two synthetic regimes: one shared boundary rule across languages (unique -> 0) and a
+    per-language rule (unique -> 1). The measure has to separate them."""
+    rng = np.random.default_rng(0)
+    d, per_l = 24, 600
+    for name, shared in (("shared rule", True), ("per-language rule", False)):
+        data = {}
+        w_shared = rng.standard_normal(d)
+        for k, l in enumerate("abcde"):
+            w = w_shared if shared else rng.standard_normal(d)
+            X = rng.standard_normal((per_l, d))
+            y = ((X @ w) > 0).astype(int)
+            data[l] = {"Xtr": X[:400], "ytr": y[:400], "Xte": X[400:], "yte": y[400:]}
+        u = uniqueness(data)
+        mu = float(np.mean([v["unique"] for v in u.values() if v]))
+        print(f"    {name:20} mean uniqueness {mu:.3f}")
+        if shared:
+            assert mu < 0.25, (name, mu, u)
+        else:
+            assert mu > 0.70, (name, mu, u)
+    return True
+
+
 def _selftest():
     labs = position_labels("ab cd", cuts=[1, 2], lang="en")     # tokens: a | b | ' cd'
     assert labs["tok_end"] == ({0, 1}, [0, 1, 3]), labs
@@ -578,6 +712,7 @@ def _selftest():
     res = {"langs": {"en": {"layers": [{"layer": 0, "interior": {"bacc": 0.6}}, {"layer": 1, "interior": {"bacc": 0.8}}]},
                      "te": {"layers": [{"layer": 0, "interior": {"bacc": 0.6}}, {"layer": 1, "interior": {"bacc": 0.7}}]}}}
     assert peak_layer(res) == 1
+    _uniqtest()
     print("selftest OK: labels (zh/te multibyte, punctuation/whitespace excluded), balanced dataset, surface "
           "features, sentence-grouped probes with bootstrap CI, peak layer")
 
