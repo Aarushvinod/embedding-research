@@ -40,8 +40,12 @@ at matched depth fractions. Belebele's passages are drawn from FLORES, so the Be
 text-disjoint from the fitting set — but the erasers are fitted on 10-way PARALLEL sentences, which
 holds content constant across the classes, so the class-mean difference cannot be passage content;
 and the 20k-pool battery (MIRACL / Amharic-PR / CIRAL / AfriQA passages) IS disjoint from FLORES and
-is reported as the out-of-sample confirmation of the same effect. `--flores-split dev` switches the
-fitting set if full text-disjointness is wanted.
+is reported as the out-of-sample confirmation of the same effect. `--flores-split` moves the fitting
+set: `dev`, or `dev+devtest` to fit on dev and probe on devtest (~2x the positions on each side, and a
+fit/probe boundary that is a real split boundary rather than a random half of one pool). Do NOT assume
+either public split is disjoint from Belebele -- the Belebele paper says only that its 488 passages
+exclude the HIDDEN FLORES test set, never which public split they came from. `--flores-overlap`
+measures it.
 
   python -m byte_embed.interp_english --only byte-small
   python -m byte_embed.interp_english --only subword-small --skip-battery   # erasers + latent + shift
@@ -55,6 +59,7 @@ import argparse
 import numpy as np
 
 from byte_embed.interp_common import (CROSS_CELLS, MAIN_MODELS, apply_rank1, block_states, depth_blocks,
+                                      flores_splits,
                                       flores_flat, flores_parallel, leace_direction, load_student,
                                       make_encode, merge_parts, models_in, n_blocks, part_path,
                                       rank1_eraser, rank1_torch_fn, read_json, stored_results,
@@ -75,6 +80,33 @@ def _split_suffix(kind, split):
     `--flores-split dev` run must not reuse directions fitted on devtest. devtest keeps the original
     filename so finished runs stay cached."""
     return f".{kind}.npz" if split == "devtest" else f".{kind}-{split}.npz"
+
+
+def flores_overlap(cache_dir="checkpoints", lang="en"):
+    """How much of Belebele's passage text comes from each FLORES split.
+
+    Belebele reconstructs paragraphs from consecutive FLORES sentences, and its paper says only that
+    the 488 passages exclude the HIDDEN test set -- it never says which PUBLIC split they come from.
+    That matters because the erasers are fitted on FLORES and the Belebele cells are scored on
+    Belebele: whichever split the passages came from is not held-out text for this experiment. So
+    measure it rather than assume it."""
+    from byte_embed.interp_common import flores_parallel
+    from byte_embed.interp_script import belebele_texts
+    _, passages = belebele_texts(lang)
+    joined = "\n".join(passages)
+    print(f"\n  BELEBELE PASSAGE PROVENANCE ({lang}, {len(passages)} distinct passages)")
+    print(f"  {'split':10}{'sentences':>11}{'found in a passage':>20}{'share':>8}")
+    seen = {}
+    for sp in ("dev", "devtest"):
+        sents = [s for s in flores_parallel([lang], cache_dir, sp)[lang] if len(s) > 25]
+        hit = [s for s in sents if s in joined]
+        seen[sp] = set(hit)
+        print(f"  {sp:10}{len(sents):>11}{len(hit):>20}{len(hit) / max(len(sents), 1):>8.1%}")
+    both = seen["dev"] & seen["devtest"]
+    print(f"  sentences matched from BOTH splits: {len(both)} (duplicate rows across splits, if any)")
+    print("  reading: a split with a high share is NOT held out from the Belebele cells -- fit the "
+          "erasers on the other one, or read the FLORES-independent 20k battery as primary.")
+    return seen
 
 
 def fits_path(name, split="devtest"):
@@ -230,9 +262,20 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
     langs = list(par)
     texts, lang, sid = flores_flat(par)
     nsent = len(par[langs[0]])
-    rng = np.random.default_rng(seed)
+    # Which sentences fit the erasers, and which are held out for the probe. With two splits
+    # concatenated the boundary IS the split boundary -- fit on the first component, probe on the
+    # second -- which is a stronger claim than a random half of one pool: the direction has to
+    # transport to separately collected text, not merely to unseen sentences from the same batch.
     fit_ids = np.zeros(nsent, dtype=bool)
-    fit_ids[rng.choice(nsent, size=nsent // 2, replace=False)] = True
+    parts = flores_splits(flores_split)
+    if len(parts) > 1:
+        n_first = len(flores_parallel([langs[0]], ckpt_dir, parts[0])[langs[0]])
+        fit_ids[:n_first] = True
+        print(f"  fitting on {parts[0]} ({n_first} sentences/lang), probing on "
+              f"{'+'.join(parts[1:])} ({nsent - n_first})")
+    else:
+        rng = np.random.default_rng(seed)
+        fit_ids[rng.choice(nsent, size=nsent // 2, replace=False)] = True
     big = "large" in name
     bs_enc = 32 if bm.get("kind") == "byte" else 128
 
@@ -838,7 +881,9 @@ def _selftest():
     assert all_depth_summary({"belebele": {NONE: _bel(0.0)}}) is None      # arm absent -> no row
     # devtest keeps the legacy filename (finished runs stay cached); any other split gets its own,
     # so the flag cannot hand back directions fitted on different text.
+    assert flores_splits("devtest") == ["devtest"] and flores_splits("dev+devtest") == ["dev", "devtest"]
     assert fits_path("m") == fits_path("m", "devtest") != fits_path("m", "dev")
+    assert fits_path("m", "dev+devtest") not in (fits_path("m", "dev"), fits_path("m", "devtest"))
     assert fits_all_path("m") != fits_all_path("m", "dev") != fits_path("m", "dev")
     ic = identity_check({"te": {"ndcg@10": 0.700}}, {"te": {"ndcg@10": 0.702}})
     assert ic["verdict"] == "PASS" and ic["cells"] == 1
@@ -858,13 +903,21 @@ def main():
     ap.add_argument("--skip-battery", action="store_true", help="erasers, latent curve and shift only")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--n-boot", type=int, default=2000, help="bootstrap resamples in --merge")
-    ap.add_argument("--flores-split", default="devtest", choices=["devtest", "dev"],
-                    help="FLORES split the erasers are fitted on (dev = text-disjoint from Belebele)")
+    ap.add_argument("--flores-split", default="devtest", choices=["devtest", "dev", "dev+devtest"],
+                    help="FLORES text the erasers are fitted on. One split = fit on a random half, "
+                         "probe on the other. 'dev+devtest' = fit on dev, probe on devtest: ~2x the "
+                         "positions on each side and a fit/probe boundary that is a real split "
+                         "boundary. Run --flores-overlap first: whichever split Belebele's passages "
+                         "came from is not held out from the Belebele cells.")
+    ap.add_argument("--flores-overlap", action="store_true",
+                    help="measure how much Belebele passage text each FLORES split supplies, then exit")
     ap.add_argument("--merge", action="store_true")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         return _selftest()
+    if a.flores_overlap:
+        return flores_overlap(a.ckpt_dir)
     if a.merge:
         return merge(a.results, a.n_boot, a.seed)
     names = [a.only] if a.only else [n for n in MAIN_MODELS if n in models_in(a.results)[0]]

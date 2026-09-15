@@ -390,12 +390,24 @@ def flores_cache_name(split):
     return f"flores_{split}_10.json"
 
 
+def flores_splits(split):
+    """The component splits of a `split` spec: "devtest" -> ["devtest"], "dev+devtest" -> both."""
+    return split.split("+")
+
+
 def flores_parallel(langs=None, cache_dir="checkpoints", split="devtest"):
     """{lang: [sentences]} — the FLORES-200 table is one row per parallel sentence, so row i is the
     same content in every language. Asserts every language is present. `split` selects devtest (the
-    default, 1012 rows, what every experiment scores on) or dev; each is cached separately."""
+    default, 1012 rows, what every experiment scores on) dev (997), or "dev+devtest" for both concatenated in that
+    order; each component is cached separately."""
     from byte_embed.config import FLORES_CODE, STUDY_LANGS
     langs = list(langs or STUDY_LANGS)
+    parts = flores_splits(split)
+    if len(parts) > 1:
+        # Concatenated IN ORDER, and each component still uses its own cache. Order is the contract:
+        # callers split fit from probe at the component boundary, so it must not be reshuffled.
+        loaded = [flores_parallel(langs, cache_dir, s) for s in parts]
+        return {l: [s for p in loaded for s in p[l]] for l in langs}
     cp = Path(cache_dir) / flores_cache_name(split)
     cached = read_json(cp) or {}
     if all(l in cached for l in langs):
