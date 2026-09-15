@@ -83,9 +83,15 @@ def interp_detail(x, m):
         cb = d.get("chosen_block")
         depths = sorted({int(k.split(":")[0]) for k in bel if ":" in k})
         cols = sorted(k.split(":")[1] for k in bel if k.startswith(f"{cb}:"))
+        # erasure_check is the whole point of the stage-B2 rerun, so it has to be visible here:
+        # without it a part file with a full battery reads as finished while the verification that
+        # the intervention actually removes English -- and is not rebuilt downstream -- is absent.
+        ec = d.get("erasure_check")
+        eck = (f"erasure_check b{ec['block']} {ec['at_intervention']} -> last b{ec['last_block']} "
+               f"{ec['at_last_block']}" if ec else "erasure_check MISSING")
         return (f"block {cb} of {d.get('n_blocks')}; belebele cells {len(bel)}/{EN_CELLS} "
                 f"[{'none ' if 'none' in bel else ''}depths {depths}; columns at cb: {' '.join(cols)}]; "
-                f"battery {sorted(d.get('battery') or {})}")
+                f"battery {sorted(d.get('battery') or {})}; {eck}")
     if x == "script":
         cond = d.get("cond") or {}
         parts = [f"{k}:{'+'.join(v.get('langs') or []) or '-'}"
