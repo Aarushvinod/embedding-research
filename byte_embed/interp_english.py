@@ -252,11 +252,15 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
     res["n_blocks"], res["blocks"] = n, blocks
     # Every eraser in this part file was fitted on ONE split; combining stages fitted on different
     # text would make the depth columns incomparable, so say so rather than proceed.
-    if res.get("flores_split") not in (None, flores_split):
+    # A part file written before this key existed was fitted on devtest, the historical default, so
+    # absence is NOT "no opinion": treating it as such would let stage A refit on the new pool while
+    # stages B-E stayed cached from the old one, and the depth columns would silently be a mixture.
+    prior = res.get("flores_split") or ("devtest" if res.get("latent") else None)
+    if prior not in (None, flores_split):
         raise SystemExit(
-            f"[english] {outp} holds stages fitted on FLORES '{res['flores_split']}' but "
-            f"'{flores_split}' was requested. Move or delete that part file (and its .erasers*.npz "
-            f"sidecars) to refit from scratch on the new split.")
+            f"[english] {outp} holds stages fitted on FLORES '{prior}' but '{flores_split}' was "
+            f"requested, and mixing them would make the depth columns incomparable. Move or delete "
+            f"that part file and its .erasers*.npz sidecars to refit from scratch on the new split.")
     res["flores_split"] = flores_split
     par = flores_parallel(cache_dir=ckpt_dir, split=flores_split)
     langs = list(par)
