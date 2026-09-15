@@ -834,9 +834,21 @@ def merge(results="results/retrieval_bgem3.json", n_boot=2000, seed=0):
         ad = r.get("all_depth_probe")
         if ad:
             blks = sorted(ad, key=int)
+            res_v = [ad[b]["erased"] for b in blks if ad[b].get("erased") is not None]
+            un_v = [ad[b]["unedited"] for b in blks if ad[b].get("unedited") is not None]
+            resid = float(np.mean(res_v)) if res_v else None
+            removed = (float(np.mean(un_v)) - resid) / (float(np.mean(un_v)) - 0.5) if (un_v and resid) else None
             print(f"    ALL-DEPTH erasure ({r.get('n_blocks')} blocks at once): probe bacc "
                   + "  ".join(f"b{b}: {ad[b]['unedited']}->{ad[b]['erased']}" for b in blks)
                   + "   (chance everywhere = English is unavailable throughout the encoder)")
+            # The intervention is NOT equally strong across models, and the difference runs the wrong
+            # way for the hypothesis: a model left with more residual English had LESS removed, so a
+            # smaller retrieval excess for it is partly "less was taken away" rather than "it needed
+            # English less". Printed next to the excess so the two cannot be read apart.
+            if resid is not None:
+                print(f"      residual English decodability {resid:.3f} (chance 0.500) = "
+                      f"{removed:.0%} of the decodable signal removed; models differ here, and a "
+                      f"model with MORE residual had LESS removed -- compare excesses accordingly")
         s_ad = all_depth_summary(r, n_boot, seed)
         if s_ad and s_ad.get("excess"):
             print(f"      Belebele, non-English languages: English erased everywhere "
