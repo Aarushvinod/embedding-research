@@ -91,6 +91,8 @@ def interp_detail(x, m):
                + (f" -> last b{ec['last_block']} {ec['at_last_block']}"
                   if ec["last_block"] != ec["block"] else " (== last block: says nothing about rebuild)")
                if ec else "erasure_check MISSING")
+        if d.get("pruned_single_block"):
+            eck += "; single-block arms PRUNED"
         ad = d.get("all_depth_probe")
         eck += ("; all-depth %s" % {b: v["erased"] for b, v in ad.items()} if ad
                 else "; all-depth MISSING")

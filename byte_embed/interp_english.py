@@ -55,6 +55,7 @@ measures it.
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import numpy as np
 
@@ -128,6 +129,46 @@ def fit_erasers(X, lang_rows, langs, seed=0, block=0):
     out = {l: rank1_eraser(W, Wp, mu, leace_direction(W, X, lang_rows == l)) for l in langs}
     rng = np.random.default_rng([seed, int(block)])
     out["random"] = rank1_eraser(W, Wp, mu, rng.standard_normal(X.shape[1]))
+    return out
+
+
+PRUNED = "pruned_single_block"     # set once the one-block arms are dropped, so they stay dropped
+
+
+def single_block_arms(res):
+    """Battery arms to score: just the unedited baseline once the one-block arms are pruned."""
+    return (NONE,) if res.get(PRUNED) else (NONE, "en", "random")
+
+
+def prune_single_block(models=None):
+    """Remove every result produced by erasing at ONE block, and mark the part files.
+
+    Kept: the unedited baseline, `latent`, `shift`, `identity_check`, `chosen_block`, `reinstatement`
+    and the all-depth arms. `reinstatement` survives on purpose -- it is a single-block edit, but its
+    job is to demonstrate that a single-block edit gets undone, which is the evidence FOR the
+    all-depth arm rather than a claim resting on it."""
+    import glob
+    out = []
+    for p in sorted(glob.glob(f"results/interp_{ANALYSIS}_part_*.json")):
+        res = read_json(Path(p))
+        if not res:
+            continue
+        bel = res.get("belebele") or {}
+        drop = [k for k in bel if ":" in k and not k.startswith("all:")]
+        bat = [k for k in ("en", "random") if k in (res.get("battery") or {})]
+        for k in drop:
+            del bel[k]
+        for k in bat:
+            del res["battery"][k]
+        had_ec = res.pop("erasure_check", None) is not None
+        res[PRUNED] = True
+        write_json(Path(p), res)
+        out.append((res.get("model", p), len(drop), len(bat), had_ec))
+        print(f"  {res.get('model', p):15} dropped {len(drop)} Belebele column(s), {len(bat)} battery "
+              f"arm(s){', erasure_check' if had_ec else ''}; kept "
+              f"{sorted(bel)} + battery {sorted(res.get('battery') or {})}")
+    if not out:
+        print("  no part files found under results/ -- nothing to prune")
     return out
 
 
@@ -237,7 +278,7 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
         if res:
             print(f"  [english] {name}: part file schema {res.get('schema')} != {SCHEMA} -> recomputing")
         res = {"schema": SCHEMA}
-    if (res.get("battery") and all(e in res["battery"] for e in (NONE, "en", "random"))
+    if (res.get("battery") and all(e in res["battery"] for e in single_block_arms(res))
             and res.get("erasure_check") and res.get("reinstatement")
             and all(k in res["battery"] for k in (ALL_EN, ALL_RND))):
         print(f"=== {ANALYSIS}/{name}: already done -> skip ===")
@@ -408,7 +449,8 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
     from byte_embed.config import STUDY_LANGS
     from byte_embed.eval_mteb import eval_battery
     res.setdefault("belebele", {})
-    for key, b, e in belebele_plan(blocks, cb, langs):
+    plan = [(NONE, cb, NONE)] if res.get(PRUNED) else belebele_plan(blocks, cb, langs)
+    for key, b, e in plan:
         if key in res["belebele"]:
             continue
         print(f"=== {name}: Belebele, {'UNEDITED baseline' if e == NONE else f'{e!r} erased at block {b}'} ===")
@@ -430,7 +472,7 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
     from byte_embed.miracl import eval_miracl_langs
     from byte_embed.qa_retrieval import eval_qa_retrieval
     res.setdefault("battery", {})
-    for e in (NONE, "en", "random"):
+    for e in single_block_arms(res):
         if e in res["battery"]:
             continue
         print(f"=== {name}: full battery, {'UNEDITED' if e == NONE else f'{e!r} erased at block {cb}'} ===")
@@ -530,6 +572,8 @@ def matrix_summary(r, n_boot=2000, seed=0):
     cb = r.get("chosen_block")
     if cb is None or NONE not in r.get("belebele", {}):
         return None
+    if not any(k.startswith(f"{cb}:") for k in r["belebele"]):
+        return None            # single-block columns pruned: absent, not "present and empty"
     langs = [l for l, c in r["belebele"][NONE].items() if c]
     others = [m for m in langs if m != "en" and f"{cb}:{m}" in r["belebele"]]
     en_v, oth_v, rnd_v, own_v, exc_v = [], [], [], [], []
@@ -739,6 +783,30 @@ def merge(results="results/retrieval_bgem3.json", n_boot=2000, seed=0):
                   f"{_f(s_ad['random'])}  {_ci(s_ad['random'])}")
             print(f"      -> EXCESS over the matched control {_f(s_ad['excess'])}  "
                   f"{_ci(s_ad['excess'])}   (the only interpretable number here)")
+        # The all-depth arm on the 20k pools. These cells (MIRACL / Amharic-PR / CIRAL / AfriQA) are
+        # independent of FLORES, so unlike Belebele they are not scored on text the erasers were
+        # fitted on -- this is the primary readout, and it had no row at all until now.
+        bat = r.get("battery") or {}
+        if NONE in bat and ALL_EN in bat:
+            got = {}
+            for e in (ALL_EN, ALL_RND):
+                if e not in bat:
+                    continue
+                rows = compare(bat[e], bat[NONE], n_boot)
+                mono = [(c, x) for c, x in rows if tuple(c) not in CROSS_CELLS]
+                got[e] = {"mono": float(np.mean([x["delta"] for _, x in mono])) if mono else None,
+                          "nsig": sum(x["significant"] for _, x in mono), "n": len(mono), "rows": rows}
+                print(f"      20k battery, {e}: monolingual mean d {_f(got[e]['mono'])} "
+                      f"({got[e]['nsig']}/{got[e]['n']} cells significant)")
+            a, b_ = got.get(ALL_EN), got.get(ALL_RND)
+            if a and b_ and None not in (a["mono"], b_["mono"]):
+                exc = a["mono"] - b_["mono"]
+                summary.setdefault(n, {})["battery_alldepth_excess"] = exc
+                print(f"      -> 20k battery EXCESS over the site-matched control {exc:+.4f}   "
+                      f"(FLORES-independent cells: the primary readout)")
+                print("      per cell: " + "  ".join(
+                    f"{c[0][:6]}-{c[1]}:{x['delta']:+.3f}{'*' if x['significant'] else ''}"
+                    for c, x in a["rows"]))
         rs = r.get("reinstatement")
         if rs:
             at = rs["at"]
@@ -759,6 +827,7 @@ def merge(results="results/retrieval_bgem3.json", n_boot=2000, seed=0):
                   + f"   | random: {np.mean(list(r['shift']['random'].values())):.3f}")
         s = matrix_summary(r, n_boot, seed)
         if not s:
+            print("    single-block arms pruned -> the all-depth arm above is the whole result")
             continue
         summary[n] = s
         depths[n] = en_by_depth(r, n_boot, seed)
@@ -887,6 +956,8 @@ def _selftest():
     assert all_depth_summary({"belebele": {NONE: _bel(0.0)}}) is None      # arm absent -> no row
     # devtest keeps the legacy filename (finished runs stay cached); any other split gets its own,
     # so the flag cannot hand back directions fitted on different text.
+    assert single_block_arms({}) == (NONE, "en", "random")
+    assert single_block_arms({PRUNED: True}) == (NONE,)     # pruned -> stage D stops at the baseline
     assert flores_splits("devtest") == ["devtest"] and flores_splits("dev+devtest") == ["dev", "devtest"]
     assert fits_path("m") == fits_path("m", "devtest") != fits_path("m", "dev")
     assert fits_path("m", "dev+devtest") not in (fits_path("m", "dev"), fits_path("m", "devtest"))
@@ -915,6 +986,9 @@ def main():
                          "positions on each side and a fit/probe boundary that is a real split "
                          "boundary. Run --flores-overlap first: whichever split Belebele's passages "
                          "came from is not held out from the Belebele cells.")
+    ap.add_argument("--prune-single-block", action="store_true",
+                    help="drop the one-block erasure arms from every part file and stop them being "
+                         "recomputed; the unedited baseline, latent probe and shift are kept")
     ap.add_argument("--flores-overlap", action="store_true",
                     help="measure how much Belebele passage text each FLORES split supplies, then exit")
     ap.add_argument("--merge", action="store_true")
@@ -922,6 +996,8 @@ def main():
     a = ap.parse_args()
     if a.selftest:
         return _selftest()
+    if a.prune_single_block:
+        return prune_single_block()
     if a.flores_overlap:
         return flores_overlap(a.ckpt_dir)
     if a.merge:
