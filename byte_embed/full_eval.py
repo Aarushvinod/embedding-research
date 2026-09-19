@@ -42,15 +42,30 @@ def _models_in(results_path):
     return models, teacher, tdim
 
 
-def _battery(enc, ckpt_dir):
+def _covered(outp, want):
+    """(skip?, stored language set) for an existing part file. A file written before --langs
+    existed covered the full set. Compares SETS rather than checking existence, so a low-resource run
+    does not silently satisfy a later anchor run."""
+    if not outp.exists():
+        return False, set()
+    try:
+        have = set(json.loads(outp.read_text(encoding="utf-8")).get("miracl_langs")
+                   or FULL_MIRACL_LANGS)
+    except Exception:                                    # noqa: BLE001 — a truncated part file re-runs
+        return False, set()
+    return want <= have, have
+
+
+def _battery(enc, ckpt_dir, miracl_langs=None):
     from byte_embed.config import STUDY_LANGS
     from byte_embed.eval_mteb import eval_battery
     from byte_embed.miracl import eval_miracl_langs
     from byte_embed.qa_retrieval import eval_qa_retrieval
     out = {}
     out["belebele"] = eval_battery(enc, STUDY_LANGS).get("belebele")   # per_query -> Belebele significance
-    out["miracl_full"] = eval_miracl_langs(enc, FULL_MIRACL_LANGS, n_queries=None,
-                                           full=True, corpus_caps=ANCHOR_CAPS, cache_dir=ckpt_dir)
+    out["miracl_full"] = eval_miracl_langs(enc, list(miracl_langs or FULL_MIRACL_LANGS),
+                                           n_queries=None, full=True, corpus_caps=ANCHOR_CAPS,
+                                           cache_dir=ckpt_dir)
     out["qa_full"] = eval_qa_retrieval(enc, benchmarks=QA_FULL, n_queries=ALL_Q, distractors=ALL_D,
                                        max_stream=1_500_000, cache_dir=ckpt_dir)
     out["afriqa_100k"] = eval_qa_retrieval(enc, benchmarks=("afriqa",), n_queries=ALL_Q,
@@ -62,14 +77,20 @@ def _part_path(label, name):
     return f"results/full_eval_part_{label}_{name}.json"
 
 
-def run_one(results_path, label, name, pooling="attn", ckpt_dir="checkpoints", device="cuda"):
+def run_one(results_path, label, name, pooling="attn", ckpt_dir="checkpoints", device="cuda",
+            miracl_langs=None):
     from byte_embed.boundaries import make_transform
     from byte_embed.reeval import _load_enc
 
     outp = Path(_part_path(label, name))
-    if outp.exists():
-        print(f"=== {label}/{name}: already evaluated -> skip ===")
+    want = set(miracl_langs or FULL_MIRACL_LANGS)
+    skip, have = _covered(outp, want)
+    if skip:
+        print(f"=== {label}/{name}: already evaluated ({' '.join(sorted(have))}) -> skip ===")
         return
+    if have:
+        print(f"=== {label}/{name}: stored run covers {' '.join(sorted(have))}; "
+              f"{' '.join(sorted(want - have))} missing -> recomputing ===")
     models, teacher, tdim = _models_in(results_path)
     if name not in models:
         raise SystemExit(f"{name!r} not found in {results_path} (finished models: {sorted(models)})")
@@ -83,9 +104,9 @@ def run_one(results_path, label, name, pooling="attn", ckpt_dir="checkpoints", d
         enc = lambda xs: _e([_t(x) for x in xs])  # noqa: E731 — the arm evals with its own transform
 
     print(f"=== FULL EVAL {label}/{name} (steps_run={bm.get('steps_run')}) ===")
-    res = _battery(enc, ckpt_dir)
+    res = _battery(enc, ckpt_dir, miracl_langs)
     res.update(label=label, model=name, steps_run=bm.get("steps_run"), params=bm.get("params"),
-               boundary=bm.get("boundary"))
+               boundary=bm.get("boundary"), miracl_langs=sorted(want))
     outp.parent.mkdir(parents=True, exist_ok=True)
     outp.write_text(json.dumps(res, indent=2, ensure_ascii=False), encoding="utf-8")
     mf = res["miracl_full"]
@@ -93,16 +114,21 @@ def run_one(results_path, label, name, pooling="attn", ckpt_dir="checkpoints", d
 
 
 def run_teacher_baseline(results_path="results/retrieval_bgem3.json", ckpt_dir="checkpoints",
-                         device="cuda"):
+                         device="cuda", miracl_langs=None):
     # Use the teacher RECORDED in the results, not a hardcoded model — an me5-large run must be scored
     # against mE5, not BGE-M3. load_teacher gives the same model + prefix + char-budget as the training
     # targets, so the ceiling is encoded identically to what the students distilled.
     _, teacher_name, _ = _models_in(results_path)
     label = {"bge-m3": "BGE-M3", "me5-large": "mE5-large"}.get(teacher_name, teacher_name)
     outp = Path(_part_path("baseline", label))
-    if outp.exists():
-        print(f"=== baseline {label}: already evaluated -> skip ===")
+    want = set(miracl_langs or FULL_MIRACL_LANGS)
+    skip, have = _covered(outp, want)
+    if skip:
+        print(f"=== baseline {label}: already evaluated ({' '.join(sorted(have))}) -> skip ===")
         return
+    if have:
+        print(f"=== baseline {label}: stored run covers {' '.join(sorted(have))}; "
+              f"{' '.join(sorted(want - have))} missing -> recomputing ===")
     from byte_embed.teachers import load_teacher
     teacher = load_teacher(teacher_name, device=device)
 
@@ -162,13 +188,24 @@ def main():
     ap.add_argument("--pooling", default="attn")
     ap.add_argument("--ckpt-dir", dest="ckpt_dir", default="checkpoints")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--langs", default=None,
+                    help="comma-separated MIRACL languages for the deep pool (default: all of "
+                         f"{','.join(FULL_MIRACL_LANGS)}). The anchors en,zh,ar carry a 500k cap each "
+                         "and dominate the cost; 'te,bn,sw,yo' runs the low-resource cells only. "
+                         "Belebele, the QA benchmarks and AfriQA are unaffected.")
     a = ap.parse_args()
+    langs = [l.strip() for l in a.langs.split(",") if l.strip()] if a.langs else None
+    if langs:
+        bad = [l for l in langs if l not in FULL_MIRACL_LANGS]
+        if bad:                       # a typo would silently run the wrong (or an empty) language set
+            raise SystemExit(f"--langs {bad} not in {FULL_MIRACL_LANGS}")
     if a.merge:
         merge()
     elif a.teacher_baseline:
-        run_teacher_baseline(a.results, ckpt_dir=a.ckpt_dir, device=a.device)
+        run_teacher_baseline(a.results, ckpt_dir=a.ckpt_dir, device=a.device, miracl_langs=langs)
     elif a.only:
-        run_one(a.results, a.label, a.only, pooling=a.pooling, ckpt_dir=a.ckpt_dir, device=a.device)
+        run_one(a.results, a.label, a.only, pooling=a.pooling, ckpt_dir=a.ckpt_dir, device=a.device,
+                miracl_langs=langs)
     else:
         raise SystemExit("pass --only <model> (with --results/--label), --teacher-baseline, or --merge")
 
