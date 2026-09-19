@@ -61,7 +61,7 @@ LABELS = ("tok_end", "interior", "word_end", "random")
 BYTE_MODELS = ["byte-small", "byte-base", "byte-large"]
 NO_SPACES = {"zh"}
 SURFACE_K = 4                      # bytes of context on each side for the surface baseline
-TRANSFER_V = 2                     # transfer-stage contract; bump to recompute JUST that stage
+TRANSFER_V = 3                     # transfer-stage contract; bump to recompute JUST that stage
 
 
 # ----------------------------------------------------------------------------------------------
@@ -341,20 +341,33 @@ def _draw(d, n, seed, tag):
     return d["Xtr"][ii], d["ytr"][ii]
 
 
+def _cut(clf, Xtr, ytr):
+    """Decision threshold chosen on the language's OWN TRAINING rows.
+
+    A probe trained on other languages carries their intercept, and every language is standardised
+    with its own statistics, so the raw threshold does not transport -- score it as-is and a probe
+    whose direction is perfect reads as useless. Picking the cut on this language's train half is
+    fair (no test data touched) and lets the measure be a plain count of right and wrong."""
+    from sklearn.metrics import balanced_accuracy_score
+    s = clf.decision_function(Xtr)
+    cand = np.quantile(s, np.linspace(0.02, 0.98, 49))
+    return float(max(cand, key=lambda t: balanced_accuracy_score(ytr, s > t)))
+
+
 def uniqueness(data, seed=0):
-    """Per language: how much of its boundary structure a policy trained on the OTHER languages
-    cannot predict.
+    """Per language: what fraction of its held-out boundary positions the language's OWN probe
+    gets right and a probe trained on the OTHER languages gets wrong.
 
-        unique(l) = 1 - (AUC(shared -> l) - 0.5) / (AUC(within-l) - 0.5)
+      only_own     that count over ALL test positions
+      unique       that count over the positions the own probe gets right -- "of what is decodable
+                   here at all, how much is not reachable from the other languages"
+      only_shared  the reverse, which is the noise floor: with no language-specific structure the
+                   two disagreements should be symmetric, and McNemar tests exactly that.
 
-    Leave-one-out, because a shared probe that saw `l` can memorise `l`'s idiosyncrasies and
-    understate uniqueness. Every probe is trained on the SAME number of samples -- `m`, the smallest
-    language's training set -- so the per-language values are comparable to each other as well as to
-    each other's within-probe; the shared probe draws m/(L-1) from each other language.
-
-    0 = fully shared: a policy that never saw this language does as well as its own. That is what a
-    single subword vocabulary gives by construction, since one merge table is applied to every
-    language. 1 = nothing about it is predictable from the others."""
+    Both probes see the same number of training rows (the smallest language's budget, the shared one
+    drawing m/(L-1) from each other language) and are scored on identical rows, so nothing here is
+    normalised by a quantity that can be small."""
+    from sklearn.linear_model import LogisticRegression
     langs = sorted(data)
     if len(langs) < 3:
         return None
@@ -362,18 +375,33 @@ def uniqueness(data, seed=0):
     per = max(m // (len(langs) - 1), 1)
     out = {}
     for l in langs:
-        Xw, yw = _draw(data[l], m, seed, f"within:{l}")
-        parts = [_draw(data[o], per, seed, f"loo:{l}:{o}") for o in langs if o != l]
-        w = _fit_auc(Xw, yw, data[l]["Xte"], data[l]["yte"], seed)
-        s = _fit_auc(np.concatenate([p[0] for p in parts], 0),
-                     np.concatenate([p[1] for p in parts], 0),
-                     data[l]["Xte"], data[l]["yte"], seed)
-        if w is None or s is None or w <= 0.5:
+        d = data[l]
+        yte = np.asarray(d["yte"])
+        if len(set(yte.tolist())) < 2:
             out[l] = None
             continue
-        # clamp a below-chance shared probe at 0 excess, so `unique` stays in [0, 1]
-        out[l] = {"within": round(w, 3), "shared": round(s, 3), "n_train": int(m),
-                  "unique": round(1.0 - max(s - 0.5, 0.0) / (w - 0.5), 3)}
+        Xw, yw = _draw(d, m, seed, f"within:{l}")
+        parts = [_draw(data[o], per, seed, f"loo:{l}:{o}") for o in langs if o != l]
+        Xs = np.concatenate([p[0] for p in parts], 0)
+        ys = np.concatenate([p[1] for p in parts], 0)
+        if len(set(np.asarray(yw).tolist())) < 2 or len(set(ys.tolist())) < 2:
+            out[l] = None
+            continue
+        fit = lambda X, y: LogisticRegression(max_iter=2000, C=10.0, random_state=seed).fit(X, y)  # noqa: E731
+        own, sh = fit(Xw, yw), fit(Xs, ys)
+        ro = (own.decision_function(d["Xte"]) > _cut(own, d["Xtr"], d["ytr"])) == yte
+        rs = (sh.decision_function(d["Xte"]) > _cut(sh, d["Xtr"], d["ytr"])) == yte
+        n, b, c = len(yte), int((ro & ~rs).sum()), int((~ro & rs).sum())
+        try:
+            from scipy.stats import binomtest
+            p = float(binomtest(b, b + c, 0.5).pvalue) if b + c else 1.0
+        except Exception:                                    # noqa: BLE001 — scipy optional
+            p = None
+        out[l] = {"n_test": n, "n_train": int(m),
+                  "own_acc": round(float(ro.mean()), 3), "shared_acc": round(float(rs.mean()), 3),
+                  "only_own": round(b / n, 3), "only_shared": round(c / n, 3),
+                  "unique": round(b / max(int(ro.sum()), 1), 3),
+                  "mcnemar_p": None if p is None else round(p, 5)}
     return out
 
 
@@ -560,11 +588,12 @@ def report_by_language(M):
 
 
 def report_uniqueness(M):
-    print("\n  SEGMENTATION UNIQUENESS -- of each language's boundary structure, how much a policy "
-          "trained on the\n  OTHER nine cannot predict. 0 = fully shared, which is what ONE subword "
-          "vocabulary gives by\n  construction; `surface` is the same measure on raw local characters, "
-          "the floor that orthographic\n  disjointness alone forces. EXCESS = model - surface is the "
-          "part that is not just the writing system.")
+    print("\n  SEGMENTATION UNIQUENESS -- on the SAME held-out positions, what the language's own probe "
+          "gets\n  right that a probe trained on the OTHER nine gets wrong. only-own is that count over "
+          "all test\n  positions; unique% is it over the positions the own probe gets right. only-shared "
+          "is the reverse\n  and is the noise floor: with no language-specific structure the two "
+          "disagreements are symmetric,\n  which is what McNemar's p tests. `surf` repeats only-own on "
+          "raw local characters, for reference.")
     for n, r in M.items():
         t = r.get("transfer") or {}
         u, us = t.get("uniqueness"), t.get("uniqueness_surface")
@@ -572,20 +601,21 @@ def report_uniqueness(M):
             continue
         langs = [l for l in sorted(u) if u[l]]
         print(f"\n  {n} (layer {t.get('layer')}, {u[langs[0]]['n_train']} training rows per probe)")
-        print(f"    {'lang':>6}{'within':>9}{'shared':>9}{'unique':>9}{'surf-uniq':>12}{'EXCESS':>9}")
-        ex = []
+        print(f"    {'lang':>6}{'own acc':>9}{'shared':>8}{'only-own':>10}{'only-shd':>10}"
+              f"{'unique%':>9}{'McNemar p':>11}{'surf':>8}")
         for l in langs:
-            su = (us or {}).get(l)
-            e = u[l]["unique"] - su["unique"] if su else None
-            if e is not None:
-                ex.append(e)
-            print(f"    {l:>6}{u[l]['within']:>9.3f}{u[l]['shared']:>9.3f}{u[l]['unique']:>9.3f}"
-                  f"{(su['unique'] if su else float('nan')):>12.3f}"
-                  f"{(e if e is not None else float('nan')):>+9.3f}")
-        mu = np.mean([u[l]["unique"] for l in langs])
-        ms = np.mean([us[l]["unique"] for l in langs if (us or {}).get(l)]) if us else float("nan")
-        print(f"    {'MEAN':>6}{'':>9}{'':>9}{mu:>9.3f}{ms:>12.3f}"
-              f"{(np.mean(ex) if ex else float('nan')):>+9.3f}")
+            v, su = u[l], (us or {}).get(l)
+            p = v.get("mcnemar_p")
+            print(f"    {l:>6}{v['own_acc']:>9.3f}{v['shared_acc']:>8.3f}{v['only_own']:>10.3f}"
+                  f"{v['only_shared']:>10.3f}{v['unique']:>8.1%}"
+                  f"{('<1e-4' if p is not None and p < 1e-4 else (f'{p:.4f}' if p is not None else '-')):>11}"
+                  f"{(su['only_own'] if su else float('nan')):>8.3f}")
+        agg = lambda k, src: np.mean([src[l][k] for l in langs if src and src.get(l)])  # noqa: E731
+        print(f"    {'MEAN':>6}{agg('own_acc', u):>9.3f}{agg('shared_acc', u):>8.3f}"
+              f"{agg('only_own', u):>10.3f}{agg('only_shared', u):>10.3f}{agg('unique', u):>8.1%}"
+              f"{'':>11}{(agg('only_own', us) if us else float('nan')):>8.3f}")
+        print(f"    {u[langs[0]]['n_train']} training rows per probe, "
+              f"{u[langs[0]]['n_test']} test positions per language")
         jm = t.get("joint_matched")
         if jm:
             w = t.get("within") or {}
@@ -668,11 +698,16 @@ def _uniqtest():
             data[l] = {"Xtr": X[:400], "ytr": y[:400], "Xte": X[400:], "yte": y[400:]}
         u = uniqueness(data)
         mu = float(np.mean([v["unique"] for v in u.values() if v]))
-        print(f"    {name:20} mean uniqueness {mu:.3f}")
+        sym = float(np.mean([v["only_own"] - v["only_shared"] for v in u.values() if v]))
+        print(f"    {name:20} unique {mu:.3f}   only-own minus only-shared {sym:+.3f}")
         if shared:
-            assert mu < 0.25, (name, mu, u)
+            # a shared rule: the own probe recovers almost nothing the shared one misses, and the two
+            # disagreements are symmetric -- only-own and only-shared should roughly cancel
+            assert mu < 0.15, (name, mu, u)
+            assert abs(sym) < 0.06, (name, sym)
         else:
-            assert mu > 0.70, (name, mu, u)
+            assert mu > 0.40, (name, mu, u)
+            assert sym > 0.15, (name, sym)
     return True
 
 
