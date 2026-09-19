@@ -74,7 +74,12 @@ QA_BENCH = ("amharicpr", "ciral", "afriqa")
 NONE = "none"
 ALL_EN = "all:en"                  # English erased at EVERY encoder block simultaneously
 ALL_RND = "all:random"             # the same count of random rank-1 edits at the same blocks
-FIT_TAG = "sequential-per-arm"     # all_depth_fit marker; bumped when the fitting contract changes                      # the unedited pass: baseline + loader identity check
+FIT_TAG = "seq-per-arm-v2"         # all_depth_fit marker; bumped when the fitting contract changes
+# Control languages erased at every block alongside English. `all:random` says whether erasing A
+# direction hurts; only another LANGUAGE says whether ENGLISH is the one that hurts. Three by
+# default -- high-resource non-Latin, low-resource non-Latin, low-resource Latin -- because each
+# costs its own sequential n-pass chain plus a Belebele and a battery arm.
+CONTROL_LANGS = ("zh", "te", "sw")                      # the unedited pass: baseline + loader identity check
 
 
 def _split_suffix(kind, split):
@@ -141,6 +146,57 @@ def single_block_arms(res):
     return (NONE,) if res.get(PRUNED) else (NONE, "en", "random")
 
 
+def all_arms(controls):
+    """Erasure arms run at every block: English, the rank/site-matched random null, then the control
+    languages. Order is the contract -- English first so a truncated run still has the headline."""
+    return ("en", "random") + tuple(c for c in controls if c != "en")
+
+
+def all_depth_controls(r, n_boot=2000, seed=0):
+    """English erased at every block against CONTROL LANGUAGES erased the same way.
+
+    Every arm is scored on the SAME population -- the languages that are neither English nor any
+    control -- so no arm is measured on a set another arm was not. Measuring the English column on
+    all nine non-English languages while a control column excludes itself would compare different
+    populations, which is the asymmetry the original chosen-block matrix had to be fixed for.
+
+      en       effect on that population of erasing English everywhere
+      control  the same for each control language, and their mean
+      excess   paired (en - mean control) per query -- the headline: is ENGLISH special, or would
+               erasing any language do this?"""
+    bel = r.get("belebele") or {}
+    ctrl = sorted(k[4:] for k in bel if k.startswith("all:") and k[4:] not in ("en", "random"))
+    if NONE not in bel or ALL_EN not in bel or not ctrl:
+        return None
+    pop = [l for l, c in bel[NONE].items() if c and l != "en" and l not in ctrl]
+    if not pop:
+        return None
+    en_v, cv, exc_v = [], {c: [] for c in ctrl}, []
+    for l in pop:
+        base = _pq(r, NONE, l)
+        if not base:
+            continue
+        keys = sorted(base)
+
+        def dv(key):
+            got = _pq(r, key, l)
+            return np.array([got[k] - base[k] for k in keys if k in got]) if got else None
+        d_en = dv(ALL_EN)
+        ds = [dv(f"all:{c}") for c in ctrl]
+        if d_en is None or not len(d_en) or any(d is None or len(d) != len(d_en) for d in ds):
+            continue
+        en_v.append(d_en)
+        for c, d in zip(ctrl, ds):
+            cv[c].append(d)
+        exc_v.append(d_en - np.mean(ds, axis=0))
+    return {"controls": ctrl, "population": sorted(pop),
+            "en": _boot(en_v, n_boot, seed),
+            "per_control": {c: _boot(v, n_boot, seed) for c, v in cv.items()},
+            "control_mean": _boot([np.mean([cv[c][i] for c in ctrl], axis=0)
+                                   for i in range(len(en_v))], n_boot, seed) if en_v else None,
+            "excess": _boot(exc_v, n_boot, seed)}
+
+
 def english_done(res):
     """Whether an exp 3 part file is complete. run_one's early exit and status.sh both read this,
     so the two cannot drift -- status.sh used to call a file done as soon as the battery held the
@@ -154,7 +210,7 @@ def english_done(res):
     # it as never having run -- the same trap that broke the FLORES split guard.
     return bool(bat
                 and all(e in bat for e in single_block_arms(res))
-                and all(k in bat for k in (ALL_EN, ALL_RND))
+                and all(k in bat for k in (res.get("all_depth_arms") or [ALL_EN, ALL_RND]))
                 # An all-depth arm built from STACKED erasers describes an intervention that was
                 # never applied, so it is not a finished result. Without this the early exit in
                 # run_one fires before purge_stale_all_depth is ever reached and the job returns in
@@ -196,7 +252,8 @@ def prune_single_block(models=None):
     return out
 
 
-def fit_all_blocks(student, texts, lang, sid, fit_ids, n, device, big, seed, path):
+def fit_all_blocks(student, texts, lang, sid, fit_ids, n, device, big, seed, path,
+                   arms=("en", "random")):
     """A rank-1 English eraser and a site-matched random control at EVERY block, fitted
     SEQUENTIALLY with the upstream erasers already installed.
 
@@ -221,17 +278,23 @@ def fit_all_blocks(student, texts, lang, sid, fit_ids, n, device, big, seed, pat
     2n passes over the fit-half sentences, which is the only text fit_erasers ever saw. Each pass
     records ONE block, so memory stays flat."""
     if path.exists():
-        return load_fits(path)
+        have = load_fits(path)
+        missing = [a for a in arms if a not in (have.get(0) or {})]
+        if not missing:
+            return have
+        print(f"  [all-depth] sidecar lacks {missing} -> refitting every chain")
     keep = [i for i, s in enumerate(sid) if fit_ids[s]]
     ftexts, flang = [texts[i] for i in keep], lang[keep]
     fits = {b: {} for b in range(n)}
-    for arm in ("en", "random"):
+    for arm in arms:
         hooks = []
         for b in range(n):
             st, idx = block_states(student, ftexts, [b], per_text=PER_TEXT, device=device,
                                    batch_size=(4 if big else 8), seed=seed, hook=hooks or None)
             rows = np.array([t for t, _ in idx])
-            e = fit_erasers(st[b], flang[rows], ["en"], seed, block=b)[arm]
+            # "random" rides the English solve (its direction depends only on seed and block);
+            # a language arm solves that language against the rest in ITS chain's whitened metric.
+            e = fit_erasers(st[b], flang[rows], ["en" if arm == "random" else arm], seed, block=b)[arm]
             del st
             fits[b][arm] = e
             hooks.append((b, rank1_torch_fn(*e, device)))
@@ -249,7 +312,9 @@ def purge_stale_all_depth(res, outp):
     if res.get("all_depth_fit") == FIT_TAG or "all_depth_probe" not in res:
         return False
     res.pop("all_depth_probe", None)
-    for k in (ALL_EN, ALL_RND):
+    res.pop("all_depth_arms", None)
+    for k in [k for k in list((res.get("belebele") or {})) + list((res.get("battery") or {}))
+              if k.startswith("all:")]:
         (res.get("belebele") or {}).pop(k, None)
         (res.get("battery") or {}).pop(k, None)
     print("  [all-depth] discarding results from the stacked (non-composing) fit -> recomputing")
@@ -332,7 +397,8 @@ def n_english_cells(n_langs=10, n_depths=4):
 
 
 # ----------------------------------------------------------------------------------------------
-def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_split="devtest"):
+def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_split="devtest",
+            controls=CONTROL_LANGS):
     outp = part_path(ANALYSIS, name)
     res = read_json(outp) or {}
     if res.get("schema") != SCHEMA:            # part files from an older contract are discarded
@@ -488,7 +554,7 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
     purge_stale_all_depth(res, outp)
     if "all_depth_probe" not in res:
         fa = fit_all_blocks(student, texts, lang, sid, fit_ids, n, device, big, seed,
-                            fits_all_path(name, flores_split))
+                            fits_all_path(name, flores_split), arms=all_arms(controls))
         st, idx = block_states(student, texts, blocks, per_text=PER_TEXT, device=device,
                                batch_size=(4 if big else 8), seed=seed,
                                hook=[(b, rank1_torch_fn(*fa[b]["en"], device)) for b in range(n)])
@@ -555,11 +621,12 @@ def run_one(name, results, ckpt_dir, device, seed=0, skip_battery=False, flores_
     # is matched site for site. n simultaneous edits do n times the damage, so a drop here means
     # nothing unless the same number of random rank-1 edits at the same blocks is subtracted off.
     fa = load_fits(fits_all_path(name, flores_split))
+    res["all_depth_arms"] = [f"all:{a}" for a in all_arms(controls)]
 
     def all_encoder(eraser):
         return make_encode(student, device, batch_size=bs_enc,
                            hook=[(b, rank1_torch_fn(*fa[b][eraser], device)) for b in range(n)])
-    for key, er in ((ALL_EN, "en"), (ALL_RND, "random")):
+    for key, er in [(f"all:{a}", a) for a in all_arms(controls)]:
         if key not in res["belebele"]:
             print(f"=== {name}: Belebele, {er!r} erased at ALL {n} blocks ===")
             cells = eval_battery(all_encoder(er), STUDY_LANGS)["belebele"]
@@ -880,6 +947,16 @@ def merge(results="results/retrieval_bgem3.json", n_boot=2000, seed=0):
                 print("      per cell: " + "  ".join(
                     f"{c[0][:6]}-{c[1]}:{x['delta']:+.3f}{'*' if x['significant'] else ''}"
                     for c, x in a["rows"]))
+        s_ct = all_depth_controls(r, n_boot, seed)
+        if s_ct and s_ct.get("excess"):
+            print(f"      vs CONTROL LANGUAGES erased the same way ({' '.join(s_ct['controls'])}), "
+                  f"all scored on {' '.join(s_ct['population'])}:")
+            print(f"        English everywhere {_f(s_ct['en'])}  {_ci(s_ct['en'])}")
+            for c, v in sorted(s_ct["per_control"].items()):
+                print(f"        {c} everywhere{'':8}{_f(v)}  {_ci(v)}")
+            print(f"        control mean       {_f(s_ct['control_mean'])}  {_ci(s_ct['control_mean'])}")
+            print(f"      -> English EXCESS over a typical language {_f(s_ct['excess'])}  "
+                  f"{_ci(s_ct['excess'])}   (is English special, or would any language do this?)")
         rs = r.get("reinstatement")
         if rs:
             at = rs["at"]
@@ -1029,6 +1106,25 @@ def _selftest():
     assert all_depth_summary({"belebele": {NONE: _bel(0.0)}}) is None      # arm absent -> no row
     # devtest keeps the legacy filename (finished runs stay cached); any other split gets its own,
     # so the flag cannot hand back directions fitted on different text.
+    # the control summary must score EVERY arm on the same population -- neither English nor any
+    # control -- and its excess must be English minus the control MEAN, not minus zero.
+    TEN = ["te", "bn", "sw", "yo", "am", "ha", "rw", "en", "zh", "ar"]
+
+    def _cbel(off):
+        return {l: {"ndcg@10": 0.8 + off, "per_query": {f"q{i}": 0.8 + off for i in range(30)}}
+                for l in TEN}
+    ctrls = ("zh", "te", "sw")
+    rc = {"belebele": {NONE: _cbel(0.0), ALL_EN: _cbel(-0.10),
+                       **{f"all:{c}": _cbel(-0.04) for c in ctrls}}}
+    sc = all_depth_controls(rc, n_boot=200)
+    assert sc["controls"] == sorted(ctrls), sc["controls"]
+    assert set(sc["population"]) == set(TEN) - {"en", *ctrls}, sc["population"]
+    assert len(sc["population"]) == 6, sc["population"]
+    assert abs(sc["en"]["mean"] + 0.10) < 1e-9 and abs(sc["control_mean"]["mean"] + 0.04) < 1e-9, sc
+    assert abs(sc["excess"]["mean"] + 0.06) < 1e-9, sc["excess"]
+    assert all_depth_controls({"belebele": {NONE: _cbel(0.0), ALL_EN: _cbel(-0.1)}}) is None
+    assert all_arms(("zh", "te")) == ("en", "random", "zh", "te")
+    assert all_arms(("en", "zh")) == ("en", "random", "zh"), "English must not be duplicated"
     assert single_block_arms({}) == (NONE, "en", "random")
     full = {"battery": {NONE: {}, "en": {}, "random": {}, ALL_EN: {}, ALL_RND: {}},
             "erasure_check": {}, "reinstatement": {}, "all_depth_fit": FIT_TAG}
@@ -1074,6 +1170,10 @@ def main():
                          "positions on each side and a fit/probe boundary that is a real split "
                          "boundary. Run --flores-overlap first: whichever split Belebele's passages "
                          "came from is not held out from the Belebele cells.")
+    ap.add_argument("--control-langs", default=",".join(CONTROL_LANGS),
+                    help="languages erased at every block alongside English, as the matched control. "
+                         "Each costs its own sequential chain plus a Belebele and a battery arm; "
+                         "empty runs English and the random null only.")
     ap.add_argument("--prune-single-block", action="store_true",
                     help="drop the one-block erasure arms from every part file and stop them being "
                          "recomputed; the unedited baseline, latent probe and shift are kept")
@@ -1084,6 +1184,7 @@ def main():
     a = ap.parse_args()
     if a.selftest:
         return _selftest()
+    controls = tuple(c.strip() for c in a.control_langs.split(",") if c.strip())
     if a.prune_single_block:
         return prune_single_block()
     if a.flores_overlap:
@@ -1092,7 +1193,8 @@ def main():
         return merge(a.results, a.n_boot, a.seed)
     names = [a.only] if a.only else [n for n in MAIN_MODELS if n in models_in(a.results)[0]]
     for n in names:
-        run_one(n, a.results, a.ckpt_dir, a.device, a.seed, a.skip_battery, a.flores_split)
+        run_one(n, a.results, a.ckpt_dir, a.device, a.seed, a.skip_battery, a.flores_split,
+                controls)
 
 
 if __name__ == "__main__":

@@ -70,7 +70,9 @@ cons_for()  { if [ -n "$BIG_CONSTRAINT" ] && is_big "$1"; then echo "$BIG_CONSTR
 # Per-experiment ceilings for the SLOWEST model, scaled down for the smaller ones (a
 # subword-small pass is minutes, byte-large's per-position extraction is hours): asking 30h for
 # byte-small only delays scheduling, and on a capped QOS gets the job rejected outright.
-hours_base() { case "$1" in english) echo 12 ;; segment) echo 10 ;; *) echo 8 ;; esac; }
+# english now fits 2 + len(CONTROL_LANGS) sequential chains and scores an arm each, so its
+# ceiling grew with the control set; override HOURS_ENGLISH to trade wall for scheduling speed.
+hours_base() { case "$1" in english) echo "${HOURS_ENGLISH-16}" ;; segment) echo 10 ;; *) echo 8 ;; esac; }
 size_pct()   { case "$1" in *-large|BGE-M3) echo 100 ;; *-base) echo 75 ;; *) echo 50 ;; esac; }
 hours_for()  { local h=$(( ($(hours_base "$1") * $(size_pct "${2-x-large}") + 99) / 100 ))
                [ "$h" -lt 2 ] && h=2; echo "$h"; }
