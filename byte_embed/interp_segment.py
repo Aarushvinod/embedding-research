@@ -61,7 +61,7 @@ LABELS = ("tok_end", "interior", "word_end", "random")
 BYTE_MODELS = ["byte-small", "byte-base", "byte-large"]
 NO_SPACES = {"zh"}
 SURFACE_K = 4                      # bytes of context on each side for the surface baseline
-TRANSFER_V = 3                     # transfer-stage contract; bump to recompute JUST that stage
+TRANSFER_V = 4                     # transfer-stage contract; bump to recompute JUST that stage
 
 
 # ----------------------------------------------------------------------------------------------
@@ -354,54 +354,80 @@ def _cut(clf, Xtr, ytr):
     return float(max(cand, key=lambda t: balanced_accuracy_score(ytr, s > t)))
 
 
-def uniqueness(data, seed=0):
-    """Per language: what fraction of its held-out boundary positions the language's OWN probe
-    gets right and a probe trained on the OTHER languages gets wrong.
+def _mcnemar(b, c):
+    """Two-sided McNemar on the discordant counts; both probes score identical rows."""
+    if b + c == 0:
+        return 1.0
+    try:
+        from scipy.stats import binomtest
+        return round(float(binomtest(b, b + c, 0.5).pvalue), 6)
+    except Exception:                                        # noqa: BLE001 — scipy optional
+        return None
 
-      only_own     that count over ALL test positions
-      unique       that count over the positions the own probe gets right -- "of what is decodable
-                   here at all, how much is not reachable from the other languages"
-      only_shared  the reverse, which is the noise floor: with no language-specific structure the
-                   two disagreements should be symmetric, and McNemar tests exactly that.
 
-    Both probes see the same number of training rows (the smallest language's budget, the shared one
-    drawing m/(L-1) from each other language) and are scored on identical rows, so nothing here is
-    normalised by a quantity that can be small."""
+def uniqueness(data, seed=0, ref="en"):
+    """What each language's own probe recovers that other languages' probes miss.
+
+    One probe per language, every one trained on the SAME m rows (the smallest language's budget), so
+    the own probe and every foreign probe are the same object viewed from different targets and none
+    is stronger merely for having more data. Each is then scored on THIS language's held-out
+    positions, with its threshold chosen on this language's training half so a foreign intercept
+    transports.
+
+    Two references, because they answer different questions:
+      _en   what the own probe gets right and ENGLISH gets wrong -- distance from English, the claim
+      _all  what the own probe gets right and ALL nine others get wrong -- distinctive against every
+            language in the set, which same-family neighbours can wash out
+
+    Deliberately NOT a probe pooled over the nine: that one carries two handicaps -- never having seen
+    this language, and fitting nine languages with one linear direction -- and only the first is the
+    effect. Nine separate probes intersected leave just the first.
+
+    `only_other_*` is the reverse count and is the noise floor: with no language-specific structure
+    the two disagreements are symmetric, which is what the McNemar p tests."""
     from sklearn.linear_model import LogisticRegression
     langs = sorted(data)
     if len(langs) < 3:
         return None
     m = min(len(data[l]["ytr"]) for l in langs)
-    per = max(m // (len(langs) - 1), 1)
+    clf = {}
+    for a in langs:
+        Xa, ya = _draw(data[a], m, seed, f"within:{a}")
+        if len(set(np.asarray(ya).tolist())) > 1:
+            clf[a] = LogisticRegression(max_iter=2000, C=10.0, random_state=seed).fit(Xa, ya)
     out = {}
     for l in langs:
         d = data[l]
         yte = np.asarray(d["yte"])
-        if len(set(yte.tolist())) < 2:
+        if l not in clf or len(set(yte.tolist())) < 2:
             out[l] = None
             continue
-        Xw, yw = _draw(d, m, seed, f"within:{l}")
-        parts = [_draw(data[o], per, seed, f"loo:{l}:{o}") for o in langs if o != l]
-        Xs = np.concatenate([p[0] for p in parts], 0)
-        ys = np.concatenate([p[1] for p in parts], 0)
-        if len(set(np.asarray(yw).tolist())) < 2 or len(set(ys.tolist())) < 2:
+
+        def right(a, _d=d, _y=yte):
+            c = clf[a]
+            return (c.decision_function(_d["Xte"]) > _cut(c, _d["Xtr"], _d["ytr"])) == _y
+        ro = right(l)
+        foreign = {a: right(a) for a in clf if a != l}
+        if not foreign:
             out[l] = None
             continue
-        fit = lambda X, y: LogisticRegression(max_iter=2000, C=10.0, random_state=seed).fit(X, y)  # noqa: E731
-        own, sh = fit(Xw, yw), fit(Xs, ys)
-        ro = (own.decision_function(d["Xte"]) > _cut(own, d["Xtr"], d["ytr"])) == yte
-        rs = (sh.decision_function(d["Xte"]) > _cut(sh, d["Xtr"], d["ytr"])) == yte
-        n, b, c = len(yte), int((ro & ~rs).sum()), int((~ro & rs).sum())
-        try:
-            from scipy.stats import binomtest
-            p = float(binomtest(b, b + c, 0.5).pvalue) if b + c else 1.0
-        except Exception:                                    # noqa: BLE001 — scipy optional
-            p = None
-        out[l] = {"n_test": n, "n_train": int(m),
-                  "own_acc": round(float(ro.mean()), 3), "shared_acc": round(float(rs.mean()), 3),
-                  "only_own": round(b / n, 3), "only_shared": round(c / n, 3),
-                  "unique": round(b / max(int(ro.sum()), 1), 3),
-                  "mcnemar_p": None if p is None else round(p, 5)}
+        n, own_r = len(yte), max(int(ro.sum()), 1)
+        row = {"n_test": int(n), "n_train": int(m), "n_foreign": len(foreign),
+               "own_acc": round(float(ro.mean()), 3)}
+
+        def pair(others_right, tag):
+            b, c = int((ro & ~others_right).sum()), int((~ro & others_right).sum())
+            row[f"only_own_{tag}"] = round(b / n, 3)
+            row[f"only_other_{tag}"] = round(c / n, 3)
+            row[f"unique_{tag}"] = round(b / own_r, 3)
+            row[f"p_{tag}"] = _mcnemar(b, c)
+        if ref in foreign:
+            row["ref_acc"] = round(float(foreign[ref].mean()), 3)
+            pair(foreign[ref], "en")
+        # ALL nine miss it: intersect the failures, i.e. no foreign probe gets it
+        pair(np.logical_or.reduce(list(foreign.values())), "all")
+        row["mean_foreign_acc"] = round(float(np.mean([r.mean() for r in foreign.values()])), 3)
+        out[l] = row
     return out
 
 
@@ -588,12 +614,13 @@ def report_by_language(M):
 
 
 def report_uniqueness(M):
-    print("\n  SEGMENTATION UNIQUENESS -- on the SAME held-out positions, what the language's own probe "
-          "gets\n  right that a probe trained on the OTHER nine gets wrong. only-own is that count over "
-          "all test\n  positions; unique% is it over the positions the own probe gets right. only-shared "
-          "is the reverse\n  and is the noise floor: with no language-specific structure the two "
-          "disagreements are symmetric,\n  which is what McNemar's p tests. `surf` repeats only-own on "
-          "raw local characters, for reference.")
+    print("\n  SEGMENTATION UNIQUENESS -- on the SAME held-out positions, what this language's own probe "
+          "gets right\n  that other languages' probes get wrong. Every probe is a separate "
+          "single-language probe on the same\n  number of rows, scored here with its threshold "
+          "calibrated on this language's training half.\n  only-own = that count over all test positions; "
+          "unique% = over the positions the own probe gets right.\n  only-oth = the reverse, the noise "
+          "floor -- with no language-specific structure the two disagreements\n  are symmetric, which is "
+          "what McNemar's p tests. `surf` repeats only-own on raw local characters.")
     for n, r in M.items():
         t = r.get("transfer") or {}
         u, us = t.get("uniqueness"), t.get("uniqueness_surface")
@@ -601,21 +628,32 @@ def report_uniqueness(M):
             continue
         langs = [l for l in sorted(u) if u[l]]
         print(f"\n  {n} (layer {t.get('layer')}, {u[langs[0]]['n_train']} training rows per probe)")
-        print(f"    {'lang':>6}{'own acc':>9}{'shared':>8}{'only-own':>10}{'only-shd':>10}"
-              f"{'unique%':>9}{'McNemar p':>11}{'surf':>8}")
-        for l in langs:
-            v, su = u[l], (us or {}).get(l)
-            p = v.get("mcnemar_p")
-            print(f"    {l:>6}{v['own_acc']:>9.3f}{v['shared_acc']:>8.3f}{v['only_own']:>10.3f}"
-                  f"{v['only_shared']:>10.3f}{v['unique']:>8.1%}"
-                  f"{('<1e-4' if p is not None and p < 1e-4 else (f'{p:.4f}' if p is not None else '-')):>11}"
-                  f"{(su['only_own'] if su else float('nan')):>8.3f}")
-        agg = lambda k, src: np.mean([src[l][k] for l in langs if src and src.get(l)])  # noqa: E731
-        print(f"    {'MEAN':>6}{agg('own_acc', u):>9.3f}{agg('shared_acc', u):>8.3f}"
-              f"{agg('only_own', u):>10.3f}{agg('only_shared', u):>10.3f}{agg('unique', u):>8.1%}"
-              f"{'':>11}{(agg('only_own', us) if us else float('nan')):>8.3f}")
-        print(f"    {u[langs[0]]['n_train']} training rows per probe, "
-              f"{u[langs[0]]['n_test']} test positions per language")
+        def fp(p):
+            return "<1e-4" if p is not None and p < 1e-4 else (f"{p:.4f}" if p is not None else "-")
+        agg = lambda k, src: np.mean([src[l][k] for l in langs                     # noqa: E731
+                                      if src and src.get(l) and k in src[l]])
+        for tag, title in (("en", "vs ENGLISH only -- distance from English"),
+                           ("all", "vs ALL other languages -- distinctive against every one of them")):
+            have = [l for l in langs if f"only_own_{tag}" in u[l]]
+            if not have:
+                continue
+            print(f"\n    {title}")
+            print(f"    {'lang':>6}{'n_test':>8}{'own acc':>9}{'other':>8}{'only-own':>10}"
+                  f"{'only-oth':>10}{'unique%':>9}{'McNemar p':>11}{'surf':>8}")
+            for l in have:
+                v, su = u[l], (us or {}).get(l)
+                oth = v.get("ref_acc") if tag == "en" else v.get("mean_foreign_acc")
+                print(f"    {l:>6}{v['n_test']:>8}{v['own_acc']:>9.3f}{oth:>8.3f}"
+                      f"{v[f'only_own_{tag}']:>10.3f}{v[f'only_other_{tag}']:>10.3f}"
+                      f"{v[f'unique_{tag}']:>8.1%}{fp(v[f'p_{tag}']):>11}"
+                      f"{((su or {}).get(f'only_own_{tag}', float('nan'))):>8.3f}")
+            print(f"    {'MEAN':>6}{'':>8}{agg('own_acc', u):>9.3f}"
+                  f"{agg('ref_acc' if tag == 'en' else 'mean_foreign_acc', u):>8.3f}"
+                  f"{agg(f'only_own_{tag}', u):>10.3f}{agg(f'only_other_{tag}', u):>10.3f}"
+                  f"{agg(f'unique_{tag}', u):>8.1%}{'':>11}"
+                  f"{(agg(f'only_own_{tag}', us) if us else float('nan')):>8.3f}")
+        print(f"\n    {u[langs[0]]['n_train']} training rows per probe (every probe, own and foreign); "
+              f"{u[langs[0]]['n_foreign']} foreign probes per language")
         jm = t.get("joint_matched")
         if jm:
             w = t.get("within") or {}
@@ -684,30 +722,54 @@ def report_transfer(M, metric="auc"):
 
 
 def _uniqtest():
-    """Two synthetic regimes: one shared boundary rule across languages (unique -> 0) and a
-    per-language rule (unique -> 1). The measure has to separate them."""
+    """Three synthetic regimes. The vs-ALL intersection is combinatorially fragile -- if foreign
+    failures were independent, the chance that all nine miss a position would be ~0.35^9 and the
+    measure would read zero whatever the truth. Real languages fail together on the same hard
+    positions, so the regimes here give the foreign probes CORRELATED rules (families and an
+    isolate), which is the case the measure has to discriminate."""
     rng = np.random.default_rng(0)
-    d, per_l = 24, 600
-    for name, shared in (("shared rule", True), ("per-language rule", False)):
+    d, n_l = 24, 600
+    L = list("abcde")
+
+    def build(rule):                       # rule: lang -> weight vector
         data = {}
-        w_shared = rng.standard_normal(d)
-        for k, l in enumerate("abcde"):
-            w = w_shared if shared else rng.standard_normal(d)
-            X = rng.standard_normal((per_l, d))
-            y = ((X @ w) > 0).astype(int)
+        for l in L:
+            X = rng.standard_normal((n_l, d))
+            y = ((X @ rule[l]) > 0).astype(int)
             data[l] = {"Xtr": X[:400], "ytr": y[:400], "Xte": X[400:], "yte": y[400:]}
-        u = uniqueness(data)
-        mu = float(np.mean([v["unique"] for v in u.values() if v]))
-        sym = float(np.mean([v["only_own"] - v["only_shared"] for v in u.values() if v]))
-        print(f"    {name:20} unique {mu:.3f}   only-own minus only-shared {sym:+.3f}")
-        if shared:
-            # a shared rule: the own probe recovers almost nothing the shared one misses, and the two
-            # disagreements are symmetric -- only-own and only-shared should roughly cancel
-            assert mu < 0.15, (name, mu, u)
-            assert abs(sym) < 0.06, (name, sym)
-        else:
-            assert mu > 0.40, (name, mu, u)
-            assert sym > 0.15, (name, sym)
+        return data
+
+    w_a, w_b, w_iso = rng.standard_normal(d), rng.standard_normal(d), rng.standard_normal(d)
+    regimes = {
+        # every language the same rule -> nothing is unique on either reference
+        "one shared rule": ({l: w_a for l in L}, "c", dict(a_all=(None, .12), b_all=(None, .12),
+                                                           b_en=(None, .20))),
+        # two families: a,b share; c,d,e share. A cross-family probe fails, an in-family one does not,
+        # so vs-ONE is high while vs-ALL is washed out by the family neighbour.
+        "two families": ({"a": w_a, "b": w_a, "c": w_b, "d": w_b, "e": w_b}, "c",
+                         dict(a_all=(None, .15), b_all=(None, .15), b_en=(.30, None))),
+        # one isolate: a alone, b..e share. a is unpredictable by ANY other; b is covered by c,d,e.
+        # the isolate's own vs-ALL is bounded below by how often the shared-rule probes agree with
+        # it by chance, so it sits well under 1 even though nothing predicts it -- 0.20 is the floor
+        # that separates it from the ~0.00 every covered language reads.
+        "one isolate": ({"a": w_iso, **{l: w_b for l in "bcde"}}, "a",
+                        dict(a_all=(.20, None), b_all=(None, .15), b_en=(.25, None))),
+    }
+    for name, (rule, ref, want) in regimes.items():
+        u = uniqueness(build(rule), ref=ref)
+        got = {"a_all": u["a"]["unique_all"], "b_all": u["b"]["unique_all"],
+               "b_en": u["b"].get("unique_en")}
+        be = got["b_en"]
+        print(f"    {name:16} a vs-all {got['a_all']:.3f}   b vs-all {got['b_all']:.3f}"
+              f"   b vs-{ref} {'-' if be is None else format(be, '.3f')}")
+        for k, (lo, hi) in want.items():
+            if lo is not None:
+                assert got[k] >= lo, (name, k, got[k], ">=", lo)
+            if hi is not None:
+                assert got[k] <= hi, (name, k, got[k], "<=", hi)
+        # clearing every probe is strictly harder than clearing one
+        assert all(v["unique_all"] <= v["unique_en"] + 1e-9 for v in u.values()
+                   if v and "unique_en" in v), (name, u)
     return True
 
 
