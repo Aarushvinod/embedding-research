@@ -1,7 +1,7 @@
 #!/bin/bash
 # Interpretability experiments on the TRAINED students — no retraining. Reads checkpoints/ + the cached
 # 20k eval pools; every script skips finished work (per stage / per language), so re-running this is
-# free and a --requeue'd (preempted) job resumes where it stopped. Three experiments
+# free and a --requeue'd (preempted) job resumes where it stopped. Five experiments
 # (RETRIEVAL_EXPERIMENT.md, "Interpretability experiments"):
 #   segment   exp 5  segmentation probes (byte only; trained + pretrained + transfer)   budget 10h
 #   script    exp 4  native vs romanized (NN / RR / RN x 5 langs)          budget  8h; needs uroman
@@ -9,6 +9,9 @@
 #             their romanized drops can be read as inherited-or-not instead of in the abstract.
 #   english   exp 3  English erased inside the encoder (LEACE hook)        budget 12h
 #   heads     exp 6  language heads: patch a head with another language's signal   budget  8h
+#   pivot     exp 7  the English pivot: remove a mediator's shared subspace, re-score  budget 4h
+#             ALSO runs BGE-M3: exp 7 needs only an ENCODER (no activation hooks), so the
+#             teacher's own pivot is measurable and the students' can be read against it.
 # The budgets are deliberately generous: they are wall-clock CEILINGS for the slowest model on the
 # slowest card, not estimates (a subword-small pass is minutes to ~2h). MODE=model asks for the SUM
 # of the experiments it chains, capped by MAX_HOURS (36 by default) — raise MAX_HOURS only if the QOS
@@ -45,7 +48,7 @@ is_big()    { case "$1" in *-large|byte-base) return 0 ;; *) return 1 ;; esac; }
 MODE="${MODE-model}"
 CPUS="${CPUS-8}"; MEM="${MEM-48G}"                 # per-job CPU / RAM; some QOS cap these (tron default: 4 / 32G)
 MAX_HOURS="${MAX_HOURS-36}"                        # ceiling for the MODE=model sum; lower it if a QOS caps wall time
-EXPS="${EXPS-segment script english heads}"
+EXPS="${EXPS-segment script english heads pivot}"
 MODELS="${MODELS-byte-small subword-small byte-base subword-base byte-large subword-large BGE-M3}"
 TEACHER=BGE-M3                                     # exp 4's ceiling arm; no checkpoint, loaded from the hub
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -74,15 +77,16 @@ cons_for()  { if [ -n "$BIG_CONSTRAINT" ] && is_big "$1"; then echo "$BIG_CONSTR
 # english now fits 2 + len(CONTROL_LANGS) sequential chains and scores an arm each, so its
 # ceiling grew with the control set; override HOURS_ENGLISH to trade wall for scheduling speed.
 hours_base() { case "$1" in english) echo "${HOURS_ENGLISH-16}" ;; segment) echo 10 ;; heads) echo 8 ;;
-                              *) echo 8 ;; esac; }
+                              pivot) echo 4 ;; *) echo 8 ;; esac; }
 size_pct()   { case "$1" in *-large|BGE-M3) echo 100 ;; *-base) echo 75 ;; *) echo 50 ;; esac; }
 hours_for()  { local h=$(( ($(hours_base "$1") * $(size_pct "${2-x-large}") + 99) / 100 ))
                [ "$h" -lt 2 ] && h=2; echo "$h"; }
 # $1 = experiment, $2 = model. Exp 5 probes byte positions, so it is byte-only; the teacher has no
-# student block structure for the activation hooks exps 3 and 5 install, so it runs exp 4 alone.
+# student block structure for the activation hooks exps 3, 5 and 6 install, so it is limited to the
+# two experiments needing nothing but an encoder -- exp 4 (romanization) and exp 7 (the pivot).
 can_run()   { if [ "$1" = segment ] && [[ "$2" != byte-* ]]; then return 1; fi
-              # exp 6 needs the student block structure for its head hooks, like exps 3 and 5
-              if [ "$2" = "$TEACHER" ] && [ "$1" != script ]; then return 1; fi
+              case "$2:$1" in "$TEACHER":script|"$TEACHER":pivot) return 0 ;;
+                              "$TEACHER":*) return 1 ;; esac
               return 0; }
 exps_for()  { local out=(); for e in $EXPS; do if can_run "$e" "$1"; then out+=("$e"); fi; done; echo "${out[@]}"; }
 # MODE=model runs exps_for() back to back in ONE job, so its wall clock is the SUM of the same

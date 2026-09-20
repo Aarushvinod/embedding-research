@@ -14,8 +14,9 @@ MAIN = ["byte-small", "subword-small", "byte-base", "subword-base", "byte-large"
 ARMS = ["byte-small", "byte-base", "byte-large"]
 LABELS = [("main", MAIN, "results/retrieval_bgem3"), ("bteacher", ARMS, "results/retrieval_bgem3_bteacher"),
           ("brandom", ARMS, "results/retrieval_bgem3_brandom")]
-SCRIPT_M = MAIN + ["BGE-M3"]           # exp 4 also runs the teacher (BGE-M3) as its ceiling arm
-INTERP = [("english", MAIN), ("script", SCRIPT_M), ("segment", ARMS), ("heads", MAIN)]
+SCRIPT_M = MAIN + ["BGE-M3"]           # exps 4 and 7 also run the teacher (BGE-M3) as a ceiling arm
+INTERP = [("english", MAIN), ("script", SCRIPT_M), ("segment", ARMS), ("heads", MAIN),
+          ("pivot", SCRIPT_M)]
 
 
 # Ask each experiment for its own plan size instead of hardcoding it here (numpy-only imports).
@@ -85,6 +86,11 @@ def interp_state(x, m):
         if pr == {}  and sc:
             return "screened, no structure"
         return f"screen {len(sc)}/{d.get('total_heads')}" if sc else "-"
+    if x == "pivot":
+        if not (d.get("med") or {}):
+            return "-"
+        n = len(d.get("langs") or [])
+        return f"done ({n} langs)" if n >= 10 else f"{n}/10 langs"
     if x == "segment":
         n = len(d.get("langs") or {})
         return "done" if n >= 10 and d.get("transfer") else f"{n}/10 langs" + (" +transfer" if d.get("transfer") else "")
@@ -140,6 +146,22 @@ def interp_detail(x, m):
                 + (f"; partial {'+'.join(partial)}" if partial else "")
                 + (f"; transfer {len(t.get('langs') or t.get('acc') or [])} langs @ layer {t['layer']}"
                    if t else "; transfer not yet run"))
+    if x == "pivot":
+        med, base = d.get("med") or {}, d.get("base") or {}
+        if not med:
+            return "no cells yet"
+        ks = sorted(int(k) for k in (d.get("k_grid") or []))
+        if not ks:
+            return "no k-grid recorded"
+        top = str(ks[-1])
+        cells = [c[top] for a in med for b in med[a] for c in med[a][b].values() if top in c]
+        bp = [v for a in base for v in base[a].values()]
+        # a run that finished but never moved retrieval is a NULL, not a success, and the status
+        # table is where that has to be visible -- otherwise it reads as "done" for weeks.
+        return (f"{len(d.get('langs') or [])} langs, k0={d.get('k0')}, {d.get('n_test')} scored rows; "
+                f"base P@1 {sum(bp)/len(bp):.3f}; mean mediation @k={top} "
+                f"{sum(cells)/len(cells):+.3f}" + ("" if cells and sum(cells)/len(cells) >= 0.02
+                                                   else "  <- BELOW FLOOR, null"))
     return None
 
 
