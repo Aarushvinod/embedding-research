@@ -295,9 +295,27 @@ def run_one(name, results, ckpt_dir, device, n_sent=200, seed=0, screen_frac=0.2
             spread = abs(abl - slf) / max(abl, slf, 1e-12)
             print(f"    b{b:<2} h{h:<8}{abl:>10.5f}{slf:>11.5f}{alt:>10.5f}{big:>10.5f}"
                   f"{spread:>12.2f}")
-        print(f"  hooks fire: {fires}    substituted value lands: {lands}")
-        print("  SMOKE " + ("PASS" if fires and lands else
-                            "FAIL -- the patch is not landing; do not run the full job"))
+        # Does _slice() index the head we think it does? A wrong d_kv would straddle two heads and
+        # still pass `fires` and `lands`, corrupting every per-head number with no symptom. Patch one
+        # head while recording ALL heads of that block -- the record hooks go on after the patch hook
+        # so they see the patched tensor -- and require that exactly that head moved. Last block, so
+        # nothing downstream can contaminate it.
+        ib, ih = n_blocks - 1, min(1, n_heads - 1)
+        before = donor_means(student, r_txt, device, bs, geom)
+        _hs = _patch_hook(student, ib, ih, d_kv, D["__self__"][:, ib, ih] * 50.0)
+        try:
+            after = donor_means(student, r_txt, device, bs, geom)
+        finally:
+            for _x in _hs:
+                _x.remove()
+        moved = np.abs(after[:, ib] - before[:, ib]).max(axis=(0, 2))      # [n_heads]
+        others = float(np.delete(moved, ih).max()) if n_heads > 1 else 0.0
+        isolates = bool(moved[ih] > 1e-4 and others < 1e-5)
+        print(f"    isolation: patched b{ib} h{ih} -> that head moved {moved[ih]:.4f}, "
+              f"every other head in the block moved <= {others:.2e}")
+        print(f"  hooks fire: {fires}    value lands: {lands}    head slice isolates: {isolates}")
+        print("  SMOKE " + ("PASS" if fires and lands and isolates else
+                            "FAIL -- do not run the full job"))
         return
 
     # ---- screen: zero each head once, keep those whose ablation actually moves the embedding
