@@ -15,7 +15,7 @@ ARMS = ["byte-small", "byte-base", "byte-large"]
 LABELS = [("main", MAIN, "results/retrieval_bgem3"), ("bteacher", ARMS, "results/retrieval_bgem3_bteacher"),
           ("brandom", ARMS, "results/retrieval_bgem3_brandom")]
 SCRIPT_M = MAIN + ["BGE-M3"]           # exp 4 also runs the teacher (BGE-M3) as its ceiling arm
-INTERP = [("english", MAIN), ("script", SCRIPT_M), ("segment", ARMS)]
+INTERP = [("english", MAIN), ("script", SCRIPT_M), ("segment", ARMS), ("heads", MAIN)]
 
 
 # Ask each experiment for its own plan size instead of hardcoding it here (numpy-only imports).
@@ -78,6 +78,13 @@ def interp_state(x, m):
         done = sum(len(v.get("langs") or []) for v in conds.values())
         tot = SCRIPT_CELLS
         return "done" if done >= tot else (f"{done}/{tot} cond-langs" if done else ("shift" if d.get("shift") else "-"))
+    if x == "heads":
+        sc, pr = d.get("screen"), (d.get("profile") or {})
+        if pr.get("heads"):
+            return f"done ({len(pr['heads'])}/{d.get('total_heads')} profiled)"
+        if pr == {}  and sc:
+            return "screened, no structure"
+        return f"screen {len(sc)}/{d.get('total_heads')}" if sc else "-"
     if x == "segment":
         n = len(d.get("langs") or {})
         return "done" if n >= 10 and d.get("transfer") else f"{n}/10 langs" + (" +transfer" if d.get("transfer") else "")

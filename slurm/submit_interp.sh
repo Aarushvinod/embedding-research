@@ -8,6 +8,7 @@
 #             ALSO runs BGE-M3 itself as the ceiling arm -- the students' distillation target, so
 #             their romanized drops can be read as inherited-or-not instead of in the abstract.
 #   english   exp 3  English erased inside the encoder (LEACE hook)        budget 12h
+#   heads     exp 6  language heads: patch a head with another language's signal   budget  8h
 # The budgets are deliberately generous: they are wall-clock CEILINGS for the slowest model on the
 # slowest card, not estimates (a subword-small pass is minutes to ~2h). MODE=model asks for the SUM
 # of the experiments it chains, capped by MAX_HOURS (36 by default) — raise MAX_HOURS only if the QOS
@@ -44,7 +45,7 @@ is_big()    { case "$1" in *-large|byte-base) return 0 ;; *) return 1 ;; esac; }
 MODE="${MODE-model}"
 CPUS="${CPUS-8}"; MEM="${MEM-48G}"                 # per-job CPU / RAM; some QOS cap these (tron default: 4 / 32G)
 MAX_HOURS="${MAX_HOURS-36}"                        # ceiling for the MODE=model sum; lower it if a QOS caps wall time
-EXPS="${EXPS-segment script english}"
+EXPS="${EXPS-segment script english heads}"
 MODELS="${MODELS-byte-small subword-small byte-base subword-base byte-large subword-large BGE-M3}"
 TEACHER=BGE-M3                                     # exp 4's ceiling arm; no checkpoint, loaded from the hub
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -72,13 +73,15 @@ cons_for()  { if [ -n "$BIG_CONSTRAINT" ] && is_big "$1"; then echo "$BIG_CONSTR
 # byte-small only delays scheduling, and on a capped QOS gets the job rejected outright.
 # english now fits 2 + len(CONTROL_LANGS) sequential chains and scores an arm each, so its
 # ceiling grew with the control set; override HOURS_ENGLISH to trade wall for scheduling speed.
-hours_base() { case "$1" in english) echo "${HOURS_ENGLISH-16}" ;; segment) echo 10 ;; *) echo 8 ;; esac; }
+hours_base() { case "$1" in english) echo "${HOURS_ENGLISH-16}" ;; segment) echo 10 ;; heads) echo 8 ;;
+                              *) echo 8 ;; esac; }
 size_pct()   { case "$1" in *-large|BGE-M3) echo 100 ;; *-base) echo 75 ;; *) echo 50 ;; esac; }
 hours_for()  { local h=$(( ($(hours_base "$1") * $(size_pct "${2-x-large}") + 99) / 100 ))
                [ "$h" -lt 2 ] && h=2; echo "$h"; }
 # $1 = experiment, $2 = model. Exp 5 probes byte positions, so it is byte-only; the teacher has no
 # student block structure for the activation hooks exps 3 and 5 install, so it runs exp 4 alone.
 can_run()   { if [ "$1" = segment ] && [[ "$2" != byte-* ]]; then return 1; fi
+              # exp 6 needs the student block structure for its head hooks, like exps 3 and 5
               if [ "$2" = "$TEACHER" ] && [ "$1" != script ]; then return 1; fi
               return 0; }
 exps_for()  { local out=(); for e in $EXPS; do if can_run "$e" "$1"; then out+=("$e"); fi; done; echo "${out[@]}"; }
