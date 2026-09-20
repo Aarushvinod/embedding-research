@@ -220,6 +220,15 @@ def run_one(name, results, ckpt_dir, device, n_sent=200, seed=0, screen_frac=0.2
     if res.get("profile") and not smoke:
         print(f"=== {ANALYSIS}/{name}: already done -> skip ===")
         return
+    if device.startswith("cuda"):
+        import torch
+        if not torch.cuda.is_available():
+            raise SystemExit(
+                "[heads] no GPU visible. Login nodes have none -- get an allocation first:" + chr(10) +
+                "  srun --partition=scavenger --account=scavenger --qos=scavenger" + chr(10) +
+                "       --gres=gpu:rtxa6000:1 --cpus-per-task=8 --mem=48G --time=00:30:00" + chr(10) +
+                "       python -m byte_embed.interp_heads --only <model> --smoke" + chr(10) +
+                "(--device cpu works for --smoke but not for a full run)")
     loaded = load_student(name, results, ckpt_dir, device)
     if loaded is None:
         return
@@ -262,6 +271,28 @@ def run_one(name, results, ckpt_dir, device, n_sent=200, seed=0, screen_frac=0.2
     print(f"  donor caches: {len(D)} sets of {D[langs[0]].shape}")
 
     heads = [(b, h) for b in range(n_blocks) for h in range(n_heads)]
+
+    if smoke:
+        # Four heads spread across depth: enough to prove the path, cheap enough to be a smoke test.
+        probe = [(b, 0) for b in sorted({0, n_blocks // 3, 2 * n_blocks // 3, n_blocks - 1})]
+        print(f"  SMOKE: {len(rec)} recipients, probing heads {probe}")
+        ok = True
+        for b, h in probe:
+            z_abl = encode_patched(student, r_txt, b, h, d_kv, None, device, bs)
+            z_self = encode_patched(student, r_txt, b, h, d_kv, D["__self__"][:, b, h], device, bs)
+            z_alt = encode_patched(student, r_txt, b, h, d_kv, D[langs[0]][:, b, h], device, bs)
+            abl = float(1.0 - (z_abl * z_clean).sum(1).mean())
+            slf = float(1.0 - (z_self * z_clean).sum(1).mean())
+            alt = float(1.0 - (z_alt * z_clean).sum(1).mean())
+            # (1) the hook fires at all; (2) zeroing disturbs MORE than the head's own mean, which is
+            # what proves `value` is applied -- a hook that ignored it would give abl == slf exactly.
+            fires, uses = abl > 1e-5, abl > slf
+            ok = ok and fires and uses
+            print(f"    block {b:>2} head {h}:  ablate {abl:.5f}   self-mean {slf:.5f}   "
+                  f"{langs[0]}-mean {alt:.5f}    {'ok' if fires and uses else 'FAIL'}")
+        print("  SMOKE " + ("PASS -- hooks fire and the patched value is used"
+                            if ok else "FAIL -- the patch is not landing; do not run the full job"))
+        return
 
     # ---- screen: zero each head once, keep those whose ablation actually moves the embedding
     if "screen" not in res:
