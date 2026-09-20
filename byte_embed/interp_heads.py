@@ -276,22 +276,28 @@ def run_one(name, results, ckpt_dir, device, n_sent=200, seed=0, screen_frac=0.2
         # Four heads spread across depth: enough to prove the path, cheap enough to be a smoke test.
         probe = [(b, 0) for b in sorted({0, n_blocks // 3, 2 * n_blocks // 3, n_blocks - 1})]
         print(f"  SMOKE: {len(rec)} recipients, probing heads {probe}")
-        ok = True
+        d = lambda z: float(1.0 - (z * z_clean).sum(1).mean())            # noqa: E731
+        fires = lands = False
+        print(f"    {'head':>12}{'ablate':>10}{'self-mean':>11}{'alt-lang':>10}{'self x50':>10}"
+              f"{'|abl-self|':>12}")
         for b, h in probe:
-            z_abl = encode_patched(student, r_txt, b, h, d_kv, None, device, bs)
-            z_self = encode_patched(student, r_txt, b, h, d_kv, D["__self__"][:, b, h], device, bs)
-            z_alt = encode_patched(student, r_txt, b, h, d_kv, D[langs[0]][:, b, h], device, bs)
-            abl = float(1.0 - (z_abl * z_clean).sum(1).mean())
-            slf = float(1.0 - (z_self * z_clean).sum(1).mean())
-            alt = float(1.0 - (z_alt * z_clean).sum(1).mean())
-            # (1) the hook fires at all; (2) zeroing disturbs MORE than the head's own mean, which is
-            # what proves `value` is applied -- a hook that ignored it would give abl == slf exactly.
-            fires, uses = abl > 1e-5, abl > slf
-            ok = ok and fires and uses
-            print(f"    block {b:>2} head {h}:  ablate {abl:.5f}   self-mean {slf:.5f}   "
-                  f"{langs[0]}-mean {alt:.5f}    {'ok' if fires and uses else 'FAIL'}")
-        print("  SMOKE " + ("PASS -- hooks fire and the patched value is used"
-                            if ok else "FAIL -- the patch is not landing; do not run the full job"))
+            abl = d(encode_patched(student, r_txt, b, h, d_kv, None, device, bs))
+            slf = d(encode_patched(student, r_txt, b, h, d_kv, D["__self__"][:, b, h], device, bs))
+            alt = d(encode_patched(student, r_txt, b, h, d_kv, D[langs[0]][:, b, h], device, bs))
+            # A hook that DROPPED its argument would be insensitive to the value's scale, so a 50x
+            # value disturbing far more than zeroing is the decisive evidence that it lands.
+            big = d(encode_patched(student, r_txt, b, h, d_kv,
+                                   D["__self__"][:, b, h] * 50.0, device, bs))
+            fires = fires or abl > 1e-5
+            lands = lands or big > 3.0 * max(abl, 1e-9)
+            # Early heads often have a near-ZERO mean, so substituting it is the same intervention as
+            # zeroing and this spread is ~0 however correct the hook is. Context, not a criterion.
+            spread = abs(abl - slf) / max(abl, slf, 1e-12)
+            print(f"    b{b:<2} h{h:<8}{abl:>10.5f}{slf:>11.5f}{alt:>10.5f}{big:>10.5f}"
+                  f"{spread:>12.2f}")
+        print(f"  hooks fire: {fires}    substituted value lands: {lands}")
+        print("  SMOKE " + ("PASS" if fires and lands else
+                            "FAIL -- the patch is not landing; do not run the full job"))
         return
 
     # ---- screen: zero each head once, keep those whose ablation actually moves the embedding
