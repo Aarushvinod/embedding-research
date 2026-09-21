@@ -183,6 +183,19 @@ def report_bytevssub(n_boot=10000, loader=_load_part):
         print("No part files found for this setting.")
 
 
+def report_pair(a, b, n_boot=10000, loader=_load_part):
+    """An ARBITRARY pair, A minus B, per cell. report_bytevssub only pairs matched sizes, which is
+    the iso-compute contrast; a cross-size question ("does byte-small hold up against subword-base?")
+    has no matched partner and needs this. Same paired bootstrap over the same per-query cells, so
+    the numbers are read exactly as that table's are."""
+    da, db = loader("main", a), loader("main", b)
+    missing = [n for n, d in ((a, da), (b, db)) if not d]
+    if missing:
+        print(f"[{a} vs {b}] part file(s) missing for {', '.join(missing)} — skip")
+        return
+    _print_rows(f"{a} − {b}  (Δ>0 ⇒ {a} wins; * CI excludes 0)", compare(da, db, n_boot))
+
+
 def report_arms(n_boot=10000, loader=_load_part):
     """Boundary arms B (teacher) and C (random) minus A (raw main) per byte size."""
     for size in ("small", "base", "large"):
@@ -218,6 +231,10 @@ def _selftest():
 
 
 def main():
+    # these tables print Δ and ⇒; a Windows console defaults to cp1252 and dies on them, the same
+    # reason every interp main() opens this way
+    from byte_embed.interp_common import utf8_stdout
+    utf8_stdout()
     ap = argparse.ArgumentParser()
     ap.add_argument("--arms", action="store_true", help="boundary B/C vs A instead of byte vs subword")
     ap.add_argument("--training", action="store_true",
@@ -226,6 +243,9 @@ def main():
     ap.add_argument("--metrics", default=",".join(DEFAULT_METRICS),
                     help="comma list for the tables; available: ndcg@10 recall@100 mrr@10 precision@10 "
                          "recall@10, plus recall@1 / precision@1 on Belebele (paired bootstrap: nDCG@10 only)")
+    ap.add_argument("--pair", default=None, metavar="A,B",
+                    help="compare two named models instead of the matched-size byte-vs-subword "
+                         "sweep, e.g. --pair byte-small,subword-base")
     ap.add_argument("--n-boot", type=int, default=10000)
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
@@ -236,7 +256,12 @@ def main():
                          if a.training else "full-corpus final eval"))
     report_table(loader, tuple(m for m in a.metrics.split(",") if m))
     print("\n  paired bootstrap below uses nDCG@10 (the only metric with per-query scores)")
-    if a.arms:
+    if a.pair:
+        names = [x.strip() for x in a.pair.split(",") if x.strip()]
+        if len(names) != 2:
+            raise SystemExit(f"--pair wants exactly two comma-separated models, got {names}")
+        report_pair(names[0], names[1], a.n_boot, loader)
+    elif a.arms:
         report_arms(a.n_boot, loader)
     else:
         report_bytevssub(a.n_boot, loader)

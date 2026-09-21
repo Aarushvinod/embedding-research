@@ -49,6 +49,7 @@ ANALYSIS = "heads"
 SCHEMA = 1
 REF = "en"                         # the reference language the overlap test is run against
 TOP_FRAC = 0.10                    # a language's "own" heads: the top this fraction by lang score
+OWN_MARGIN = 1.25                  # a donor "owns" a head only by this factor over the runner-up
 
 
 # ----------------------------------------------------------------------------------------------
@@ -364,7 +365,65 @@ def run_one(name, results, ckpt_dir, device, n_sent=200, seed=0, screen_frac=0.2
 
 
 # ----------------------------------------------------------------------------------------------
-def merge():
+def report_per_lang(M, models=None):
+    """Per DONOR LANGUAGE, what the patching actually found -- the breakdown the summary hides.
+
+    The aggregate reports `max language score` over all donors at once, which cannot distinguish
+    "every language is equally unrepresented" from "one language has real heads and the rest do
+    not". Per donor:
+
+      best        the largest language score any profiled head reaches for this donor
+      mean        its mean over the profiled heads
+      owns        heads this donor wins CLEARLY (top score > OWN_MARGIN x the runner-up) -- the
+                  nearest thing to "its own heads". A plain argmax would hand every head with no
+                  language signal to whichever donor sorts first, which on scores this close to
+                  zero is pure list order; heads without a clear winner are reported as contested
+                  instead, and a high contested count is itself the finding
+      best@       where that head sits (block/head), so depth is visible
+      vs content  that head's language score over its OWN content score. Below 1 means the head
+                  moves further when fed a different SENTENCE than a different LANGUAGE -- it is a
+                  content head, not a language head.
+
+    `vs content` is the column that decides whether any of this is a language result at all."""
+    print("\n  PER-DONOR-LANGUAGE breakdown (profiled heads only)")
+    for n in (models or MAIN_MODELS):
+        r = M.get(n)
+        pr = (r or {}).get("profile") or {}
+        if not pr.get("heads"):
+            continue
+        langs, keep = r["langs"], pr["heads"]
+        prof = {l: np.array(v, float) for l, v in pr["lang"].items()}
+        cont = np.array(pr["content"], float)
+        nh = int(r.get("n_heads") or 1)
+        have = [l for l in langs if l in prof]
+        stack = np.stack([prof[l] for l in have])              # [n_lang, n_head_slots]
+        # A head "belongs to" a donor only when that donor wins CLEARLY; counted over the PROFILED
+        # slots only, since the rest are zeros and tie across every donor.
+        owner, contested = dict.fromkeys(have, 0), 0
+        for j in keep:
+            col = np.sort(stack[:, j])[::-1]
+            if col[0] > 0 and (len(col) < 2 or col[0] > OWN_MARGIN * max(col[1], 1e-12)):
+                owner[have[int(np.nanargmax(stack[:, j]))]] += 1
+            else:
+                contested += 1
+        ov = overlap_stats(prof, langs) or {}
+        print(f"\n    {n}  ({len(keep)} heads profiled, {contested} with no clear owner)")
+        print(f"    {'donor':>6}{'best':>9}{'mean':>9}{'owns':>6}{'best@':>9}"
+              f"{'vs content':>12}{'excess':>9}")
+        for l in sorted(have):
+            v = prof[l]
+            j = int(np.argmax(v))
+            b, h = divmod(j, nh)
+            ratio = v[j] / cont[j] if abs(cont[j]) > 1e-9 else float("nan")
+            ex = (ov.get(l) or {}).get("excess")
+            at = f"b{b}h{h}"
+            print(f"    {l:>6}{v[j]:>+9.4f}{float(np.mean(v[keep])):>+9.4f}{owner[l]:>6}{at:>9}"
+                  f"{ratio:>12.2f}" + (f"{ex:>+9.3f}" if ex is not None else f"{'-':>9}"))
+    print("\n  vs content < 1 at every donor: these are content heads. The language-head claim needs")
+    print("  at least one donor whose best head moves further on LANGUAGE than on CONTENT.")
+
+
+def merge(per_lang=False):
     d = merge_parts(ANALYSIS, schema=SCHEMA)
     M = d["models"]
     print("\nEXP 6 — LANGUAGE HEADS (causal: a head is forced to emit another language's signal and the"
@@ -410,6 +469,8 @@ def merge():
     print("\n  reading: heads whose ablation moves nothing carry nothing; a language-GENERAL head "
           "carries\n  'which language' for every language, a SPECIFIC one for its own. The EXCESS is the "
           "English\n  claim -- positive means other languages' language heads are English's heads.")
+    if per_lang:
+        report_per_lang(M)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -471,12 +532,14 @@ def main():
                     help="8 recipients, verify the hook path end to end, then exit")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--merge", action="store_true")
+    ap.add_argument("--per-lang", dest="per_lang", action="store_true",
+                    help="--merge: add the per-donor-language breakdown")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         return _selftest()
     if a.merge:
-        return merge()
+        return merge(a.per_lang)
     names = [a.only] if a.only else [n for n in MAIN_MODELS if n in models_in(a.results)[0]]
     for n in names:
         run_one(n, a.results, a.ckpt_dir, a.device, a.n_sent, a.seed, a.screen_frac, a.smoke)
