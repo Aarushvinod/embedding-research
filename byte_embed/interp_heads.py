@@ -50,6 +50,9 @@ SCHEMA = 1
 REF = "en"                         # the reference language the overlap test is run against
 TOP_FRAC = 0.10                    # a language's "own" heads: the top this fraction by lang score
 OWN_MARGIN = 1.25                  # a donor "owns" a head only by this factor over the runner-up
+M_GRID = (0.01, 0.05, 0.10)        # joint-ablation set sizes, as a fraction of all heads
+N_RAND = 5                         # random equal-size control sets drawn per set size
+POOL = 500                         # parallel sentences in the retrieval pool for the task readout
 
 
 # ----------------------------------------------------------------------------------------------
@@ -144,6 +147,43 @@ def donor_means(student, texts, device, batch_size, geom):
     return np.concatenate(chunks, 0)
 
 
+def _ablate_hooks(student, head_ids, n_heads, d_kv):
+    """Zero EVERY head in `head_ids` (flat indices) at once -- one pre-hook per block touched.
+
+    Single-head ablation is bounded by what one head carries, and the screen put that at 1-cos
+    <= 0.017: far too little to move a task metric, whatever the head does. The INRIA protocol
+    ablates the top-m% jointly for exactly this reason, so the unit of intervention has to be a
+    SET, with a random equal-size set as the control."""
+    import torch  # noqa: F401  (hooks run under the caller's inference_mode)
+    by_block = {}
+    for j in head_ids:
+        by_block.setdefault(int(j) // n_heads, []).append(int(j) % n_heads)
+
+    def mk(hs):
+        def pre(_mod, args):
+            x = args[0].clone()
+            for h in hs:
+                x[:, :, _slice(h, d_kv)] = 0
+            return (x,) + tuple(args[1:])
+        return pre
+    return [attn_o(student, b).register_forward_pre_hook(mk(hs)) for b, hs in by_block.items()]
+
+
+def encode_ablated(student, texts, head_ids, n_heads, d_kv, device, batch_size):
+    """Embeddings for `texts` with every head in `head_ids` zeroed simultaneously."""
+    import torch
+    out = []
+    with torch.inference_mode():
+        for i in range(0, len(texts), batch_size):
+            handles = _ablate_hooks(student, head_ids, n_heads, d_kv)
+            try:
+                out.append(student(texts[i:i + batch_size], device=device).float().cpu().numpy())
+            finally:
+                for h in handles:
+                    h.remove()
+    return l2norm(np.concatenate(out, 0))
+
+
 def encode_patched(student, texts, block, head, d_kv, values, device, batch_size):
     """Embeddings for `texts` with (block, head) forced to `values` ([N, d_kv], or None to zero)."""
     import torch
@@ -176,6 +216,44 @@ def top_heads(scores, frac=TOP_FRAC):
     another."""
     k = max(1, int(round(frac * len(scores))))
     return set(np.argsort(-np.asarray(scores, float))[:k].tolist())
+
+
+def lang_sets(screen_lang, langs, frac):
+    """{lang: top-`frac` heads by THAT LANGUAGE's own ablation effect}.
+
+    The scalar screen averages over a language-balanced recipient set, so a head that matters only
+    for Telugu contributes its effect on 50 of 500 sentences and is judged at a TENTH of its true
+    size -- then filtered out before the language measurement ever runs. Ranking inside a language
+    removes that dilution exactly, and costs nothing: the recipients were already stratified."""
+    S = np.asarray(screen_lang, float)                       # [n_heads, n_lang]
+    k = max(1, int(round(frac * S.shape[0])))
+    return {l: sorted(int(j) for j in np.argsort(-S[:, i])[:k]) for i, l in enumerate(langs)}
+
+
+def random_sets(n_total, k, n_draws, seed=0):
+    """`n_draws` random head sets of size k -- the control that says whether a language set's damage
+    is about WHICH heads it holds or merely HOW MANY."""
+    rng = np.random.default_rng(seed)
+    return [sorted(int(j) for j in rng.choice(n_total, size=k, replace=False)) for _ in range(n_draws)]
+
+
+def align_scores(Z, langs):
+    """{lang: mean P@1 retrieving every OTHER language from it}.
+
+    A TASK readout, replacing `1 - cos`. Cosine movement says the embedding shifted; it does not say
+    the model stopped working, and a head can move the embedding a long way without costing a single
+    retrieval. The pool is index-aligned parallel text, so row i is the same sentence in every
+    language and the gold match is the diagonal."""
+    out = {}
+    for a in langs:
+        ps = []
+        for b in langs:
+            if a == b:
+                continue
+            S = Z[a] @ Z[b].T
+            ps.append(float((S.argmax(1) == np.arange(len(Z[a]))).mean()))
+        out[a] = round(float(np.mean(ps)), 5)
+    return out
 
 
 def overlap_stats(prof, langs, ref=REF, frac=TOP_FRAC):
@@ -213,12 +291,76 @@ def specificity(prof, langs):
 
 
 # ----------------------------------------------------------------------------------------------
+def run_joint(student, res, par, langs, pool_ids, geom, device, bs, outp,
+              m_grid=M_GRID, n_rand=N_RAND, seed=0):
+    """Joint ablation of per-language head SETS, scored by retrieval, against random sets.
+
+    This is the INRIA ablation protocol ported to a bi-encoder: take the top-m% heads for a
+    language, zero them all at once, and ask what it costs the TASK. Two numbers decide whether a
+    language has its own machinery, and both have to be positive:
+
+      specificity  drop for language L minus the mean drop for the other nine, under L's own set.
+                   Negative means L's set is simply a set of important heads, not L's heads.
+      vs random    drop for L under L's set minus its drop under random sets of the SAME SIZE.
+                   Negative means the damage is about how many heads were removed, not which.
+
+    Steering and BLEU do not port -- there is no generation to steer into -- but the ablation and a
+    task metric do, and those were the parts whose absence made the single-head version a null."""
+    n_blocks, n_heads, d_kv = geom
+    total = n_blocks * n_heads
+    pool = {l: [par[l][i] for i in pool_ids] for l in langs}
+    npool = len(pool_ids)
+
+    def align_for(head_ids):
+        Z = {l: (encode_plain(student, pool[l], device, bs) if head_ids is None
+                 else encode_ablated(student, pool[l], head_ids, n_heads, d_kv, device, bs))
+             for l in langs}
+        return align_scores(Z, langs)
+
+    j = res.get("joint") or {"pool_n": npool, "m_grid": list(m_grid), "n_rand": n_rand,
+                             "lang": {}, "rand": {}}
+    if "clean" not in j:
+        j["clean"] = align_for(None)
+        res["joint"] = j
+        write_json(outp, res)
+        print(f"    clean align over {npool} parallel sentences: "
+              f"mean P@1 {np.mean(list(j['clean'].values())):.4f}")
+    sets = {m: lang_sets(res["screen_lang"], langs, m) for m in m_grid}
+    for m in m_grid:
+        mk, k = str(m), len(next(iter(sets[m].values())))
+        for l in langs:
+            if l in (j["lang"].get(mk) or {}):
+                continue
+            a = align_for(sets[m][l])
+            j["lang"].setdefault(mk, {})[l] = {"set": sets[m][l], "align": a,
+                                               "own_drop": round(j["clean"][l] - a[l], 5)}
+            res["joint"] = j
+            write_json(outp, res)
+            print(f"    m={m:.0%} ({k} heads)  {l}: own drop "
+                  f"{j['lang'][mk][l]['own_drop']:+.4f}")
+        # the control sets are drawn from (m, seed) alone, so a requeue redraws exactly the same
+        # ones and a half-finished grid never mixes two different null distributions
+        have = len(j["rand"].get(mk) or [])
+        for r, hs in enumerate(random_sets(total, k, n_rand, seed + int(m * 1000))):
+            if r < have:
+                continue
+            a = align_for(hs)
+            j["rand"].setdefault(mk, []).append({"set": hs, "align": a})
+            res["joint"] = j
+            write_json(outp, res)
+        rd = np.mean([np.mean([j["clean"][l] - d["align"][l] for l in langs])
+                      for d in j["rand"][mk]])
+        print(f"    m={m:.0%}: random-set mean drop {rd:+.4f}")
+    res["joint"] = j
+    write_json(outp, res)
+
+
 def run_one(name, results, ckpt_dir, device, n_sent=200, seed=0, screen_frac=0.25, smoke=False):
     outp = part_path(ANALYSIS, name)
     res = read_json(outp) or {}
     if res.get("schema") != SCHEMA:
         res = {"schema": SCHEMA}
-    if res.get("profile") and not smoke:
+    if res.get("profile") is not None and res.get("joint") and not smoke:
         print(f"=== {ANALYSIS}/{name}: already done -> skip ===")
         return
     if device.startswith("cuda"):
@@ -254,6 +396,9 @@ def run_one(name, results, ckpt_dir, device, n_sent=200, seed=0, screen_frac=0.2
     # sentences being patched
     cent = {l: l2norm(encode_plain(student, [par[l][i] for i in cent_ids], device, bs).mean(0)[None, :])[0]
             for l in langs}
+    # retrieval pool for the task readout: the SAME sentence indices in every language (FLORES rows
+    # are parallel), taken from the centroid half so it is disjoint from the patched recipients
+    pool_ids = [int(i) for i in cent_ids[:POOL]]
 
     # recipients: an equal slice of sentences per language, so no language dominates the averages
     per = max(len(rec_ids) // len(langs), 1) if not smoke else 1
@@ -319,32 +464,47 @@ def run_one(name, results, ckpt_dir, device, n_sent=200, seed=0, screen_frac=0.2
                             "FAIL -- do not run the full job"))
         return
 
-    # ---- screen: zero each head once, keep those whose ablation actually moves the embedding
-    if "screen" not in res:
-        sc = []
+    # ---- screen: zero each head once, PER LANGUAGE. The recipients are already 50 per language,
+    # so grouping the per-sentence cosines by language costs no extra forward passes -- the old
+    # scalar simply collapsed them one step too early, and that collapse is what hid any head whose
+    # importance is concentrated in one language. `screen` stays as the mean over languages, which
+    # is what the equal-sized groups made the old number anyway.
+    r_lang = np.array([l for _, l in rec])
+    lang_idx = {l: np.flatnonzero(r_lang == l) for l in langs}
+    if "screen_lang" not in res:
+        sl = []
         for j, (b, h) in enumerate(heads):
             z = encode_patched(student, r_txt, b, h, d_kv, None, device, bs)
-            sc.append(float(1.0 - (z * z_clean).sum(1).mean()))
+            cos = (z * z_clean).sum(1)
+            sl.append([float(1.0 - cos[lang_idx[l]].mean()) for l in langs])
             if j % max(len(heads) // 8, 1) == 0:
-                print(f"    screen {j + 1}/{len(heads)}  1-cos={sc[-1]:.4f}")
-        res["screen"] = sc
+                print(f"    screen {j + 1}/{len(heads)}  1-cos mean={np.mean(sl[-1]):.4f} "
+                      f"max-lang={max(sl[-1]):.4f}")
+        res["screen_lang"] = sl
+        res["screen"] = [float(np.mean(v)) for v in sl]
         write_json(outp, res)
+    sl = np.asarray(res["screen_lang"], float)
+    spread = sl.max(1) - sl.min(1)
+    print(f"  per-language screen: best single-language effect {sl.max():.4f} "
+          f"(vs {np.asarray(res['screen'], float).max():.4f} averaged), "
+          f"widest language spread {spread.max():.4f}")
     sc = np.array(res["screen"], float)
     keep = sorted(top_heads(sc, screen_frac))
     print(f"  screen: max 1-cos {sc.max():.4f}, median {np.median(sc):.4f}; "
           f"profiling the top {len(keep)}/{len(heads)}")
-    if sc.max() < 1e-4:
-        print("  NO head's ablation moves the embedding -> the representation is too distributed for "
-              "head-level analysis. That is the result; not profiling.")
+    flat = sc.max() < 1e-4
+    if flat:
+        print("  NO head's ablation moves the embedding -> nothing for the single-head profile. "
+              "That is a result; the joint-ablation stage below still runs, and is the one that "
+              "can distinguish 'no language structure' from 'structure spread across heads'.")
         res["profile"] = {}
         write_json(outp, res)
-        return
 
     # ---- profile the survivors: self baseline, then language and content, net of it
     prof = {l: np.zeros(len(heads)) for l in langs}
     content = np.zeros(len(heads))
     selfc = np.zeros(len(heads))
-    for n, j in enumerate(keep):
+    for n, j in enumerate([] if flat or res.get("profile") else keep):
         b, h = heads[j]
         z_self = encode_patched(student, r_txt, b, h, d_kv, D["__self__"][:, b, h], device, bs)
         selfc[j] = float(1.0 - (z_self * z_clean).sum(1).mean())
@@ -357,10 +517,17 @@ def run_one(name, results, ckpt_dir, device, n_sent=200, seed=0, screen_frac=0.2
         if n % max(len(keep) // 8, 1) == 0:
             print(f"    profile {n + 1}/{len(keep)}  block {b} head {h}  "
                   f"lang(max)={max(prof[l][j] for l in langs):+.4f}  content={content[j]:+.4f}")
-    res["profile"] = {"heads": keep, "lang": {l: prof[l].tolist() for l in langs},
-                      "content": content.tolist(), "self_cost": selfc.tolist(),
-                      "screen_frac": screen_frac, "n_recipients": len(rec)}
-    write_json(outp, res)
+    if not flat and not res.get("profile"):
+        res["profile"] = {"heads": keep, "lang": {l: prof[l].tolist() for l in langs},
+                          "content": content.tolist(), "self_cost": selfc.tolist(),
+                          "screen_frac": screen_frac, "n_recipients": len(rec)}
+        write_json(outp, res)
+
+    # ---- joint ablation of per-language head SETS, scored by retrieval, against random sets.
+    # Runs whatever the single-head profile found: its premise is that no single head carries
+    # enough to matter, which is what the screen keeps reporting.
+    print("  joint ablation: per-language head sets vs random sets, scored by retrieval")
+    run_joint(student, res, par, langs, pool_ids, geom, device, bs, outp, seed=seed)
     print(f"  saved -> {outp}")
 
 
@@ -423,6 +590,57 @@ def report_per_lang(M, models=None):
     print("  at least one donor whose best head moves further on LANGUAGE than on CONTENT.")
 
 
+def joint_stats(r, m):
+    """Per language, under its OWN top-m% set: (own drop, mean drop to the other nine, mean drop
+    under random sets of the same size). Returns None when that grid point is unfinished."""
+    j = r.get("joint") or {}
+    mk = str(m)
+    per, rnd, clean = (j.get("lang") or {}).get(mk), (j.get("rand") or {}).get(mk), j.get("clean")
+    if not per or not rnd or not clean:
+        return None
+    out = {}
+    for l, d in per.items():
+        others = [clean[x] - d["align"][x] for x in clean if x != l]
+        rdrop = [clean[l] - q["align"][l] for q in rnd]
+        out[l] = {"own": clean[l] - d["align"][l], "others": float(np.mean(others)),
+                  "rand": float(np.mean(rdrop)), "n_heads": len(d["set"])}
+    return out
+
+
+def report_joint(M, models=None):
+    """The INRIA ablation protocol ported: top-m% head sets zeroed jointly, scored by retrieval.
+
+    Both columns must be positive for a language to own machinery. `specificity` <= 0 says the set
+    is just important heads, not that language's heads. `vs random` <= 0 says the damage is about
+    how many heads were removed rather than which ones -- the control that makes the whole thing
+    interpretable, and the one the single-head version never had."""
+    print("\n  JOINT ABLATION -- per-language head sets, retrieval readout, random-set control")
+    for n in (models or MAIN_MODELS):
+        r = M.get(n)
+        j = (r or {}).get("joint")
+        if not j:
+            continue
+        clean = j.get("clean") or {}
+        print(f"\n    {n}  (pool {j.get('pool_n')} parallel sentences, clean mean P@1 "
+              f"{np.mean(list(clean.values())):.4f})")
+        print(f"    {'m':>6}{'heads':>7}{'own drop':>10}{'others':>9}{'specificity':>13}"
+              f"{'random':>9}{'vs random':>11}")
+        for m in j.get("m_grid") or M_GRID:
+            st = joint_stats(r, m)
+            if not st:
+                print(f"    {m:>6.0%}{'-':>7}{'(unfinished)':>10}")
+                continue
+            own = float(np.mean([v["own"] for v in st.values()]))
+            oth = float(np.mean([v["others"] for v in st.values()]))
+            rnd = float(np.mean([v["rand"] for v in st.values()]))
+            nh = next(iter(st.values()))["n_heads"]
+            print(f"    {m:>6.0%}{nh:>7}{own:>+10.4f}{oth:>+9.4f}{own - oth:>+13.4f}"
+                  f"{rnd:>+9.4f}{own - rnd:>+11.4f}")
+    print("\n    specificity > 0: ablating L's heads hurts L more than the other nine.")
+    print("    vs random > 0:   it hurts L more than removing the same NUMBER of arbitrary heads.")
+    print("    Both positive is the claim; either one at or below 0 and there are no language heads.")
+
+
 def merge(per_lang=False):
     d = merge_parts(ANALYSIS, schema=SCHEMA)
     M = d["models"]
@@ -469,6 +687,7 @@ def merge(per_lang=False):
     print("\n  reading: heads whose ablation moves nothing carry nothing; a language-GENERAL head "
           "carries\n  'which language' for every language, a SPECIFIC one for its own. The EXCESS is the "
           "English\n  claim -- positive means other languages' language heads are English's heads.")
+    report_joint(M)
     if per_lang:
         report_per_lang(M)
 
@@ -514,8 +733,44 @@ def _selftest():
     ov2 = overlap_stats(own_lang, list(own_lang), frac=0.1)
     assert all(v["own"] == 0.0 for v in ov2.values()), ov2
     assert abs(np.mean([v["excess"] for v in ov2.values()])) < 1e-9, "disjoint sets -> no excess"
+    # ---- joint-ablation helpers
+    # lang_sets must rank INSIDE a language. Head 7 is enormous for te and nothing elsewhere; the
+    # averaged screen buries it at 0.9/10 = 0.09, below head 0's flat 0.10, so the old scalar
+    # ranking drops it and the per-language ranking must not.
+    tenl = ["te", "bn", "en", "sw", "yo", "am", "ha", "rw", "zh", "ar"]
+    sl = np.full((10, 10), 0.01)                   # 10 heads x 10 languages
+    sl[0, :] = 0.10                                # a head that matters equally everywhere
+    sl[7, 0] = 0.90                                # te-only, and nine times bigger than head 0
+    ls = lang_sets(sl.tolist(), tenl, 0.1)
+    assert ls["te"] == [7], f"per-language ranking missed the te-only head: {ls}"
+    assert ls["bn"] == [0], ls
+    # head 7 averages (0.90 + 9x0.01)/10 = 0.099, just UNDER head 0's flat 0.10 -- so the scalar
+    # screen ranks the te-only head below a head it dwarfs, which is the bias being fixed
+    assert np.argmax(sl.mean(1)) == 0, "fixture must be one the AVERAGED screen gets wrong"
+
+    rs = random_sets(50, 6, 4, seed=0)
+    assert len(rs) == 4 and all(len(set(s)) == 6 for s in rs), "controls must be distinct k-sets"
+    assert all(max(s) < 50 for s in rs)
+    assert rs == random_sets(50, 6, 4, seed=0), "same seed must redraw the same controls"
+
+    # align_scores: identical embeddings across languages retrieve perfectly; shuffling one breaks it
+    base = l2norm(np.random.default_rng(0).normal(size=(40, 8)).astype(np.float32))
+    assert abs(align_scores({"a": base, "b": base}, ["a", "b"])["a"] - 1.0) < 1e-9
+    assert align_scores({"a": base, "b": base[::-1]}, ["a", "b"])["a"] < 0.2
+
+    # joint_stats arithmetic, and the None it must return on an unfinished grid point
+    rec = {"joint": {"clean": {"te": 0.9, "bn": 0.9}, "m_grid": [0.05],
+                     "lang": {"0.05": {"te": {"set": [1, 2], "align": {"te": 0.5, "bn": 0.88}}}},
+                     "rand": {"0.05": [{"set": [3, 4], "align": {"te": 0.86, "bn": 0.87}}]}}}
+    st = joint_stats(rec, 0.05)
+    assert abs(st["te"]["own"] - 0.4) < 1e-9 and abs(st["te"]["others"] - 0.02) < 1e-9, st
+    assert abs(st["te"]["rand"] - 0.04) < 1e-9, st
+    assert joint_stats(rec, 0.10) is None, "an unfinished grid point must report as unfinished"
+
     print("selftest OK: fractional head sets, movement readout, generality vs specificity, "
-          "reference-overlap excess (shared sets positive, per-language sets zero)")
+          "reference-overlap excess (shared sets positive, per-language sets zero), "
+          "per-language ranking recovers a head the averaged screen buries, seeded controls, "
+          "retrieval readout, joint-ablation arithmetic")
 
 
 def main():

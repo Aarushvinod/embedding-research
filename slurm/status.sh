@@ -81,9 +81,18 @@ def interp_state(x, m):
         return "done" if done >= tot else (f"{done}/{tot} cond-langs" if done else ("shift" if d.get("shift") else "-"))
     if x == "heads":
         sc, pr = d.get("screen"), (d.get("profile") or {})
+        j = d.get("joint") or {}
+        # the joint stage is the one that can still find something when the single-head profile
+        # is empty, so it decides "done" -- a part file with a profile but no joint is mid-run
+        nj = sum(len(v) for v in (j.get("lang") or {}).values())
+        want = len(d.get("langs") or []) * len(j.get("m_grid") or [])
+        if nj and want and nj >= want:
+            return f"done (joint {nj}/{want})"
+        if nj:
+            return f"joint {nj}/{want}"
         if pr.get("heads"):
-            return f"done ({len(pr['heads'])}/{d.get('total_heads')} profiled)"
-        if pr == {}  and sc:
+            return f"profiled {len(pr['heads'])}/{d.get('total_heads')}, joint pending"
+        if pr == {} and sc:
             return "screened, no structure"
         return f"screen {len(sc)}/{d.get('total_heads')}" if sc else "-"
     if x == "pivot":
