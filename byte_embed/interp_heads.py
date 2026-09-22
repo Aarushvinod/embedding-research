@@ -553,6 +553,7 @@ def report_per_lang(M, models=None):
 
     `vs content` is the column that decides whether any of this is a language result at all."""
     print("\n  PER-DONOR-LANGUAGE breakdown (profiled heads only)")
+    over = []                                   # (model, donor, ratio, stable, head) with ratio > 1
     for n in (models or MAIN_MODELS):
         r = M.get(n)
         pr = (r or {}).get("profile") or {}
@@ -574,6 +575,10 @@ def report_per_lang(M, models=None):
             else:
                 contested += 1
         ov = overlap_stats(prof, langs) or {}
+        # A ratio is only as good as its denominator: a head that barely moves on content makes any
+        # language score look large beside it. Mark ratios whose content score sits below the
+        # model's median profiled content score, so a small-over-smaller is not read as a finding.
+        med_c = float(np.median(np.abs(cont[keep])))
         print(f"\n    {n}  ({len(keep)} heads profiled, {contested} with no clear owner)")
         print(f"    {'donor':>6}{'best':>9}{'mean':>9}{'owns':>6}{'best@':>9}"
               f"{'vs content':>12}{'excess':>9}")
@@ -582,12 +587,28 @@ def report_per_lang(M, models=None):
             j = int(np.argmax(v))
             b, h = divmod(j, nh)
             ratio = v[j] / cont[j] if abs(cont[j]) > 1e-9 else float("nan")
+            stable = abs(cont[j]) >= med_c
+            if ratio > 1:
+                over.append((n, l, ratio, stable, f"b{b}h{h}"))
             ex = (ov.get(l) or {}).get("excess")
             at = f"b{b}h{h}"
             print(f"    {l:>6}{v[j]:>+9.4f}{float(np.mean(v[keep])):>+9.4f}{owner[l]:>6}{at:>9}"
-                  f"{ratio:>12.2f}" + (f"{ex:>+9.3f}" if ex is not None else f"{'-':>9}"))
-    print("\n  vs content < 1 at every donor: these are content heads. The language-head claim needs")
-    print("  at least one donor whose best head moves further on LANGUAGE than on CONTENT.")
+                  f"{ratio:>11.2f}{'' if stable else '*':1}"
+                  + (f"{ex:>+9.3f}" if ex is not None else f"{'-':>9}"))
+    # the verdict is COMPUTED: a fixed sentence here once asserted "< 1 at every donor" directly
+    # beneath a table with three donors above 1
+    print("\n  * = that head's content score is below its model's median, so the ratio is unstable")
+    solid = [o for o in over if o[3]]
+    if not over:
+        print("  vs content < 1 at every donor in every model: these are content heads, not language")
+        print("  heads.")
+    else:
+        print(f"  vs content > 1 for {len(over)} donor(s), {len(solid)} on a stable denominator:")
+        for m_, l, ratio, stable, at in over:
+            print(f"    {m_:14} {l:>3} {ratio:5.2f} at {at:>7}  "
+                  + ("stable -- worth a second look" if stable else "small denominator, unstable"))
+        print("  A language head needs a donor whose best head moves further on LANGUAGE than on")
+        print("  CONTENT on a denominator that is not itself near zero.")
 
 
 def joint_stats(r, m):
@@ -607,6 +628,49 @@ def joint_stats(r, m):
     return out
 
 
+def _sign_p(vals):
+    """Exact two-sided sign test over the nonzero values: (p, n_positive, n). Across 10 languages
+    only 9/10 or 10/10 of one sign reaches p < 0.05 -- low power, but it assumes nothing about the
+    distribution and it is honest about how little ten numbers can say."""
+    from math import comb
+    v = [x for x in vals if x is not None and x != 0]
+    n = len(v)
+    if not n:
+        return None, 0, 0
+    pos = sum(1 for x in v if x > 0)
+    k = min(pos, n - pos)
+    return min(1.0, 2.0 * sum(comb(n, i) for i in range(k + 1)) / 2.0 ** n), pos, n
+
+
+def chance_jaccard(k, n):
+    """EXACT expected Jaccard of two independent random k-subsets of n: the intersection size is
+    hypergeometric, so E[J] = sum_i P(|A&B| = i) * i / (2k - i).
+
+    The tempting closed form k / (2n - k) is a ratio of expectations, not the expectation of the
+    ratio, and it undershoots by up to ~23% at the small k this grid produces (k=2 of 48) -- which
+    would make an observed overlap look further above chance than it is."""
+    from math import comb
+    if k < 1 or k > n:
+        return None
+    tot = comb(n, k)
+    return sum(comb(k, i) * comb(n - k, k - i) / tot * i / (2 * k - i) for i in range(k + 1))
+
+
+def set_overlap(j, m, n_total):
+    """(mean pairwise Jaccard of the per-language head sets at size m, chance for random k-sets).
+
+    The test of the reading that specificity ~ 0 because every language's top set is the SAME set of
+    generally important heads: then own ~ others by construction, and `vs random` > 0 says only that
+    the screen finds important heads. An overlap far above chance is shared machinery, not
+    per-language machinery."""
+    per = (j.get("lang") or {}).get(str(m)) or {}
+    sets = [set(d["set"]) for d in per.values()]
+    if len(sets) < 2 or not n_total:
+        return None, None
+    js = [len(a & b) / len(a | b) for i, a in enumerate(sets) for b in sets[i + 1:] if a | b]
+    return (float(np.mean(js)) if js else None), chance_jaccard(len(sets[0]), int(n_total))
+
+
 def report_joint(M, models=None):
     """The INRIA ablation protocol ported: top-m% head sets zeroed jointly, scored by retrieval.
 
@@ -621,11 +685,13 @@ def report_joint(M, models=None):
         if not j:
             continue
         clean = j.get("clean") or {}
+        tot = r.get("total_heads")
         print(f"\n    {n}  (pool {j.get('pool_n')} parallel sentences, clean mean P@1 "
               f"{np.mean(list(clean.values())):.4f})")
-        print(f"    {'m':>6}{'heads':>7}{'own drop':>10}{'others':>9}{'specificity':>13}"
-              f"{'random':>9}{'vs random':>11}")
-        for m in j.get("m_grid") or M_GRID:
+        print(f"    {'m':>6}{'heads':>7}{'own drop':>10}{'others':>9}{'specificity':>13}{'p':>7}"
+              f"{'random':>9}{'vs random':>11}{'p':>7}{'overlap':>9}{'chance':>8}")
+        grid = j.get("m_grid") or M_GRID
+        for m in grid:
             st = joint_stats(r, m)
             if not st:
                 print(f"    {m:>6.0%}{'-':>7}{'(unfinished)':>10}")
@@ -633,12 +699,34 @@ def report_joint(M, models=None):
             own = float(np.mean([v["own"] for v in st.values()]))
             oth = float(np.mean([v["others"] for v in st.values()]))
             rnd = float(np.mean([v["rand"] for v in st.values()]))
+            p_s = _sign_p([v["own"] - v["others"] for v in st.values()])[0]
+            p_r = _sign_p([v["own"] - v["rand"] for v in st.values()])[0]
+            ov, ch = set_overlap(j, m, tot)
             nh = next(iter(st.values()))["n_heads"]
-            print(f"    {m:>6.0%}{nh:>7}{own:>+10.4f}{oth:>+9.4f}{own - oth:>+13.4f}"
-                  f"{rnd:>+9.4f}{own - rnd:>+11.4f}")
+            fp = lambda x: f"{x:>7.3f}" if x is not None else f"{'-':>7}"          # noqa: E731
+            print(f"    {m:>6.0%}{nh:>7}{own:>+10.4f}{oth:>+9.4f}{own - oth:>+13.4f}{fp(p_s)}"
+                  f"{rnd:>+9.4f}{own - rnd:>+11.4f}{fp(p_r)}"
+                  + (f"{ov:>9.3f}{ch:>8.3f}" if ov is not None else f"{'-':>9}{'-':>8}"))
+        # the per-language rows at the largest set, where effects are biggest -- averaging over
+        # languages is the same too-early collapse the screen used to make, and it hides whether a
+        # mean comes from one language or ten
+        st = joint_stats(r, max(grid))
+        if st:
+            print(f"      per language at m={max(grid):.0%}:")
+            print(f"      {'lang':>6}{'own drop':>10}{'others':>9}{'specificity':>13}"
+                  f"{'random':>9}{'vs random':>11}")
+            for l in sorted(st):
+                v = st[l]
+                print(f"      {l:>6}{v['own']:>+10.4f}{v['others']:>+9.4f}"
+                      f"{v['own'] - v['others']:>+13.4f}{v['rand']:>+9.4f}"
+                      f"{v['own'] - v['rand']:>+11.4f}")
     print("\n    specificity > 0: ablating L's heads hurts L more than the other nine.")
     print("    vs random > 0:   it hurts L more than removing the same NUMBER of arbitrary heads.")
     print("    Both positive is the claim; either one at or below 0 and there are no language heads.")
+    print("    p: exact two-sided sign test over the 10 languages (only 9/10 or 10/10 reach p < 0.05).")
+    print("    overlap: mean pairwise Jaccard of the per-language sets. Far above chance means every")
+    print("    language picked the SAME heads -- which forces specificity to ~0 by construction and")
+    print("    makes `vs random` a statement about the screen finding important heads, not language.")
 
 
 def merge(per_lang=False):
@@ -766,6 +854,24 @@ def _selftest():
     assert abs(st["te"]["own"] - 0.4) < 1e-9 and abs(st["te"]["others"] - 0.02) < 1e-9, st
     assert abs(st["te"]["rand"] - 0.04) < 1e-9, st
     assert joint_stats(rec, 0.10) is None, "an unfinished grid point must report as unfinished"
+
+    # chance_jaccard is EXACT: checked against 20k-draw simulations at the grid's real set sizes,
+    # including the small-k cases where the closed-form ratio of expectations is off by up to 23%
+    for k_, n_, sim in ((2, 48, 0.0277), (4, 72, 0.0322), (22, 216, 0.0548), (38, 384, 0.0528)):
+        cj = chance_jaccard(k_, n_)
+        assert abs(cj - sim) / sim < 0.03, f"chance_jaccard({k_},{n_})={cj:.4f} vs simulated {sim}"
+    assert chance_jaccard(0, 10) is None and chance_jaccard(11, 10) is None
+    # set_overlap: identical sets read 1, disjoint read 0
+    same = {"joint": {"lang": {"0.1": {l: {"set": [1, 2, 3]} for l in ("a", "b", "c")}}}}
+    assert set_overlap(same["joint"], 0.1, 30)[0] == 1.0, "identical sets must overlap fully"
+    apart = {"lang": {"0.1": {"a": {"set": [1, 2]}, "b": {"set": [3, 4]}, "c": {"set": [5, 6]}}}}
+    assert set_overlap(apart, 0.1, 30)[0] == 0.0, "disjoint sets must not overlap"
+
+    # _sign_p: 10/10 of one sign is significant, an even split is not, zeros are dropped
+    assert _sign_p([1] * 10)[0] < 0.01 and _sign_p([-1] * 10)[0] < 0.01
+    assert _sign_p([1, -1] * 5)[0] == 1.0
+    assert _sign_p([0, 0, 1])[2] == 1, "zeros must not count toward n"
+    assert _sign_p([1] * 8 + [-1] * 2)[0] > 0.05, "8/10 is NOT significant; the report says so"
 
     print("selftest OK: fractional head sets, movement readout, generality vs specificity, "
           "reference-overlap excess (shared sets positive, per-language sets zero), "
