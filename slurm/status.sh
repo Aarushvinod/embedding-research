@@ -188,9 +188,11 @@ fe_merged = [p for p in glob.glob("results/full_eval*.json") if "_part_" not in 
 print(f"  {'baseline':9}{'bge-m3':15}{'':>16}{'':>8}{base_fe:>11}   full-eval merged: {fe_merged or '-'}")
 
 print("\n== interp parts (results/interp_<x>_part_<model>.json) ==")
-print(f"  {'model':15}" + "".join(f"{x:>18}" for x, _ in INTERP))
+# A leading space on every cell, not just a width: a cell that FILLS its width ("done (joint 30/30)"
+# is exactly 18) otherwise butts against the previous one and prints as "donedone".
+print(f"  {'model':15}" + "".join(f" {x:>18}" for x, _ in INTERP))
 for m in SCRIPT_M:
-    print(f"  {m:15}" + "".join(f"{(interp_state(x, m) if m in ms else ''):>18}" for x, ms in INTERP))
+    print(f"  {m:15}" + "".join(f" {(interp_state(x, m) if m in ms else ''):>18}" for x, ms in INTERP))
 merged_i = [x for x, _ in INTERP if os.path.exists(f"results/interp_{x}.json")]
 print(f"  merged: {merged_i or '-'}")
 for x, ms in INTERP:
