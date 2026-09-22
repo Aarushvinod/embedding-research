@@ -16,7 +16,7 @@ LABELS = [("main", MAIN, "results/retrieval_bgem3"), ("bteacher", ARMS, "results
           ("brandom", ARMS, "results/retrieval_bgem3_brandom")]
 SCRIPT_M = MAIN + ["BGE-M3"]           # exps 4 and 7 also run the teacher (BGE-M3) as a ceiling arm
 INTERP = [("english", MAIN), ("script", SCRIPT_M), ("segment", ARMS), ("heads", MAIN),
-          ("pivot", SCRIPT_M)]
+          ("pivot", SCRIPT_M), ("layers", MAIN)]
 
 
 # Ask each experiment for its own plan size instead of hardcoding it here (numpy-only imports).
@@ -87,7 +87,10 @@ def interp_state(x, m):
         nj = sum(len(v) for v in (j.get("lang") or {}).values())
         want = len(d.get("langs") or []) * len(j.get("m_grid") or [])
         if nj and want and nj >= want:
-            return f"done (joint {nj}/{want})"
+            # the donor x target matrix is the last stage; a part file without it is mid-run
+            if "matrix" not in d:
+                return f"joint {nj}/{want}, matrix pending"
+            return f"done ({len((d['matrix'] or {}).get('heads') or [])} matrix heads)"
         if nj:
             return f"joint {nj}/{want}"
         if pr.get("heads"):
@@ -95,6 +98,11 @@ def interp_state(x, m):
         if pr == {} and sc:
             return "screened, no structure"
         return f"screen {len(sc)}/{d.get('total_heads')}" if sc else "-"
+    if x == "layers":
+        n, nb = len(d.get("layers") or {}), d.get("n_blocks")
+        if nb is None:
+            return "-"
+        return "done" if d.get("out") and n >= nb + 1 else f"{n}/{nb + 1} layers"
     if x == "pivot":
         if not (d.get("med") or {}):
             return "-"

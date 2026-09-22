@@ -53,6 +53,7 @@ OWN_MARGIN = 1.25                  # a donor "owns" a head only by this factor o
 M_GRID = (0.01, 0.05, 0.10)        # joint-ablation set sizes, as a fraction of all heads
 N_RAND = 5                         # random equal-size control sets drawn per set size
 POOL = 500                         # parallel sentences in the retrieval pool for the task readout
+MATRIX_MAX = 3                     # winner heads per model that get the donor x target matrix
 
 
 # ----------------------------------------------------------------------------------------------
@@ -210,6 +211,69 @@ def toward(z_patched, z_clean, target):
     return float(((z_patched * t).sum(1) - (z_clean * t).sum(1)).mean())
 
 
+def toward_each(z_patched, z_clean, target):
+    """Per-recipient movement toward `target`: cos(patched, t) - cos(clean, t), shape [N]. The
+    per-row version of `toward`, so a matrix row can drop recipients already in the donor's language
+    -- for those, the donor patch IS the self patch and the row would be diluted by exact zeros."""
+    t = np.asarray(target, np.float32)
+    t = l2norm(t[None, :] if t.ndim == 1 else t)
+    return (z_patched * t).sum(1) - (z_clean * t).sum(1)
+
+
+def winner_heads(res, max_n=MATRIX_MAX):
+    """[(flat index, role, wins)] -- the heads the donor x target matrix is worth running on.
+
+    winner     `best@` for at least two donors in the single-head profile: the candidates the
+               per-donor table flagged as possible language-IDENTITY heads
+    reference  the top head by the ablation SCREEN, when it is not already a winner: the most
+               perturbation-sensitive head in the model, run so there is a known sensitivity head
+               to compare the winners' matrices against
+
+    When the top-screen head IS a winner, no separate reference is added -- and that coincidence is
+    itself evidence for the sensitivity reading, so the report says so."""
+    pr = res.get("profile") or {}
+    if not pr.get("heads"):
+        return []
+    wins = {}
+    for l in res.get("langs") or []:
+        if l in pr["lang"]:
+            j = int(np.argmax(pr["lang"][l]))
+            wins[j] = wins.get(j, 0) + 1
+    ranked = sorted(wins.items(), key=lambda kv: (-kv[1], kv[0]))
+    out = [(j, "winner", c) for j, c in ranked if c >= 2][:max_n]
+    if not out and ranked:
+        out = [(ranked[0][0], "winner", ranked[0][1])]
+    sc = np.asarray(res.get("screen") or [], float)
+    if len(sc):
+        top = int(np.argmax(sc))
+        if top not in {j for j, _, _ in out}:
+            out.append((top, "reference", wins.get(top, 0)))
+    return out
+
+
+def matrix_stats(M):
+    """Directional selectivity of one head's donor x target matrix ([n_lang, n_lang], row = donor).
+
+      diag_hits    donors whose row peaks ON the diagonal -- patching with L moves the embedding
+                   toward L more than toward any other language. Chance is 1 in n_lang per row.
+      p            one-sided binomial P(hits >= observed) under that chance. With 10 languages,
+                   4+ hits is p < 0.05.
+      diag_excess  mean diagonal minus mean off-diagonal movement.
+
+    An IDENTITY head has a dominant diagonal. A SENSITIVITY head -- one that moves the embedding a
+    lot under any patch -- moves toward every centroid about equally and has a flat matrix, which is
+    exactly the case the diagonal-only profile could not tell apart from identity."""
+    from math import comb
+    M = np.asarray(M, float)
+    n = M.shape[0]
+    hits = int(sum(int(np.argmax(M[i])) == i for i in range(n)))
+    p = sum(comb(n, k) * (1 / n) ** k * (1 - 1 / n) ** (n - k) for k in range(hits, n + 1))
+    off = M[~np.eye(n, dtype=bool)]
+    return {"diag_hits": hits, "p": round(float(p), 5),
+            "diag_excess": round(float(np.diag(M).mean() - off.mean()), 6),
+            "diag_mean": round(float(np.diag(M).mean()), 6)}
+
+
 def top_heads(scores, frac=TOP_FRAC):
     """Indices of the top `frac` of heads by score. A FRACTION, not a count: head counts run 48 to
     384 across the grid, so a fixed k would compare a tenth of one model against a fortieth of
@@ -360,7 +424,7 @@ def run_one(name, results, ckpt_dir, device, n_sent=200, seed=0, screen_frac=0.2
     res = read_json(outp) or {}
     if res.get("schema") != SCHEMA:
         res = {"schema": SCHEMA}
-    if res.get("profile") is not None and res.get("joint") and not smoke:
+    if res.get("profile") is not None and res.get("joint") and "matrix" in res and not smoke:
         print(f"=== {ANALYSIS}/{name}: already done -> skip ===")
         return
     if device.startswith("cuda"):
@@ -528,6 +592,35 @@ def run_one(name, results, ckpt_dir, device, n_sent=200, seed=0, screen_frac=0.2
     # enough to matter, which is what the screen keeps reporting.
     print("  joint ablation: per-language head sets vs random sets, scored by retrieval")
     run_joint(student, res, par, langs, pool_ids, geom, device, bs, outp, seed=seed)
+
+    # ---- donor x target matrix on the winner heads: identity head or sensitivity head?
+    # The profile scored movement toward the DONOR's centroid only. A perturbation-sensitive head
+    # moves toward every centroid, so it wins for most donors for that reason alone -- identity and
+    # sensitivity predict the same diagonal and differ only off it. Score every target.
+    if "matrix" not in res:
+        heads_m = winner_heads(res)
+        rows = []
+        for j, role, wins in heads_m:
+            b, h = heads[j]
+            z_self = encode_patched(student, r_txt, b, h, d_kv, D["__self__"][:, b, h], device, bs)
+            base = {t: toward_each(z_self, z_clean, cent[t]) for t in langs}
+            M = np.zeros((len(langs), len(langs)))
+            for a, l in enumerate(langs):
+                z = encode_patched(student, r_txt, b, h, d_kv, D[l][:, b, h], device, bs)
+                keep_r = r_lang != l      # a donor patch on its own language IS the self patch
+                for c, t in enumerate(langs):
+                    M[a, c] = float((toward_each(z, z_clean, cent[t]) - base[t])[keep_r].mean())
+            st = matrix_stats(M)
+            rows.append({"idx": int(j), "block": int(b), "head": int(h), "role": role,
+                         "wins": int(wins), "screen": float(res["screen"][j]),
+                         "M": np.round(M, 6).tolist(), **st})
+            print(f"    matrix b{b}h{h} ({role}, best@ for {wins} donors): diagonal hits "
+                  f"{st['diag_hits']}/{len(langs)}  p={st['p']:.4f}  "
+                  f"diag excess {st['diag_excess']:+.5f}")
+        res["matrix"] = {"langs": langs, "heads": rows,
+                         "top_screen_is_winner": bool(rows and all(r_["role"] == "winner"
+                                                                   for r_ in rows))}
+        write_json(outp, res)
     print(f"  saved -> {outp}")
 
 
@@ -729,6 +822,50 @@ def report_joint(M, models=None):
     print("    makes `vs random` a statement about the screen finding important heads, not language.")
 
 
+def report_matrix(M, full=False, models=None):
+    """Which winner heads are language-IDENTITY heads -- and so worth steering -- and which are
+    merely sensitive. `full` prints each 10 x 10 matrix (row = donor, column = target centroid)."""
+    print("\n  DONOR x TARGET MATRIX on the winner heads -- identity head or sensitivity head?")
+    cand = []
+    for n in (models or MAIN_MODELS):
+        mx = ((M.get(n) or {}).get("matrix")) or {}
+        rows, langs = mx.get("heads") or [], mx.get("langs") or []
+        if not rows:
+            continue
+        print(f"\n    {n}" + ("   (the top-SCREEN head is itself a winner: leans sensitivity)"
+                             if mx.get("top_screen_is_winner") else ""))
+        print(f"    {'head':>8}{'role':>11}{'best@':>7}{'screen':>9}{'diag hits':>11}{'p':>8}"
+              f"{'diag excess':>13}{'verdict':>14}")
+        for r_ in rows:
+            ident = r_["p"] < 0.05 and r_["diag_excess"] > 0
+            verdict = "IDENTITY" if ident else "not selective"
+            if ident:
+                cand.append((n, r_))
+            print(f"    {'b' + str(r_['block']) + 'h' + str(r_['head']):>8}{r_['role']:>11}"
+                  f"{r_['wins']:>7}{r_['screen']:>9.4f}{str(r_['diag_hits']) + '/' + str(len(langs)):>11}"
+                  f"{r_['p']:>8.4f}{r_['diag_excess']:>+13.5f}{verdict:>14}")
+            if full:
+                A = np.asarray(r_["M"], float)
+                # every cell 9 wide, the row maximum bracketed IN that width, so columns stay aligned
+                print(f"      {'donor':>6} " + "".join(f"{t:>9}" for t in langs))
+                for a, l in enumerate(langs):
+                    top = int(np.argmax(A[a]))
+                    print(f"      {l:>6} " + "".join(
+                        f"[{A[a, c]:+.4f}]" if c == top else f" {A[a, c]:+.4f} "
+                        for c in range(len(langs))))
+    print("\n    diag hits: donors whose row peaks on its own language (chance 1 per 10 rows);")
+    print("    p: one-sided binomial, 4+/10 is p < 0.05. A flat matrix is a sensitivity head --")
+    print("    it moves toward every centroid about equally under any patch.")
+    if cand:
+        print("\n    STEERING CANDIDATES (directionally selective):")
+        for n, r_ in cand:
+            print(f"      {n:14} b{r_['block']}h{r_['head']}  diag hits {r_['diag_hits']}/10  "
+                  f"mean diagonal movement {r_['diag_mean']:+.5f}")
+    else:
+        print("\n    NO steering candidates: no winner head is directionally selective. The")
+        print("    per-donor winners are sensitivity heads, not language-identity heads.")
+
+
 def merge(per_lang=False):
     d = merge_parts(ANALYSIS, schema=SCHEMA)
     M = d["models"]
@@ -776,6 +913,7 @@ def merge(per_lang=False):
           "carries\n  'which language' for every language, a SPECIFIC one for its own. The EXCESS is the "
           "English\n  claim -- positive means other languages' language heads are English's heads.")
     report_joint(M)
+    report_matrix(M, full=per_lang)
     if per_lang:
         report_per_lang(M)
 
@@ -872,6 +1010,50 @@ def _selftest():
     assert _sign_p([1, -1] * 5)[0] == 1.0
     assert _sign_p([0, 0, 1])[2] == 1, "zeros must not count toward n"
     assert _sign_p([1] * 8 + [-1] * 2)[0] > 0.05, "8/10 is NOT significant; the report says so"
+
+    # ---- donor x target matrix
+    # toward_each is the per-row form of toward: its mean must BE toward
+    rz = np.random.default_rng(3)
+    zc_ = l2norm(rz.normal(size=(20, 6)).astype(np.float32))
+    zp_ = l2norm(rz.normal(size=(20, 6)).astype(np.float32))
+    tg_ = rz.normal(size=6).astype(np.float32)
+    assert abs(float(toward_each(zp_, zc_, tg_).mean()) - toward(zp_, zc_, tg_)) < 1e-6
+
+    # an IDENTITY head: every donor moves the embedding toward its own language
+    ident = np.full((10, 10), 0.001) + np.eye(10) * 0.01
+    si = matrix_stats(ident)
+    assert si["diag_hits"] == 10 and si["p"] < 1e-9 and si["diag_excess"] > 0, si
+    # a SENSITIVITY head: large movement toward every centroid, no preference -> not selective,
+    # even though its diagonal is as large as the identity head's (the case the profile missed)
+    sens = 0.011 + rz.normal(size=(10, 10)) * 1e-4
+    ss = matrix_stats(sens)
+    assert ss["p"] > 0.05 and abs(ss["diag_excess"]) < 1e-3, ss
+    assert np.diag(sens).mean() > np.diag(ident).mean() - 0.001, "fixture: same-size diagonals"
+    # the binomial tail is exact: P(X >= 4 | n=10, p=0.1) = 0.012795...
+    four = np.full((10, 10), 0.0)
+    for i in range(10):
+        four[i, i if i < 4 else (i + 1) % 10] = 1.0          # exactly 4 rows peak on the diagonal
+    assert matrix_stats(four)["diag_hits"] == 4
+    assert abs(matrix_stats(four)["p"] - 0.01280) < 1e-4, matrix_stats(four)["p"]
+
+    # winner_heads: ranked by donors won, a screen reference added only when it is not a winner
+    langs10 = ["te", "bn", "en", "sw", "yo", "am", "ha", "rw", "zh", "ar"]
+    lang_prof = {l: [0.0] * 12 for l in langs10}
+    for l in ("te", "bn", "en"):
+        lang_prof[l][5] = 1.0                                  # head 5 wins three donors
+    for l in ("sw", "yo"):
+        lang_prof[l][2] = 1.0                                  # head 2 wins two
+    for k, l in enumerate(("am", "ha", "rw", "zh", "ar")):
+        lang_prof[l][6 + k] = 1.0                              # the rest win one each
+    fx = {"langs": langs10, "profile": {"heads": list(range(12)), "lang": lang_prof},
+          "screen": [0.0] * 12}
+    fx["screen"][9] = 1.0                                      # most sensitive head: not a winner
+    wh = winner_heads(fx)
+    assert [(j, r_) for j, r_, _ in wh] == [(5, "winner"), (2, "winner"), (9, "reference")], wh
+    fx["screen"] = [0.0] * 12
+    fx["screen"][5] = 1.0                                      # now the top-screen head IS a winner
+    assert all(r_ == "winner" for _, r_, _ in winner_heads(fx)), "no reference when it is a winner"
+    assert winner_heads({"profile": {}}) == [], "an empty profile has no winners"
 
     print("selftest OK: fractional head sets, movement readout, generality vs specificity, "
           "reference-overlap excess (shared sets positive, per-language sets zero), "
