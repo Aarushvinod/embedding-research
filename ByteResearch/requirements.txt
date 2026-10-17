@@ -1,0 +1,21 @@
+# Main ByteResearch environment: data, training, translation and interpretability stages.
+# torch is not pinned: use the preinstalled build (Colab) or install it first. It needs torch>=2.7,
+# and a cu128 (or newer) CUDA build on Blackwell GPUs.
+# COMET and MetricX need transformers<5 and live in a separate venv: see requirements-metrics.txt
+# and `python -m ByteResearch.run setup-metrics`.
+transformers==5.17.0
+accelerate>=1.10,<2
+datasets>=4.0,<6
+huggingface_hub>=1.0,<2
+httpx
+sentencepiece
+protobuf
+sacrebleu==2.6.0
+numpy
+scipy
+pyarrow
+requests
+urllib3
+filelock
+sentence-transformers
+fasttext-numpy2-wheel

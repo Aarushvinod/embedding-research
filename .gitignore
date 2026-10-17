@@ -1,19 +1,17 @@
-# data + outputs
-data/
-results/
-checkpoints/
-*.vec
-*.vec.gz
-*.bin
-*.pt
-*.ckpt
+# ByteResearch outputs and local-only tests
+ByteResearch/artifacts/
+ByteResearch/tests/
 *.npy
 *.npz
+*.pt
+*.bin
+*.safetensors
 
 # python
 __pycache__/
 *.py[cod]
 .venv/
+.venv-br/
 venv/
 *.egg-info/
 .ipynb_checkpoints/

@@ -1,0 +1,15 @@
+# Requirements of the separate metrics venv used for COMET and MetricX scoring.
+# The venv is created with --system-site-packages so it reuses the base interpreter's torch.
+# COMET 2.2.7 and the MetricX-24 code both need transformers 4.x, so transformers 5 is excluded here.
+# setuptools stays below 81 because torchmetrics 0.10 (a COMET dependency) imports pkg_resources.
+# MetricX itself is not installed: its repository is cloned at a pinned commit and run from source.
+# Build it with `python -m ByteResearch.run setup-metrics`, which also runs a self-check.
+unbabel-comet==2.2.7
+transformers==4.46.3
+accelerate>=0.26,<2
+numpy<2
+huggingface_hub>=0.23,<1.0
+sentencepiece
+protobuf
+datasets>=2.14,<4
+setuptools<81
