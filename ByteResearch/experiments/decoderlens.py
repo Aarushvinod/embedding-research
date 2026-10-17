@@ -6,8 +6,9 @@
 # per-char log-probs, their differences and the English share (a softmax over the per-char log-probs), with
 # per-layer means and across-layer statistics per target and pooled over targets.
 # Stage lid decodes greedily from every lens (128 characters at most), scores the outputs with GlotLID (summed
-# top-k probabilities over each language's ISO-derived label set, as in the data filter) and buckets them as
-# en, src, x, other_study, other or und; stage summary joins both into one per-layer table.
+# top-k probabilities over each language's ISO-derived label set, against that language's FLORES-calibrated
+# minimum, as in the data filter) and buckets them as en, src, x, other_study, other or und; stage summary
+# joins both into one per-layer table.
 # Work is resumable per (target, chunk of rows), block states are offloaded to the CPU while the lens runs.
 
 from __future__ import annotations
@@ -83,8 +84,12 @@ def lid_decoding(ctx, unit) -> DecodingConfig:
 def lid_config(ctx, unit) -> dict:
     # Inputs: Ctx and Unit. Output: the fingerprinted lid config.
     icfg, dec = ctx.config(InterpConfig), lid_decoding(ctx, unit)
+    table = corpus_module("thresholds").load_thresholds(ctx, required=False)
+    langs = dict.fromkeys(("en", CONDITIONS[unit.condition].hub, *STUDY11))
     return {**base_config(ctx, unit), "decoding": "greedy", "max_output_chars": dec.max_output_chars,
-            "gen_token_factor": dec.token_factor, "lid": "glotlid", "lid_threshold": icfg.lid_threshold,
+            "gen_token_factor": dec.token_factor, "lid": "glotlid",
+            "lid_thresholds": {lang: table.get("lid", {}).get(lang) for lang in langs},
+            "lid_calibration": table.get("percentile"), "lid_other_threshold": icfg.lid_other_threshold,
             "lid_top_k": ctx.config(DataConfig).glotlid_top_k, "lid_iso639_3": PINS["iso639_3"]["sha256"],
             "lid_extra_codes": {c: list(v) for c, v in LID_EXTRA_CODES.items()}, "buckets": list(BUCKETS)}
 
@@ -131,10 +136,10 @@ def logprob_chunk(ctx, trained, texts: dict, cfg: dict, x: str, crows) -> dict:
     return {f"lp_{role}": [[row[b][role] for row in out] for b in range(trained.n_enc)] for role in cfg["roles"]}
 
 
-def lid_buckets(lid_model, texts, hub: str, x: str, threshold: float, aliases: dict, k: int) -> tuple:
-    # Inputs: a GlotLID model, generated strings, hub, target, probability threshold, the alias table from
-    # corpora.lid.load_aliases and the top-k. Output: (top labels, top probs, buckets) per string; empty
-    # strings are not classified and, like low-confidence ones, become und.
+def lid_buckets(lid_model, texts, hub: str, x: str, thresholds: dict, other: float, aliases: dict, k: int) -> tuple:
+    # Inputs: a GlotLID model, generated strings, hub, target, {lang: calibrated minimum}, the top-label minimum
+    # for "other", the alias table from corpora.lid.load_aliases and the top-k. Output: (top labels, top probs,
+    # buckets) per string; empty strings are not classified and, like low-confidence ones, become und.
     lid = corpus_module("lid")
     clean = [" ".join(str(t).split()) for t in texts]
     keep = [i for i, t in enumerate(clean) if t]
@@ -142,24 +147,27 @@ def lid_buckets(lid_model, texts, hub: str, x: str, threshold: float, aliases: d
     for i, pred in zip(keep, lid.predict(lid_model, [clean[i] for i in keep], k=k) if keep else []):
         preds[i] = pred
     tops = [lid.top_label(p) if p is not None else (None, 0.0) for p in preds]
-    return [t[0] for t in tops], [float(t[1]) for t in tops], [bucket_of(p, hub, x, threshold, aliases) for p in preds]
+    buckets = [bucket_of(p, hub, x, thresholds, other, aliases) for p in preds]
+    return [t[0] for t in tops], [float(t[1]) for t in tops], buckets
 
 
-def bucket_of(pred, hub: str, x: str, threshold: float, aliases: dict) -> str:
-    # Inputs: one string's top-k GlotLID prediction (None for empty text), hub, target, threshold and the
-    # alias table. Output: the bucket: the first of en, src (the hub; never reached in C1 where src = en) and
-    # x whose labels' summed probability reaches the threshold, else other_study for another study language,
-    # else other when the top label alone reaches it, else und.
+def bucket_of(pred, hub: str, x: str, thresholds: dict, other: float, aliases: dict) -> str:
+    # Inputs: one string's top-k GlotLID prediction (None for empty text), hub, target, {lang: calibrated
+    # minimum}, the top-label minimum for "other" and the alias table. Output: the bucket: the first of en,
+    # src (the hub; never reached in C1 where src = en) and x whose labels' summed probability reaches that
+    # language's minimum, else other_study for another study language, else other when the top label alone
+    # reaches `other`, else und.
     lid = corpus_module("lid")
     if pred is None:
         return "und"
     prob = {lang: lid.labels_prob(pred, aliases[lang]) for lang in dict.fromkeys(("en", hub, x, *STUDY11))}
-    named = [b for b, lang in (("en", "en"), ("src", hub), ("x", x)) if prob[lang] >= threshold]
+    passes = lambda lang: prob[lang] >= thresholds[lang]
+    named = [b for b, lang in (("en", "en"), ("src", hub), ("x", x)) if passes(lang)]
     if named:
         return named[0]
-    if any(prob[lang] >= threshold for lang in STUDY11):
+    if any(passes(lang) for lang in STUDY11):
         return "other_study"
-    return "other" if lid.top_label(pred)[1] >= threshold else "und"
+    return "other" if lid.top_label(pred)[1] >= other else "und"
 
 
 def lid_chunk(lid_model, ctx, trained, texts: dict, cfg: dict, x: str, crows, decoding: DecodingConfig) -> dict:
@@ -171,7 +179,8 @@ def lid_chunk(lid_model, ctx, trained, texts: dict, cfg: dict, x: str, crows, de
                       lens_step(trained, read))
     gens = [row[b] for b in range(trained.n_enc) for row in out]
     aliases, k = corpus_module("lid").load_aliases(ctx), ctx.config(DataConfig).glotlid_top_k
-    labels, probs, buckets = lid_buckets(lid_model, gens, hub, x, cfg["lid_threshold"], aliases, k)
+    thresholds = corpus_module("thresholds").load_thresholds(ctx)["lid"]
+    labels, probs, buckets = lid_buckets(lid_model, gens, hub, x, thresholds, cfg["lid_other_threshold"], aliases, k)
     shape = lambda flat: [flat[b * len(crows):(b + 1) * len(crows)] for b in range(trained.n_enc)]
     return {"text": shape(gens), "label": shape(labels), "prob": shape(probs), "bucket": shape(buckets)}
 

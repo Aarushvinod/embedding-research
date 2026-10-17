@@ -6,7 +6,8 @@
 # and the labels present in the model (corpora.iso639), for the study languages or the yield-only
 # candidates, and lid_record describes that rule for configs.
 # A text counts as language L when the probabilities of L's labels among its top-k predictions sum to at
-# least the threshold: labels_prob computes that sum, and lid_probs and lid_passes apply it to raw texts.
+# least L's FLORES-calibrated threshold (corpora.thresholds): labels_prob computes that sum and lid_probs
+# applies it to raw texts.
 
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from .assets import asset_dir, build_hf_asset, ensure_hf_asset
 from .iso639 import LABEL_PREFIX, derive_aliases, iso_table_path, parse_macrolanguages
 from .manifest import verified_path
 
-LID_RULE = "sum of GlotLID top-k probabilities over the language's labels >= min_prob"
+LID_RULE = "sum of GlotLID top-k probabilities over the language's labels >= the language's FLORES-calibrated minimum"
 
 
 def build_glotlid(ctx) -> dict:
@@ -87,11 +88,11 @@ def pair_aliases(ctx) -> dict:
 
 def lid_record(ctx, aliases: dict, langs=None) -> dict:
     # Inputs: Ctx, the alias table (load_aliases) and optional language codes (default all). Output: the LID
-    # rule for manifests and result configs: rule text, top-k, threshold, ISO table pin, extra and only
-    # codes, the alias table of those languages and its hash.
+    # rule for manifests and result configs: rule text, top-k, ISO table pin, extra and only codes, the alias
+    # table of those languages and its hash (the calibrated minimums are recorded with each filter spec).
     table = {c: sorted(v) for c, v in aliases.items() if langs is None or c in langs}
     cfg, pin = ctx.config(DataConfig), PINS["iso639_3"]
-    return {"rule": LID_RULE, "top_k": cfg.glotlid_top_k, "min_prob": cfg.glotlid_min_prob,
+    return {"rule": LID_RULE, "top_k": cfg.glotlid_top_k,
             "iso639_3": {"release": pin["release"], "sha256": pin["sha256"]},
             "extra_codes": {c: list(v) for c, v in LID_EXTRA_CODES.items()},
             "only_codes": {c: list(v) for c, v in LID_ONLY_CODES.items()}, "aliases": table,
@@ -139,12 +140,5 @@ def lid_probs(ctx, texts, lang: str) -> list:
     # Inputs: Ctx, raw texts and a language code. Output: per text, the summed top-k probability of the
     # language's labels (DataConfig.glotlid_top_k), exactly the quantity the NLLB LID filter thresholds.
     preds = predict(load_glotlid(ctx), list(texts), k=ctx.config(DataConfig).glotlid_top_k)
-    labels = load_aliases(ctx)[lang]
+    labels = pair_aliases(ctx)[lang]
     return [labels_prob(p, labels) for p in preds]
-
-
-def lid_passes(ctx, texts, lang: str) -> list:
-    # Inputs: Ctx, raw texts and a language code. Output: per text, whether it passes the NLLB LID filter
-    # (lid_probs >= DataConfig.glotlid_min_prob).
-    threshold = ctx.config(DataConfig).glotlid_min_prob
-    return [p >= threshold for p in lid_probs(ctx, texts, lang)]

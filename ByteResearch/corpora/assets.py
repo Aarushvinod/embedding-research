@@ -85,6 +85,12 @@ def load_labse(ctx):
     return _sentence_transformer(str(verify_asset(ctx, "labse")), ctx.device, labse_dtype(ctx))
 
 
+def asset_revisions(ctx) -> dict:
+    # Input: Ctx. Output: {asset: resolved repository revision} for GlotLID and LaBSE.
+    return {name: read_manifest(ctx.paths.models_dir() / name)["sources"][0]["revision"]
+            for name in ("glotlid", "labse")}
+
+
 def labse_cosines(model, left, right, batch_size: int = 256) -> np.ndarray:
     # Inputs: a SentenceTransformer, two equal-length text lists and the batch size. Output: float32
     # cosine similarities of the aligned pairs (dot products of normalized embeddings).

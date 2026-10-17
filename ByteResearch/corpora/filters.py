@@ -1,7 +1,8 @@
 # The ordered filter chain that turns a score-sorted stream of mined pairs into training pairs.
 # Filters run in a fixed order with one rejection counter each: malformed line, exact-pair duplicate,
-# 20-300 characters on both sides, literal tokenizer markup, FLORES/NTREX exclusion, script consistency,
-# GlotLID on both sides (top-k probabilities of the language's labels summed) and LaBSE cosine.
+# 20-300 characters on both sides, the x/hub character-length ratio band, literal tokenizer markup,
+# FLORES/NTREX exclusion, script consistency per side, GlotLID per side (top-k probabilities of the language's
+# labels summed) and LaBSE cosine; the ratio, script, LID and LaBSE thresholds come from FLORES calibration.
 # Score-order violations are counted but do not reject a line.
 # For speed the cheap filters run line by line and their survivors are collected into blocks, on which LID
 # and then LaBSE run in batches; lines are then tallied back in stream order.
@@ -16,28 +17,33 @@ from dataclasses import dataclass, field
 from ..core.text import has_special_markup, length_ok, normalize_for_match, script_ratio
 from .lid import LID_RULE, labels_prob, top_label
 
-REASONS = ("malformed", "duplicate", "length", "markup", "excluded", "script", "lid", "labse")
-STEPS = ("malformed", "dedupe", "length", "markup", "exclusion", "script", "lid", "labse")
+REASONS = ("malformed", "duplicate", "length", "ratio", "markup", "excluded", "script", "lid", "labse")
+STEPS = ("malformed", "dedupe", "length", "ratio", "markup", "exclusion", "script", "lid", "labse")
 
 
 @dataclass(frozen=True)
 class FilterSpec:
-    # Thresholds for one pair: hub and target codes and scripts, the inclusive character window, the
-    # minimum script ratio, the GlotLID rule (the accepted labels of each side, whose probabilities among
-    # the top lid_top_k must sum to lid_min_prob), LaBSE minimum cosine and the exclusion set.
+    # Thresholds for one pair: hub and target codes and scripts, the inclusive character window, the x/hub
+    # length-ratio band, each side's minimum script ratio, the GlotLID rule (each side's accepted labels, whose
+    # probabilities among the top lid_top_k must sum to that side's minimum), the LaBSE minimum cosine and the
+    # exclusion set. The defaults accept everything; the data stage fills in the FLORES-calibrated values.
     hub: str
     x: str
     hub_script: str
     x_script: str
     min_chars: int = 20
     max_chars: int = 300
-    min_script: float = 0.8
-    lid_min_prob: float = 0.9
+    ratio_min: float = 0.0
+    ratio_max: float = float("inf")
+    hub_min_script: float = 0.0
+    x_min_script: float = 0.0
+    hub_lid_min: float = 0.0
+    x_lid_min: float = 0.0
     lid_top_k: int = 10
     lid_rule: str = LID_RULE
     hub_lid: tuple = ()
     x_lid: tuple = ()
-    labse_min: float = 0.80
+    labse_min: float = 0.0
     exclusion: frozenset = frozenset()
 
 
@@ -100,19 +106,15 @@ def cheap_reason(parsed, seen: set, spec: FilterSpec):
     seen.add(key)
     if not (length_ok(hub, spec.min_chars, spec.max_chars) and length_ok(x, spec.min_chars, spec.max_chars)):
         return "length"
+    if not spec.ratio_min <= len(x) / len(hub) <= spec.ratio_max:
+        return "ratio"
     if has_special_markup(hub) or has_special_markup(x):
         return "markup"
     if normalize_for_match(hub) in spec.exclusion or normalize_for_match(x) in spec.exclusion:
         return "excluded"
-    if script_ratio(hub, spec.hub_script) < spec.min_script or script_ratio(x, spec.x_script) < spec.min_script:
+    if script_ratio(hub, spec.hub_script) < spec.hub_min_script or script_ratio(x, spec.x_script) < spec.x_min_script:
         return "script"
     return None
-
-
-def lid_ok(pred, labels, spec: FilterSpec) -> bool:
-    # Inputs: a prediction (a (label, prob) pair or a ranked top-k list), the accepted labels and the
-    # spec. Output: whether the probabilities of those labels sum to at least spec.lid_min_prob.
-    return labels_prob(pred, labels) >= spec.lid_min_prob
 
 
 def score_block(cands: list, spec: FilterSpec, lid_fn, labse_fn) -> None:
@@ -127,7 +129,7 @@ def score_block(cands: list, spec: FilterSpec, lid_fn, labse_fn) -> None:
     for e, ph, px in zip(cands, hub_preds, x_preds):
         e.lid_hub, e.lid_x = top_label(ph), top_label(px)
         e.lid_hub_p, e.lid_x_p = labels_prob(ph, spec.hub_lid), labels_prob(px, spec.x_lid)
-        e.reason = None if min(e.lid_hub_p, e.lid_x_p) >= spec.lid_min_prob else "lid"
+        e.reason = None if e.lid_hub_p >= spec.hub_lid_min and e.lid_x_p >= spec.x_lid_min else "lid"
     passed = [e for e in cands if e.reason is None]
     cosines = labse_fn([e.parsed[0] for e in passed], [e.parsed[1] for e in passed]) if passed else []
     for e, cos in zip(passed, cosines):

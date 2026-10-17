@@ -22,12 +22,13 @@ import time
 from ..core.config import (CANDIDATE_HUBS, CANDIDATE_SOURCES, CANDIDATES, HUBS, NLLB_SOURCES, TARGETS, DataConfig,
                            language)
 from ..core.io import read_json, read_jsonl_gz, sha256_json, write_json_atomic, write_jsonl_gz_atomic
-from .assets import labse_cosines, labse_dtype, load_labse
+from .assets import asset_revisions, labse_cosines, labse_dtype, load_labse
 from .exclusion import exclusion_set
 from .filters import STEPS, FilterSpec, run_filters, survival
 from .http import GzLineStream
 from .lid import lid_record, load_glotlid, pair_aliases, predict
 from .manifest import begin_build, finish_build, manifest_complete, read_manifest, verified_path
+from .thresholds import direction_key, load_thresholds, lookup
 
 PAIRS_FILE = "pairs.jsonl.gz"
 TABLE_FILE = "FILTER_TABLE.json"
@@ -61,13 +62,17 @@ def pairs_cap(ctx) -> int:
 
 
 def filter_spec(ctx, hub: str, x: str) -> FilterSpec:
-    # Inputs: Ctx, hub and target codes. Output: the FilterSpec with DataConfig thresholds, both scripts,
-    # both sides' accepted GlotLID labels (corpora.lid.pair_aliases) and the shared exclusion set.
-    cfg, aliases = ctx.config(DataConfig), pair_aliases(ctx)
+    # Inputs: Ctx, hub and target codes. Output: the FilterSpec with the length window, both scripts, the
+    # FLORES-calibrated thresholds (each side's script and LID minimums, the direction's LaBSE minimum and
+    # length-ratio band), both sides' accepted GlotLID labels and the shared exclusion set.
+    cfg, aliases, table, d = ctx.config(DataConfig), pair_aliases(ctx), load_thresholds(ctx), direction_key(hub, x)
+    ratio_min, ratio_max = lookup(table, "length_ratio", d)
     return FilterSpec(hub=hub, x=x, hub_script=language(hub).script, x_script=language(x).script,
-                      min_chars=cfg.min_chars, max_chars=cfg.max_chars, lid_min_prob=cfg.glotlid_min_prob,
+                      min_chars=cfg.min_chars, max_chars=cfg.max_chars, ratio_min=ratio_min, ratio_max=ratio_max,
+                      hub_min_script=lookup(table, "script", hub), x_min_script=lookup(table, "script", x),
+                      hub_lid_min=lookup(table, "lid", hub), x_lid_min=lookup(table, "lid", x),
                       lid_top_k=cfg.glotlid_top_k, hub_lid=tuple(sorted(aliases[hub])), x_lid=tuple(sorted(aliases[x])),
-                      labse_min=cfg.labse_min_cos, exclusion=exclusion_set(ctx)[0])
+                      labse_min=lookup(table, "labse", d), exclusion=exclusion_set(ctx)[0])
 
 
 def model_functions(ctx) -> tuple:
@@ -78,12 +83,6 @@ def model_functions(ctx) -> tuple:
     batch, k = cfg.labse_batch, cfg.glotlid_top_k
     return (lambda texts: predict(lid_model, texts, k=k),
             lambda left, right: labse_cosines(labse, left, right, batch))
-
-
-def asset_revisions(ctx) -> dict:
-    # Input: Ctx. Output: {asset: resolved repository revision} for GlotLID and LaBSE.
-    return {name: read_manifest(ctx.paths.models_dir() / name)["sources"][0]["revision"]
-            for name in ("glotlid", "labse")}
 
 
 def _progress(label: str, stream, t0: float):

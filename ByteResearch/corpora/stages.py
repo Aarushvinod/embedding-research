@@ -1,14 +1,15 @@
 # Registered data stages: `python -m ByteResearch.run data[.<part>] [--smoke] [--pairs N] [--rebuild-data]`.
 # data.flores, data.ntrex and data.exclusion build the evaluation sets and the exclusion set;
 # data.lid_model, data.iso639, data.labse_model and data.sacrebleu cache GlotLID, the ISO 639-3
-# macrolanguage table behind its label sets, LaBSE and the flores200 SPM model.
+# macrolanguage table behind its label sets, LaBSE and the flores200 SPM model, and data.thresholds
+# calibrates every LID, script, LaBSE and length-ratio threshold on FLORES dev.
 # data.nllb runs over condition x target (the condition's hub to each target) and data.wiki over the
 # study languages; data.table prints and saves the per-pair filter table whenever the pairs change.
 # data.candidates builds every hub's pairs for the candidate targets (selected through the conditions)
 # exactly as for targets, data.candidate_wiki samples their Wikipedia sentences and data.candidate_table
 # prints and saves their table; none of it is trained on, but a promoted candidate finds its data ready.
-# data.purge --purge CODES permanently deletes the pairs and Wikipedia samples of candidates that were not
-# chosen; it refuses study and control languages and does nothing without --purge.
+# data.purge --purge CODES permanently deletes the pairs, Wikipedia samples and calibrated thresholds of
+# candidates that were not chosen; it refuses study and control languages and does nothing without --purge.
 # Every stage is done when its manifest is complete, and a complete manifest is only replaced with
 # --force --rebuild-data (the old directory moves to ROOT/data/_superseded/); --force alone keeps it.
 # The composite `data` runs all of them in dependency order.
@@ -27,6 +28,7 @@ from .lid import build_glotlid
 from .manifest import manifest_complete, purge, rebuild_requested
 from .nllb import build_pairs, filter_table_done, write_filter_table
 from .ntrex import build_ntrex
+from .thresholds import build_thresholds, purge_thresholds, thresholds_dir
 from .wiki import build_wiki
 
 DATA_OPTS = (
@@ -115,10 +117,17 @@ def sacrebleu_stage(ctx, unit):
     build_sacrebleu(ctx)
 
 
+@data_stage("data.thresholds", lambda c, u: thresholds_dir(c), grid=(), order=15, options=DATA_OPTS,
+            requires=("data.flores", "data.lid_model", "data.iso639", "data.labse_model"))
+def thresholds_stage(ctx, unit):
+    # Inputs: Ctx and the empty Unit. Calibrates and saves the filter thresholds on FLORES dev.
+    build_thresholds(ctx)
+
+
 @data_stage("data.nllb", lambda c, u: c.paths.nllb_dir(CONDITIONS[u.condition].hub, u.target),
             grid=("condition", "target"), order=20, options=DATA_OPTS,
             requires=("data.flores", "data.ntrex", "data.exclusion", "data.lid_model", "data.iso639",
-                      "data.labse_model"))
+                      "data.labse_model", "data.thresholds"))
 def nllb_stage(ctx, unit):
     # Inputs: Ctx and a (condition, target) Unit. Streams, filters and saves that hub-target pair file.
     build_pairs(ctx, CONDITIONS[unit.condition].hub, unit.target)
@@ -139,14 +148,14 @@ def candidate_wiki_units(sel: dict, smoke: bool = False) -> list:
 @data_stage("data.candidates", lambda c, u: c.paths.nllb_dir(CONDITIONS[u.condition].hub, u.lang),
             grid=candidate_units, order=22, options=DATA_OPTS,
             requires=("data.flores", "data.ntrex", "data.exclusion", "data.lid_model", "data.iso639",
-                      "data.labse_model"))
+                      "data.labse_model", "data.thresholds"))
 def candidates_stage(ctx, unit):
     # Inputs: Ctx and a (condition, lang) Unit. Streams, filters and saves that hub-candidate pair file.
     build_pairs(ctx, CONDITIONS[unit.condition].hub, unit.lang)
 
 
-@data_stage("data.wiki", lambda c, u: c.paths.wiki_dir(u.lang), grid=("lang",), requires=("data.exclusion",), order=21,
-            options=WIKI_OPTS)
+@data_stage("data.wiki", lambda c, u: c.paths.wiki_dir(u.lang), grid=("lang",), order=21, options=WIKI_OPTS,
+            requires=("data.exclusion", "data.lid_model", "data.iso639", "data.thresholds"))
 def wiki_stage(ctx, unit):
     # Inputs: Ctx and a (lang) Unit. Samples that language's Wikipedia sentences.
     build_wiki(ctx, unit.lang)
@@ -159,8 +168,8 @@ def table_stage(ctx, unit):
     write_filter_table(ctx)
 
 
-@data_stage("data.candidate_wiki", lambda c, u: c.paths.wiki_dir(u.lang), grid=candidate_wiki_units,
-            requires=("data.exclusion",), order=23, options=DATA_OPTS)
+@data_stage("data.candidate_wiki", lambda c, u: c.paths.wiki_dir(u.lang), grid=candidate_wiki_units, order=23,
+            options=DATA_OPTS, requires=("data.exclusion", "data.lid_model", "data.iso639", "data.thresholds"))
 def candidate_wiki_stage(ctx, unit):
     # Inputs: Ctx and a (lang) Unit. Samples that candidate's Wikipedia sentences exactly as for a study language.
     build_wiki(ctx, unit.lang)
@@ -191,13 +200,17 @@ def purge_done(ctx, unit) -> bool:
 @register_stage("data.purge", grid=(), is_done=purge_done, order=40, options=PURGE_OPTS)
 def purge_stage(ctx, unit):
     # Inputs: Ctx and the empty Unit. Permanently deletes every hub's pair cache and the Wikipedia sample of
-    # each --purge language (whether or not it is still listed as a candidate) and prints the space freed.
-    for code in purge_codes(ctx):
+    # each --purge language (whether or not it is still listed as a candidate), prints the space freed and
+    # removes their languages and directions from the calibrated thresholds.
+    codes = purge_codes(ctx)
+    for code in codes:
         dirs = [ctx.paths.nllb_dir(h, code) for h in CANDIDATE_HUBS] + [ctx.paths.wiki_dir(code)]
         freed = sum(purge(ctx, d) for d in dirs)
         print(f"[data.purge] {code}: deleted {freed / 2**20:.1f} MB", flush=True)
+    if codes and purge_thresholds(ctx, codes):
+        print(f"[data.purge] removed {', '.join(codes)} from the calibrated thresholds", flush=True)
 
 
 composite("data", ("data.flores", "data.ntrex", "data.exclusion", "data.lid_model", "data.iso639", "data.labse_model",
-                   "data.sacrebleu", "data.nllb", "data.wiki", "data.table", "data.candidates",
+                   "data.sacrebleu", "data.thresholds", "data.nllb", "data.wiki", "data.table", "data.candidates",
                    "data.candidate_wiki", "data.candidate_table"))

@@ -96,6 +96,7 @@ the current selections.
 | `data.iso639` | - | ISO 639-3 macrolanguage table (pinned SHA-256) |
 | `data.labse_model` | - | LaBSE |
 | `data.sacrebleu` | - | the flores200 SPM model for spBLEU |
+| `data.thresholds` | - | FLORES-dev calibration of every filter threshold (`ROOT/data/thresholds/`) |
 | `data.nllb` | condition x target | filtered NLLB pairs (hub to target) |
 | `data.wiki` | lang | Wikipedia sentences (LAPE only) |
 | `data.table` | - | prints and saves `ROOT/data/nllb/FILTER_TABLE.json` (pairs left after each filter) |
@@ -113,20 +114,39 @@ To promote a candidate, move its row from `_CANDIDATE_ROWS` to `_LANG_ROWS` (as 
 dropped one). Its pairs, FLORES/NTREX rows and Wikipedia sample are then already cached.
 
 To discard the candidates you did not choose, run `python -m ByteResearch.run data.purge --purge sq,uk`. This
-permanently deletes their pairs from every hub and their Wikipedia samples. It refuses study and control
-languages, and it works before or after you remove them from `_CANDIDATE_ROWS`. Their FLORES/NTREX rows stay
-in the small shared caches, so the exclusion set and every data hash are unchanged.
+permanently deletes their pairs from every hub and their Wikipedia samples, and removes their languages and
+directions from the calibrated thresholds. It refuses study and control languages, and it works before or
+after you remove them from `_CANDIDATE_ROWS`. Their FLORES/NTREX rows stay in the small shared caches, so the
+exclusion set and every data hash are unchanged.
 
 Options: `--pairs N` (pairs kept per NLLB file), `--rebuild-data` and `--labse-dtype {fp32,fp16}` (LaBSE
 precision for the NLLB filter; default fp32, fp16 is about 3x faster). The dtype is recorded in each pair
 manifest, so it enters the data hashes.
 
-GlotLID checks (the NLLB filter and DecoderLens) accept, for each language, every GlotLID label whose
-language belongs to the same ISO 639-3 macrolanguage (e.g. all Arabic varieties) and whose script matches,
-plus the codes in `LID_EXTRA_CODES`; a language in `LID_ONLY_CODES` accepts exactly those codes instead
-(Malay: `zsm` only, because its `msa` macrolanguage includes Indonesian). A text passes when the probabilities of those labels among the top
-`glotlid_top_k` predictions sum to at least `glotlid_min_prob`. `corpora.lid.lid_passes(ctx, texts, lang)`
-applies the same check to any texts, and each pair manifest records the rule and both label sets.
+**Calibrated thresholds.** No quality threshold is fixed by hand. `data.thresholds` scores every FLORES dev
+sentence with the measures the filters use and takes the 1st percentile (`DataConfig.calib_percentile`), with
+no floor:
+
+| Threshold | Calibrated per | Used by |
+|---|---|---|
+| GlotLID summed probability | language | NLLB filter (each side), Wikipedia, DecoderLens buckets |
+| script ratio | language | NLLB filter (each side), Wikipedia |
+| LaBSE cosine | hub -> target direction | NLLB filter |
+| x/hub character-length ratio (1st-99th percentile band) | hub -> target direction | NLLB filter |
+
+The per-sentence FLORES scores, the thresholds and their distribution summaries are saved in
+`ROOT/data/thresholds/`, printed when built, and each pair manifest records the exact values it was filtered
+with. Fixed rules remain only for the 20-300 character window, exact-pair dedupe, exact-match FLORES/NTREX
+exclusion, markup and malformed lines. DecoderLens labels an output "other" (rather than "und") when GlotLID's
+top non-study label reaches `InterpConfig.lid_other_threshold` (0.5), since non-study languages have no
+calibration.
+
+GlotLID checks accept, for each language, every GlotLID label whose language belongs to the same ISO 639-3
+macrolanguage (e.g. all Arabic varieties) and whose script matches, plus the codes in `LID_EXTRA_CODES`; a
+language in `LID_ONLY_CODES` accepts exactly those codes instead (Malay: `zsm` only, because its `msa`
+macrolanguage includes Indonesian). A text passes when the probabilities of those labels among the top
+`glotlid_top_k` predictions sum to at least the language's calibrated threshold.
+`corpora.thresholds.lid_passes(ctx, texts, lang)` applies the same check to any texts.
 
 ### Training
 

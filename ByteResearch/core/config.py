@@ -238,16 +238,16 @@ def ntrex_file(code: str) -> str:
 
 @dataclass(frozen=True)
 class DataConfig:
-    # Data-building defaults: NLLB cap and length/LID/LaBSE filter thresholds (a side passes LID when the
-    # GlotLID probabilities of its language's labels among the top glotlid_top_k sum to at least
-    # glotlid_min_prob), the LaBSE batch size and inference dtype ("fp32" or "fp16"), Wikipedia
-    # sampling sizes, and the seed for every shuffle.
+    # Data-building defaults: NLLB cap, the fixed length window, the FLORES-dev percentile behind every
+    # calibrated LID/script/LaBSE minimum (no floor) and the length-ratio band's two percentiles, the number of
+    # GlotLID labels whose probabilities are summed, the LaBSE batch size and inference dtype ("fp32" or
+    # "fp16"), Wikipedia sampling sizes, and the seed for every shuffle.
     nllb_cap: int = 100_000
     min_chars: int = 20
     max_chars: int = 300
-    glotlid_min_prob: float = 0.9
+    calib_percentile: float = 1.0
+    ratio_percentiles: tuple = (1.0, 99.0)
     glotlid_top_k: int = 10
-    labse_min_cos: float = 0.80
     labse_batch: int = 256
     labse_dtype: str = "fp32"
     wiki_date: str = "20231101"
@@ -313,7 +313,7 @@ class InterpConfig:
     n_boot: int = 10_000
     alpha: float = 0.05
     flush_seconds: float = 60.0
-    lid_threshold: float = 0.5
+    lid_other_threshold: float = 0.5
     lid_window: int = 128
     lape_ks: tuple = (0.5, 1.0, 2.0, 5.0)
     lape_percentile: float = 95.0
