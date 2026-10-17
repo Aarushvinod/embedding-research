@@ -3,7 +3,8 @@
 # revision in its manifest, verifies its SHA-256 and loads it with fasttext.
 # predict calls model.f.predict directly, because fasttext's Python wrapper breaks under numpy 2.
 # load_aliases derives each language's accepted labels from ISO 639-3 macrolanguage membership, the script
-# and the labels present in the model (corpora.iso639), and lid_record describes that rule for configs.
+# and the labels present in the model (corpora.iso639), for the study languages or the yield-only
+# candidates, and lid_record describes that rule for configs.
 # A text counts as language L when the probabilities of L's labels among its top-k predictions sum to at
 # least the threshold: labels_prob computes that sum, and lid_probs and lid_passes apply it to raw texts.
 
@@ -11,7 +12,7 @@ from __future__ import annotations
 
 import functools
 
-from ..core.config import LANGUAGES, LID_EXTRA_CODES, PINS, DataConfig
+from ..core.config import CANDIDATE_LANGUAGES, LANGUAGES, LID_EXTRA_CODES, LID_ONLY_CODES, PINS, DataConfig
 from ..core.io import sha256_json
 from .assets import asset_dir, build_hf_asset, ensure_hf_asset
 from .iso639 import LABEL_PREFIX, derive_aliases, iso_table_path, parse_macrolanguages
@@ -50,36 +51,50 @@ def model_labels(model) -> list:
     return [label.removeprefix(LABEL_PREFIX) for label in model.get_labels()]
 
 
+def _items(codes: dict) -> tuple:
+    # Input: {code: ISO codes}. Output: its sorted (code, codes) items as a hashable cache key.
+    return tuple(sorted((c, tuple(v)) for c, v in codes.items()))
+
+
 @functools.lru_cache(maxsize=4)
-def _aliases(iso_path: str, model_path: str, extra: tuple) -> dict:
-    # Inputs: the verified macrolanguage table path, the GlotLID model path and the extra codes as sorted
-    # (code, codes) items (cache key). Output: {code: frozenset of labels}; raises ValueError when a
-    # registry language ends up with no label at all.
+def _aliases(iso_path: str, model_path: str, extra: tuple, only: tuple, candidates: bool) -> dict:
+    # Inputs: the verified macrolanguage table path, the GlotLID model path, the extra and only codes as
+    # sorted (code, codes) items and whether to derive the candidates instead of the study registry (cache
+    # key). Output: {code: frozenset of labels}; raises ValueError when a language ends up with no label.
     with open(iso_path, encoding="utf-8") as fh:
         macro = parse_macrolanguages(fh.read())
-    table = derive_aliases(LANGUAGES, macro, model_labels(_fasttext_model(model_path)), dict(extra))
+    languages = CANDIDATE_LANGUAGES if candidates else LANGUAGES
+    table = derive_aliases(languages, macro, model_labels(_fasttext_model(model_path)), dict(extra), dict(only))
     empty = sorted(c for c, labels in table.items() if not labels)
     if empty:
         raise ValueError(f"GlotLID has no label for {empty}; add ISO codes to LID_EXTRA_CODES in core.config")
     return table
 
 
-def load_aliases(ctx) -> dict:
-    # Input: Ctx. Output: {language code: frozenset of accepted GlotLID labels} for every registry language,
-    # derived from the cached ISO table and GlotLID model (both downloaded and verified when needed).
-    extra = tuple(sorted((c, tuple(v)) for c, v in LID_EXTRA_CODES.items()))
-    return _aliases(str(iso_table_path(ctx)), str(glotlid_path(ctx)), extra)
+def load_aliases(ctx, candidates: bool = False) -> dict:
+    # Inputs: Ctx and whether to return the yield-only candidates instead of the study registry. Output:
+    # {language code: frozenset of accepted GlotLID labels}, derived from the cached ISO table and GlotLID
+    # model (both downloaded and verified when needed).
+    return _aliases(str(iso_table_path(ctx)), str(glotlid_path(ctx)), _items(LID_EXTRA_CODES),
+                    _items(LID_ONLY_CODES), candidates)
+
+
+def pair_aliases(ctx) -> dict:
+    # Input: Ctx. Output: the study and candidate alias tables merged into one {code: labels} dict (the
+    # codes are disjoint), for filtering any NLLB pair.
+    return {**load_aliases(ctx), **load_aliases(ctx, candidates=True)}
 
 
 def lid_record(ctx, aliases: dict, langs=None) -> dict:
     # Inputs: Ctx, the alias table (load_aliases) and optional language codes (default all). Output: the LID
-    # rule for manifests and result configs: rule text, top-k, threshold, ISO table pin, extra codes, the
-    # alias table of those languages and its hash.
+    # rule for manifests and result configs: rule text, top-k, threshold, ISO table pin, extra and only
+    # codes, the alias table of those languages and its hash.
     table = {c: sorted(v) for c, v in aliases.items() if langs is None or c in langs}
     cfg, pin = ctx.config(DataConfig), PINS["iso639_3"]
     return {"rule": LID_RULE, "top_k": cfg.glotlid_top_k, "min_prob": cfg.glotlid_min_prob,
             "iso639_3": {"release": pin["release"], "sha256": pin["sha256"]},
-            "extra_codes": {c: list(v) for c, v in LID_EXTRA_CODES.items()}, "aliases": table,
+            "extra_codes": {c: list(v) for c, v in LID_EXTRA_CODES.items()},
+            "only_codes": {c: list(v) for c, v in LID_ONLY_CODES.items()}, "aliases": table,
             "aliases_sha256": sha256_json(table)}
 
 

@@ -1,9 +1,10 @@
 # Fixed study constants and default configuration for the ByteResearch codebase.
 # It defines the fourteen languages (eight targets, three hubs, three controls) with their FLORES,
-# NTREX, CCMatrix and Wikipedia codes, scripts and decoder-tag sentinel indices, the extra ISO codes
-# for GlotLID, the Unicode script ranges and sentence terminators, so a language change stays here.
-# It also defines the six models, the three fine-tuning conditions, the 24-row NLLB source
-# table and the pinned revisions of every external resource, and validates them on import.
+# NTREX, CCMatrix and Wikipedia codes, scripts and decoder-tag sentinel indices, the GlotLID ISO-code
+# overrides, the Unicode script ranges and sentence terminators, so a language change stays here.
+# It also defines the six models, the three fine-tuning conditions, the 24-row NLLB source table, the
+# candidate targets whose NLLB yield is measured but never trained on, and the pinned revisions of
+# every external resource, and validates them on import.
 # Frozen config dataclasses carry the defaults from the approved plan for data, training,
 # decoding and interpretability, and smoke_overrides shrinks them for the smoke subtree.
 # Resolver helpers turn CLI selections such as "all", "small" or "byt5,mt5-base" into lists.
@@ -18,9 +19,10 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Language:
-    # One study language: short code, English name, FLORES code, NTREX code (None for controls),
-    # CCMatrix ISO code (None for controls), Wikipedia subdomain (None for controls), ISO 15924
-    # script, role ("target", "hub" or "control") and the sentinel index k of its decoder tag.
+    # One language: short code, English name, FLORES code, NTREX code (None for controls and
+    # candidates), CCMatrix ISO code (None for controls), Wikipedia subdomain (None for controls and
+    # candidates), ISO 15924 script, role ("target", "hub", "control" or "candidate") and the sentinel
+    # index k of its decoder tag (-1 for candidates, which have no tag).
     code: str
     name: str
     flores: str
@@ -86,6 +88,19 @@ _LANG_ROWS = (
     ("el", "Greek", "ell_Grek", None, None, None, "Grek", "control"),
 )
 LID_EXTRA_CODES: dict = {"tl": ("fil",)}
+LID_ONLY_CODES: dict = {"ms": ("zsm",)}
+
+_CANDIDATE_ROWS = (
+    ("bg", "Bulgarian", "bul_Cyrl", None, "bg", None, "Cyrl", "candidate"),
+    ("ur", "Urdu", "urd_Arab", None, "ur", None, "Arab", "candidate"),
+    ("bn", "Bengali", "ben_Beng", None, "bn", None, "Beng", "candidate"),
+    ("ms", "Malay", "zsm_Latn", None, "ms", None, "Latn", "candidate"),
+    ("sq", "Albanian", "als_Latn", None, "sq", None, "Latn", "candidate"),
+    ("uk", "Ukrainian", "ukr_Cyrl", None, "uk", None, "Cyrl", "candidate"),
+)
+CANDIDATE_LANGUAGES: dict = {row[0]: Language(*row, tag_k=-1) for row in _CANDIDATE_ROWS}
+CANDIDATES: tuple = tuple(CANDIDATE_LANGUAGES)
+CANDIDATE_HUBS: tuple = ("ar", "ru")
 
 TAG_K0 = 86
 MAX_TAG_K = 99
@@ -126,12 +141,17 @@ NLLB_ALLENAI_HUBS: tuple = ("en",)
 NLLB_ALLENAI_PAIRS: tuple = (("ru", "ka"), ("ru", "hy"))
 
 
+def language(code: str) -> Language:
+    # Input: a study or candidate language code. Output: its Language; raises KeyError when unknown.
+    return LANGUAGES[code] if code in LANGUAGES else CANDIDATE_LANGUAGES[code]
+
+
 def _nllb_row(hub: str, x: str) -> NllbSource:
     # Inputs: hub and target codes. Output: the NllbSource for that pair. AllenAI serves every pair
     # of an NLLB_ALLENAI_HUBS hub plus NLLB_ALLENAI_PAIRS (9 columns, files named by the two FLORES
     # codes in sorted order); CCMatrix serves the rest (3 columns, files named by the two ISO codes
     # in sorted order). The hub text comes first exactly when the hub's code sorts first.
-    hl, xl = LANGUAGES[hub], LANGUAGES[x]
+    hl, xl = language(hub), language(x)
     allenai = hub in NLLB_ALLENAI_HUBS or (hub, x) in NLLB_ALLENAI_PAIRS
     a, b = (hl.flores, xl.flores) if allenai else (hl.ccmatrix, xl.ccmatrix)
     url = (_ALLENAI if allenai else _CCMATRIX).format(name="-".join(sorted((a, b))))
@@ -139,6 +159,7 @@ def _nllb_row(hub: str, x: str) -> NllbSource:
 
 
 NLLB_SOURCES: dict[tuple, NllbSource] = {(h, x): _nllb_row(h, x) for h in HUBS for x in TARGETS}
+CANDIDATE_SOURCES: dict[tuple, NllbSource] = {(h, x): _nllb_row(h, x) for h in CANDIDATE_HUBS for x in CANDIDATES}
 
 PINS: dict = {
     "flores": {
@@ -408,13 +429,20 @@ def lang_field(codes, attr: str) -> list:
 def validate_registry() -> None:
     # Checks the language registry and everything derived from it: tag sentinels within mT5's 100
     # (k <= MAX_TAG_K), scripts covered by SCRIPT_RANGES, NTREX/CCMatrix/Wikipedia codes for every study
-    # language, GlotLID extra codes, smoke selections and controls drawn from the registry, and one
-    # NLLB source per hub and target. Raises ValueError naming every problem. No output.
+    # language, GlotLID override codes, smoke selections and controls drawn from the registry, one NLLB
+    # source per hub and target, and candidates that are new codes with CCMatrix codes drawn from study
+    # hubs. Raises ValueError naming every problem. No output.
     problems = [f"tag k {l.tag_k} of {c} exceeds {MAX_TAG_K}; lower TAG_K0" for c, l in LANGUAGES.items()
                 if l.tag_k > MAX_TAG_K]
     problems += [f"{c}: script {l.script} has no SCRIPT_RANGES entry" for c, l in LANGUAGES.items()
                  if SCRIPT_ALIASES.get(l.script, l.script) not in SCRIPT_RANGES]
     problems += [f"GlotLID extra codes for unknown language {c}" for c in LID_EXTRA_CODES if c not in LANGUAGES]
+    problems += [f"GlotLID only-codes for unknown language {c}" for c in LID_ONLY_CODES
+                 if c not in LANGUAGES and c not in CANDIDATE_LANGUAGES]
+    problems += [f"candidate {c} is already a study language" for c in CANDIDATES if c in LANGUAGES]
+    problems += [f"candidate {c}: no CCMatrix code or script without SCRIPT_RANGES entry" for c, l in
+                 CANDIDATE_LANGUAGES.items() if not l.ccmatrix or SCRIPT_ALIASES.get(l.script, l.script) not in SCRIPT_RANGES]
+    problems += [f"candidate hub {h} is not a hub" for h in CANDIDATE_HUBS if h not in HUBS]
     problems += [f"{c}: study language without NTREX, CCMatrix or Wikipedia code" for c in STUDY11
                  if None in (LANGUAGES[c].ntrex, LANGUAGES[c].ccmatrix, LANGUAGES[c].wiki)]
     problems += [f"smoke target {c} is not a target" for c in SMOKE_TARGETS if c not in TARGETS]

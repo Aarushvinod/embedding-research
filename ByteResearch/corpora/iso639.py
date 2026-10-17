@@ -4,7 +4,8 @@
 # parse_macrolanguages reads the table into {macrolanguage: member codes}, and iso_family gives the codes
 # that count as one language: the whole macrolanguage when the code is one or belongs to one, else itself.
 # derive_aliases turns the language registry, that table, the labels present in the GlotLID model and the
-# small LID_EXTRA_CODES override into {code: accepted labels}, keeping only labels in the expected script.
+# small LID_EXTRA_CODES / LID_ONLY_CODES overrides into {code: accepted labels}, keeping only labels in
+# the expected script.
 # Everything except the download is pure, so the derivation is unit-tested on fake tables and label lists.
 
 from __future__ import annotations
@@ -69,15 +70,18 @@ def split_label(label: str):
     return tuple(parts) if len(parts) == 2 else None
 
 
-def derive_aliases(languages: dict, macro: dict, labels, extra: dict | None = None) -> dict:
+def derive_aliases(languages: dict, macro: dict, labels, extra: dict | None = None, only: dict | None = None) -> dict:
     # Inputs: {code: Language} (iso639_3 and script are read), the parsed macrolanguage table, the labels
-    # present in the GlotLID model and {code: extra ISO codes} for cases the table does not cover. Output:
-    # {code: frozenset of accepted labels}: every label whose language is in the family of the language's
-    # own or extra codes and whose script matches the language's script (aliases such as Hans = Hani).
+    # present in the GlotLID model, {code: extra ISO codes} for cases the table does not cover and {code:
+    # ISO codes} for languages whose macrolanguage is too broad (e.g. Malay, whose msa family includes
+    # Indonesian), used as-is without family expansion. Output: {code: frozenset of accepted labels}: every
+    # label whose language is in the family of the language's own or extra codes (or exactly its only
+    # codes) and whose script matches the language's script (aliases such as Hans = Hani).
     pairs = [p for p in map(split_label, labels) if p]
     out = {}
     for code, lang in languages.items():
         family = set().union(*(iso_family(c, macro) for c in (lang.iso639_3, *(extra or {}).get(code, ()))))
+        family = set((only or {}).get(code, ())) or family
         script = canonical_script(lang.script)
         out[code] = frozenset(f"{c}_{s}" for c, s in pairs if c in family and canonical_script(s) == script)
     return out

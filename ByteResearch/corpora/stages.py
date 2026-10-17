@@ -4,6 +4,8 @@
 # macrolanguage table behind its label sets, LaBSE and the flores200 SPM model.
 # data.nllb runs over condition x target (the condition's hub to each target) and data.wiki over the
 # study languages; data.table prints and saves the per-pair filter table whenever the pairs change.
+# data.candidates measures the yield of Arabic/Russian pairs for candidate targets that are never trained
+# on (selected through the C2/C3 conditions), and data.candidate_table prints and saves their table.
 # Every stage is done when its manifest is complete, and a complete manifest is only replaced with
 # --force --rebuild-data (the old directory moves to ROOT/data/_superseded/); --force alone keeps it.
 # The composite `data` runs all of them in dependency order.
@@ -12,8 +14,8 @@ from __future__ import annotations
 
 import functools
 
-from ..core.config import CONDITIONS, TrainConfig
-from ..core.registry import composite, opt, register_stage
+from ..core.config import CANDIDATE_HUBS, CANDIDATES, CONDITIONS, TrainConfig, resolve_conditions
+from ..core.registry import Unit, composite, opt, register_stage
 from .assets import asset_dir, build_labse, build_sacrebleu
 from .exclusion import build_exclusion, exclusion_dir
 from .flores import build_flores, dev_halves, dev_subset_ids
@@ -118,6 +120,22 @@ def nllb_stage(ctx, unit):
     build_pairs(ctx, CONDITIONS[unit.condition].hub, unit.target)
 
 
+def candidate_units(sel: dict, smoke: bool = False) -> list:
+    # Inputs: selections and smoke flag. Output: (condition, lang) Units for every selected condition whose
+    # hub is a candidate hub, times every candidate target.
+    conds = [c for c in resolve_conditions(sel.get("condition"), smoke) if CONDITIONS[c].hub in CANDIDATE_HUBS]
+    return [Unit(condition=c, lang=x) for c in conds for x in CANDIDATES]
+
+
+@data_stage("data.candidates", lambda c, u: c.paths.nllb_candidate_dir(CONDITIONS[u.condition].hub, u.lang),
+            grid=candidate_units, order=22, options=DATA_OPTS,
+            requires=("data.flores", "data.ntrex", "data.exclusion", "data.lid_model", "data.iso639",
+                      "data.labse_model"))
+def candidates_stage(ctx, unit):
+    # Inputs: Ctx and a (condition, lang) Unit. Streams, filters and saves that hub-candidate pair file.
+    build_pairs(ctx, CONDITIONS[unit.condition].hub, unit.lang)
+
+
 @data_stage("data.wiki", lambda c, u: c.paths.wiki_dir(u.lang), grid=("lang",), requires=("data.exclusion",), order=21,
             options=WIKI_OPTS)
 def wiki_stage(ctx, unit):
@@ -132,5 +150,13 @@ def table_stage(ctx, unit):
     write_filter_table(ctx)
 
 
+@register_stage("data.candidate_table", grid=(), is_done=lambda ctx, unit: filter_table_done(ctx, candidates=True),
+                requires=("data.candidates",), order=31, options=DATA_OPTS)
+def candidate_table_stage(ctx, unit):
+    # Inputs: Ctx and the empty Unit. Prints and saves the candidate yield table over all built candidate pairs.
+    write_filter_table(ctx, candidates=True)
+
+
 composite("data", ("data.flores", "data.ntrex", "data.exclusion", "data.lid_model", "data.iso639", "data.labse_model",
-                   "data.sacrebleu", "data.nllb", "data.wiki", "data.table"))
+                   "data.sacrebleu", "data.nllb", "data.wiki", "data.table", "data.candidates",
+                   "data.candidate_table"))

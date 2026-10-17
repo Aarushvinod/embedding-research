@@ -1,13 +1,16 @@
-# NLLB-mined training pairs: 24 files (three hubs times eight targets) streamed from AllenAI and CCMatrix.
+# NLLB-mined training pairs: 24 files (three hubs times eight targets) streamed from AllenAI and CCMatrix,
+# plus yield-only candidate pairs (Arabic/Russian to each candidate target) that training never reads.
 # parse_line reads one TSV line in the file's own layout (AllenAI: text, text, laser score, ...; CCMatrix:
 # score, text, text) and orients it to (hub_text, x_text, score) using core.config.NLLB_SOURCES.
 # build_pairs streams the score-sorted file with GzLineStream and applies the ordered filter chain of
 # corpora.filters with GlotLID and LaBSE, stopping at the cap (100k, 2k under --smoke, or --pairs).
-# It writes ROOT/data/nllb/{hub}__{X}/pairs.jsonl.gz read-only, with a manifest holding the stream provenance,
+# It writes ROOT/data/nllb/{hub}__{X}/pairs.jsonl.gz (candidates: ROOT/data/nllb_candidates/...) read-only,
+# with a manifest holding the stream provenance,
 # filter config (LaBSE dtype and LID rule with both sides' GlotLID labels, so both enter the data hashes),
 # counters and shortfall.
 # load_pairs verifies and reads a pair file, and the filter-table helpers print and save the per-pair
-# survival table and the per-target summary to ROOT/data/nllb/FILTER_TABLE.json.
+# survival table and the per-target summary to ROOT/data/nllb/FILTER_TABLE.json (candidates:
+# ROOT/data/nllb_candidates/CANDIDATE_TABLE.json).
 
 from __future__ import annotations
 
@@ -16,17 +19,20 @@ import functools
 import math
 import time
 
-from ..core.config import HUBS, LANGUAGES, NLLB_SOURCES, TARGETS, DataConfig
+from ..core.config import (CANDIDATE_HUBS, CANDIDATE_SOURCES, CANDIDATES, HUBS, NLLB_SOURCES, TARGETS, DataConfig,
+                           language)
 from ..core.io import read_json, read_jsonl_gz, sha256_json, write_json_atomic, write_jsonl_gz_atomic
 from .assets import labse_cosines, labse_dtype, load_labse
 from .exclusion import exclusion_set
 from .filters import STEPS, FilterSpec, run_filters, survival
 from .http import GzLineStream
-from .lid import lid_record, load_aliases, load_glotlid, predict
+from .lid import lid_record, load_glotlid, pair_aliases, predict
 from .manifest import begin_build, finish_build, manifest_complete, read_manifest, verified_path
 
 PAIRS_FILE = "pairs.jsonl.gz"
 TABLE_FILE = "FILTER_TABLE.json"
+TABLES = {False: (HUBS, TARGETS, "nllb", TABLE_FILE),
+          True: (CANDIDATE_HUBS, CANDIDATES, "nllb_candidates", "CANDIDATE_TABLE.json")}
 BLOCK = 5000
 
 
@@ -56,9 +62,9 @@ def pairs_cap(ctx) -> int:
 
 def filter_spec(ctx, hub: str, x: str) -> FilterSpec:
     # Inputs: Ctx, hub and target codes. Output: the FilterSpec with DataConfig thresholds, both scripts,
-    # both sides' accepted GlotLID labels (corpora.lid.load_aliases) and the shared exclusion set.
-    cfg, aliases = ctx.config(DataConfig), load_aliases(ctx)
-    return FilterSpec(hub=hub, x=x, hub_script=LANGUAGES[hub].script, x_script=LANGUAGES[x].script,
+    # both sides' accepted GlotLID labels (corpora.lid.pair_aliases) and the shared exclusion set.
+    cfg, aliases = ctx.config(DataConfig), pair_aliases(ctx)
+    return FilterSpec(hub=hub, x=x, hub_script=language(hub).script, x_script=language(x).script,
                       min_chars=cfg.min_chars, max_chars=cfg.max_chars, lid_min_prob=cfg.glotlid_min_prob,
                       lid_top_k=cfg.glotlid_top_k, hub_lid=tuple(sorted(aliases[hub])), x_lid=tuple(sorted(aliases[x])),
                       labse_min=cfg.labse_min_cos, exclusion=exclusion_set(ctx)[0])
@@ -91,11 +97,23 @@ def _progress(label: str, stream, t0: float):
     return report
 
 
+def is_candidate(hub: str, x: str) -> bool:
+    # Inputs: hub and target codes. Output: whether the pair is a yield-only candidate pair.
+    return (hub, x) in CANDIDATE_SOURCES
+
+
+def pair_dir(ctx, hub: str, x: str):
+    # Inputs: Ctx, hub and target (or candidate) codes. Output: the pair's cache directory; candidates live
+    # apart, so promoting one to a target rebuilds it with its own FLORES/NTREX exclusion.
+    return ctx.paths.nllb_candidate_dir(hub, x) if is_candidate(hub, x) else ctx.paths.nllb_dir(hub, x)
+
+
 def build_pairs(ctx, hub: str, x: str) -> dict:
-    # Inputs: Ctx, hub and target codes. Streams, filters and saves the pair file with its manifest
-    # (a shortfall is recorded, not fatal). Output: the manifest.
-    src = NLLB_SOURCES[(hub, x)]
-    out = begin_build(ctx, ctx.paths.nllb_dir(hub, x))
+    # Inputs: Ctx, hub and target (or candidate) codes. Streams, filters and saves the pair file with its
+    # manifest (a shortfall is recorded, not fatal). Output: the manifest.
+    candidate = is_candidate(hub, x)
+    src = CANDIDATE_SOURCES[(hub, x)] if candidate else NLLB_SOURCES[(hub, x)]
+    out = begin_build(ctx, pair_dir(ctx, hub, x))
     spec, cap = filter_spec(ctx, hub, x), pairs_cap(ctx)
     lid_fn, labse_fn = model_functions(ctx)
     stream, t0 = GzLineStream(src.url), time.time()
@@ -111,7 +129,8 @@ def build_pairs(ctx, hub: str, x: str) -> dict:
     config = {"source": dataclasses.asdict(src), "cap": cap, "block": min(BLOCK, cap),
               "filters": {k: v for k, v in dataclasses.asdict(spec).items() if k != "exclusion"},
               "exclusion_sha256": exclusion_set(ctx)[1], "assets": asset_revisions(ctx), "device": ctx.device,
-              "labse_dtype": labse_dtype(ctx), "lid": lid_record(ctx, load_aliases(ctx), (hub, x))}
+              "labse_dtype": labse_dtype(ctx), "lid": lid_record(ctx, pair_aliases(ctx), (hub, x)),
+              "candidate": candidate}
     stats = {"counts": result["counts"], "survival": survival(result["counts"], result["lines_read"]),
              "lines_read": result["lines_read"], "order_violations": result["order_violations"],
              "kept": kept, "shortfall": max(cap - kept, 0), "exhausted": result["exhausted"],
@@ -133,22 +152,27 @@ def load_pairs(ctx, hub: str, x: str) -> list:
     return list(_read_pairs(str(path), path.stat().st_mtime_ns))
 
 
-def built_pairs(ctx) -> list:
-    # Input: Ctx. Output: [(hub, x)] of every pair with a complete manifest, in table order.
-    return [(h, x) for h in HUBS for x in TARGETS if manifest_complete(ctx.paths.nllb_dir(h, x))]
+def built_pairs(ctx, candidates: bool = False) -> list:
+    # Inputs: Ctx and whether to list the candidate pairs. Output: [(hub, x)] of every pair with a complete
+    # manifest, in table order.
+    hubs, xs = TABLES[candidates][:2]
+    return [(h, x) for h in hubs for x in xs if manifest_complete(pair_dir(ctx, h, x))]
 
 
-def table_fingerprint(ctx) -> str:
-    # Input: Ctx. Output: SHA-256 over the output hashes of every built pair (changes when any pair does).
-    return sha256_json({f"{h}__{x}": read_manifest(ctx.paths.nllb_dir(h, x))["outputs"] for h, x in built_pairs(ctx)})
+def table_fingerprint(ctx, candidates: bool = False) -> str:
+    # Inputs: Ctx and the table kind. Output: SHA-256 over the output hashes of every built pair of that
+    # table (changes when any of its pairs does).
+    return sha256_json({f"{h}__{x}": read_manifest(pair_dir(ctx, h, x))["outputs"]
+                        for h, x in built_pairs(ctx, candidates)})
 
 
-def filter_table(ctx) -> dict:
-    # Input: Ctx. Output: {"pairs": {hub__x: survival counts, host, cap, order violations, shortfall,
-    # exhausted}, "per_language": {x: {hub: kept}}, "fingerprint"} over the built pairs.
+def filter_table(ctx, candidates: bool = False) -> dict:
+    # Inputs: Ctx and the table kind. Output: {"pairs": {hub__x: survival counts, host, cap, order
+    # violations, shortfall, exhausted}, "per_language": {x: {hub: kept}}, "hubs", "candidates",
+    # "fingerprint"} over the built pairs of that table.
     pairs, per_lang = {}, {}
-    for h, x in built_pairs(ctx):
-        m = read_manifest(ctx.paths.nllb_dir(h, x))
+    for h, x in built_pairs(ctx, candidates):
+        m = read_manifest(pair_dir(ctx, h, x))
         s = m["stats"]
         pairs[f"{h}__{x}"] = {"host": m["config"]["source"]["host"], "cap": m["config"]["cap"], **s["survival"],
                               "order_violations": s["order_violations"], "shortfall": s["shortfall"],
@@ -156,7 +180,8 @@ def filter_table(ctx) -> dict:
                               "seconds": s["seconds"]}
         per_lang.setdefault(x, {})[h] = s["kept"]
     return {"steps": ["read", *STEPS, "kept"], "pairs": pairs, "per_language": per_lang,
-            "fingerprint": table_fingerprint(ctx)}
+            "hubs": list(TABLES[candidates][0]), "candidates": candidates,
+            "fingerprint": table_fingerprint(ctx, candidates)}
 
 
 def format_filter_table(table: dict) -> str:
@@ -164,25 +189,34 @@ def format_filter_table(table: dict) -> str:
     # the per-target summary of pairs kept from each hub.
     cols = ["read", *STEPS, "kept"]
     head = f"{'pair':8} {'host':8} " + " ".join(f"{c:>9}" for c in cols) + f" {'short':>7} {'ord.viol':>8} {'MB':>7}"
-    lines = ["NLLB filter table (remaining after each filter, in order)", head, "-" * len(head)]
+    title = "NLLB candidate yield table" if table.get("candidates") else "NLLB filter table"
+    lines = [f"{title} (remaining after each filter, in order)", head, "-" * len(head)]
     for name, r in table["pairs"].items():
         lines.append(f"{name:8} {r['host']:8} " + " ".join(f"{r[c]:>9,}" for c in cols)
                      + f" {r['shortfall']:>7,} {r['order_violations']:>8,} {r['mb_read']:>7}")
-    lines += ["", "Per-target pairs kept by hub", f"{'target':8} " + " ".join(f"{h:>9}" for h in HUBS)]
+    hubs = table.get("hubs", HUBS)
+    lines += ["", "Per-target pairs kept by hub", f"{'target':8} " + " ".join(f"{h:>9}" for h in hubs)]
     for x, by_hub in table["per_language"].items():
-        lines.append(f"{x:8} " + " ".join(f"{by_hub.get(h, '-'):>9}" for h in HUBS))
+        lines.append(f"{x:8} " + " ".join(f"{by_hub.get(h, '-'):>9}" for h in hubs))
     return "\n".join(lines)
 
 
-def write_filter_table(ctx) -> dict:
-    # Input: Ctx. Builds the table, prints it and saves ROOT/data/nllb/FILTER_TABLE.json. Output: the table.
-    table = filter_table(ctx)
+def table_path(ctx, candidates: bool = False):
+    # Inputs: Ctx and the table kind. Output: ROOT/data/nllb/FILTER_TABLE.json or
+    # ROOT/data/nllb_candidates/CANDIDATE_TABLE.json.
+    folder, name = TABLES[candidates][2:]
+    return ctx.paths.data(folder, name)
+
+
+def write_filter_table(ctx, candidates: bool = False) -> dict:
+    # Inputs: Ctx and the table kind. Builds the table, prints it and saves it at table_path. Output: the table.
+    table = filter_table(ctx, candidates)
     print(format_filter_table(table), flush=True)
-    write_json_atomic(ctx.paths.data("nllb", TABLE_FILE), table)
+    write_json_atomic(table_path(ctx, candidates), table)
     return table
 
 
-def filter_table_done(ctx) -> bool:
-    # Input: Ctx. Output: whether FILTER_TABLE.json exists and matches the currently built pairs.
-    saved = read_json(ctx.paths.data("nllb", TABLE_FILE))
-    return bool(saved) and saved.get("fingerprint") == table_fingerprint(ctx)
+def filter_table_done(ctx, candidates: bool = False) -> bool:
+    # Inputs: Ctx and the table kind. Output: whether the saved table exists and matches the built pairs.
+    saved = read_json(table_path(ctx, candidates))
+    return bool(saved) and saved.get("fingerprint") == table_fingerprint(ctx, candidates)

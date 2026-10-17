@@ -81,6 +81,10 @@ class Paths:
         # Inputs: hub and target codes. Output: ROOT/data/nllb/{hub}__{x}.
         return self.data("nllb", f"{hub}__{x}")
 
+    def nllb_candidate_dir(self, hub: str, x: str) -> Path:
+        # Inputs: hub and candidate codes. Output: ROOT/data/nllb_candidates/{hub}__{x}.
+        return self.data("nllb_candidates", f"{hub}__{x}")
+
     def wiki_dir(self, lang: str) -> Path:
         # Input: language code. Output: ROOT/data/wiki/{lang}.
         return self.data("wiki", lang)
