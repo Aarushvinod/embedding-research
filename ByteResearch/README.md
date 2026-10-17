@@ -48,8 +48,7 @@ an interpreter elsewhere, set `BYTERESEARCH_METRICS_PYTHON`.
 
 ```
 ROOT/data/{flores,ntrex,nllb/{hub}__{x},wiki/{lang},sacrebleu,models}/   cached data + manifest.json
-ROOT/data/nllb_candidates/{hub}__{x}/                                     yield-only candidate pairs
-ROOT/data/DATA_MANIFEST.json, ROOT/data/nllb/FILTER_TABLE.json, ROOT/data/nllb_candidates/CANDIDATE_TABLE.json
+ROOT/data/DATA_MANIFEST.json, ROOT/data/nllb/FILTER_TABLE.json, ROOT/data/nllb/CANDIDATE_TABLE.json
 ROOT/checkpoints/{run_id}/checkpoint-{step}/, ROOT/checkpoints/{run_id}/best/
 ROOT/results/{experiment}/{run_id}/{measurement}[__{variant}].json
 ROOT/arrays/{experiment}/{run_id}/...                                    large .npy/.npz
@@ -100,14 +99,23 @@ the current selections.
 | `data.nllb` | condition x target | filtered NLLB pairs (hub to target) |
 | `data.wiki` | lang | Wikipedia sentences (LAPE only) |
 | `data.table` | - | prints and saves `ROOT/data/nllb/FILTER_TABLE.json` (pairs left after each filter) |
-| `data.candidates` | condition (C2/C3) x candidate | filtered NLLB pairs from Arabic/Russian to each candidate target |
-| `data.candidate_table` | - | prints and saves `ROOT/data/nllb_candidates/CANDIDATE_TABLE.json` |
+| `data.candidates` | condition x candidate | filtered NLLB pairs from each hub to each candidate target |
+| `data.candidate_wiki` | candidate | Wikipedia sentences for each candidate target |
+| `data.candidate_table` | - | prints and saves `ROOT/data/nllb/CANDIDATE_TABLE.json` |
 
 Candidate targets (`CANDIDATE_LANGUAGES` in `core/config.py`: Bulgarian, Urdu, Bengali, Malay, Albanian,
-Ukrainian) are measured, never trained on: their pairs go through the same filters and cap, but live in a
-separate cache that no training or evaluation stage reads. Their FLORES/NTREX text is not in the exclusion set
-(only the study languages' is), so their yields are a slight upper bound. Promoting one to a target means
-moving it into the language registry, which builds its pairs afresh under `ROOT/data/nllb/`.
+Ukrainian) get all their data prepared exactly as targets do, but nothing trains on them:
+- FLORES and NTREX include them, and so does the exclusion set.
+- Their pairs from every hub go through the same filters and cap, into the same `ROOT/data/nllb/` folders.
+- Their Wikipedia sentences are sampled too.
+
+To promote a candidate, move its row from `_CANDIDATE_ROWS` to `_LANG_ROWS` (as a target, replacing a
+dropped one). Its pairs, FLORES/NTREX rows and Wikipedia sample are then already cached.
+
+To discard the candidates you did not choose, run `python -m ByteResearch.run data.purge --purge sq,uk`. This
+permanently deletes their pairs from every hub and their Wikipedia samples. It refuses study and control
+languages, and it works before or after you remove them from `_CANDIDATE_ROWS`. Their FLORES/NTREX rows stay
+in the small shared caches, so the exclusion set and every data hash are unchanged.
 
 Options: `--pairs N` (pairs kept per NLLB file), `--rebuild-data` and `--labse-dtype {fp32,fp16}` (LaBSE
 precision for the NLLB filter; default fp32, fp16 is about 3x faster). The dtype is recorded in each pair

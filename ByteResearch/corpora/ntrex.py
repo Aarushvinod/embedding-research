@@ -1,4 +1,4 @@
-# NTREX-128 evaluation data for the eleven study languages (eight targets and three hubs).
+# NTREX-128 evaluation data for the eleven study languages (eight targets and three hubs) and the candidates.
 # build_ntrex downloads each language's file from raw.githubusercontent.com at the pinned commit.
 # English uses newstest2019-src.eng.txt and the others newstest2019-ref.{code}.txt (fil for Tagalog, swa
 # for Swahili, arb for Arabic, rus for Russian, and so on).
@@ -11,7 +11,7 @@ from __future__ import annotations
 import functools
 from pathlib import PurePosixPath
 
-from ..core.config import PINS, STUDY11, ntrex_file
+from ..core.config import NTREX_LANGS, PINS, STUDY11, ntrex_file
 from ..core.io import read_json, write_bytes_atomic, write_json_atomic
 from .http import fetch_bytes
 from .manifest import begin_build, finish_build, verified_path
@@ -20,7 +20,7 @@ RAW_URL = "https://raw.githubusercontent.com/{repo}/{commit}/{path}"
 
 
 def ntrex_url(code: str) -> str:
-    # Input: a study language code. Output: the pinned raw GitHub URL of its NTREX file.
+    # Input: a study or candidate language code. Output: the pinned raw GitHub URL of its NTREX file.
     pin = PINS["ntrex"]
     return RAW_URL.format(repo=pin["repo"], commit=pin["commit"], path=ntrex_file(code))
 
@@ -34,12 +34,12 @@ def split_lines(data: bytes) -> list:
 
 
 def build_ntrex(ctx) -> dict:
-    # Input: Ctx. Downloads, checks and saves the eleven NTREX files and ntrex.json with a manifest.
-    # Output: the manifest.
+    # Input: Ctx. Downloads, checks and saves the study and candidate NTREX files and ntrex.json with a
+    # manifest. Output: the manifest.
     pin = PINS["ntrex"]
     out = begin_build(ctx, ctx.paths.ntrex_dir())
     sources, texts, outputs = [], {}, []
-    for code in STUDY11:
+    for code in NTREX_LANGS:
         data, info = fetch_bytes(ntrex_url(code))
         lines = split_lines(data)
         if len(lines) != pin["rows"]:
@@ -50,7 +50,7 @@ def build_ntrex(ctx) -> dict:
         texts[code] = lines
         outputs.append(name)
     write_json_atomic(out / "ntrex.json", texts)
-    return finish_build(ctx, out, sources=sources, config={"pin": pin, "langs": list(STUDY11)},
+    return finish_build(ctx, out, sources=sources, config={"pin": pin, "langs": list(NTREX_LANGS)},
                         outputs=outputs + ["ntrex.json"], stats={"rows": pin["rows"]})
 
 

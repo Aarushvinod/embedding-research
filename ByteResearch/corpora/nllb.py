@@ -1,16 +1,16 @@
 # NLLB-mined training pairs: 24 files (three hubs times eight targets) streamed from AllenAI and CCMatrix,
-# plus yield-only candidate pairs (Arabic/Russian to each candidate target) that training never reads.
+# plus the candidate pairs (each hub to each candidate target), built identically but never trained on.
 # parse_line reads one TSV line in the file's own layout (AllenAI: text, text, laser score, ...; CCMatrix:
 # score, text, text) and orients it to (hub_text, x_text, score) using core.config.NLLB_SOURCES.
 # build_pairs streams the score-sorted file with GzLineStream and applies the ordered filter chain of
 # corpora.filters with GlotLID and LaBSE, stopping at the cap (100k, 2k under --smoke, or --pairs).
-# It writes ROOT/data/nllb/{hub}__{X}/pairs.jsonl.gz (candidates: ROOT/data/nllb_candidates/...) read-only,
-# with a manifest holding the stream provenance,
+# It writes ROOT/data/nllb/{hub}__{X}/pairs.jsonl.gz read-only (candidates too, so a promoted candidate's
+# pairs are already in place), with a manifest holding the stream provenance,
 # filter config (LaBSE dtype and LID rule with both sides' GlotLID labels, so both enter the data hashes),
 # counters and shortfall.
 # load_pairs verifies and reads a pair file, and the filter-table helpers print and save the per-pair
 # survival table and the per-target summary to ROOT/data/nllb/FILTER_TABLE.json (candidates:
-# ROOT/data/nllb_candidates/CANDIDATE_TABLE.json).
+# ROOT/data/nllb/CANDIDATE_TABLE.json).
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from .manifest import begin_build, finish_build, manifest_complete, read_manifes
 PAIRS_FILE = "pairs.jsonl.gz"
 TABLE_FILE = "FILTER_TABLE.json"
 TABLES = {False: (HUBS, TARGETS, "nllb", TABLE_FILE),
-          True: (CANDIDATE_HUBS, CANDIDATES, "nllb_candidates", "CANDIDATE_TABLE.json")}
+          True: (CANDIDATE_HUBS, CANDIDATES, "nllb", "CANDIDATE_TABLE.json")}
 BLOCK = 5000
 
 
@@ -97,22 +97,16 @@ def _progress(label: str, stream, t0: float):
     return report
 
 
-def is_candidate(hub: str, x: str) -> bool:
-    # Inputs: hub and target codes. Output: whether the pair is a yield-only candidate pair.
-    return (hub, x) in CANDIDATE_SOURCES
-
-
 def pair_dir(ctx, hub: str, x: str):
-    # Inputs: Ctx, hub and target (or candidate) codes. Output: the pair's cache directory; candidates live
-    # apart, so promoting one to a target rebuilds it with its own FLORES/NTREX exclusion.
-    return ctx.paths.nllb_candidate_dir(hub, x) if is_candidate(hub, x) else ctx.paths.nllb_dir(hub, x)
+    # Inputs: Ctx, hub and target (or candidate) codes. Output: the pair's cache directory, the same for a
+    # candidate and a target, so promoting a candidate reuses its pairs.
+    return ctx.paths.nllb_dir(hub, x)
 
 
 def build_pairs(ctx, hub: str, x: str) -> dict:
     # Inputs: Ctx, hub and target (or candidate) codes. Streams, filters and saves the pair file with its
     # manifest (a shortfall is recorded, not fatal). Output: the manifest.
-    candidate = is_candidate(hub, x)
-    src = CANDIDATE_SOURCES[(hub, x)] if candidate else NLLB_SOURCES[(hub, x)]
+    src = NLLB_SOURCES.get((hub, x)) or CANDIDATE_SOURCES[(hub, x)]
     out = begin_build(ctx, pair_dir(ctx, hub, x))
     spec, cap = filter_spec(ctx, hub, x), pairs_cap(ctx)
     lid_fn, labse_fn = model_functions(ctx)
@@ -129,8 +123,7 @@ def build_pairs(ctx, hub: str, x: str) -> dict:
     config = {"source": dataclasses.asdict(src), "cap": cap, "block": min(BLOCK, cap),
               "filters": {k: v for k, v in dataclasses.asdict(spec).items() if k != "exclusion"},
               "exclusion_sha256": exclusion_set(ctx)[1], "assets": asset_revisions(ctx), "device": ctx.device,
-              "labse_dtype": labse_dtype(ctx), "lid": lid_record(ctx, pair_aliases(ctx), (hub, x)),
-              "candidate": candidate}
+              "labse_dtype": labse_dtype(ctx), "lid": lid_record(ctx, pair_aliases(ctx), (hub, x))}
     stats = {"counts": result["counts"], "survival": survival(result["counts"], result["lines_read"]),
              "lines_read": result["lines_read"], "order_violations": result["order_violations"],
              "kept": kept, "shortfall": max(cap - kept, 0), "exhausted": result["exhausted"],
@@ -203,7 +196,7 @@ def format_filter_table(table: dict) -> str:
 
 def table_path(ctx, candidates: bool = False):
     # Inputs: Ctx and the table kind. Output: ROOT/data/nllb/FILTER_TABLE.json or
-    # ROOT/data/nllb_candidates/CANDIDATE_TABLE.json.
+    # ROOT/data/nllb/CANDIDATE_TABLE.json.
     folder, name = TABLES[candidates][2:]
     return ctx.paths.data(folder, name)
 

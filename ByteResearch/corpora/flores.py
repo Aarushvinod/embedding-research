@@ -1,6 +1,6 @@
-# FLORES-200 evaluation data for the fourteen study languages, plus the fixed dev subsets.
-# build_flores downloads mteb/flores dev.parquet and devtest.parquet at the pinned revision into
-# ROOT/data/flores/raw, extracts the fourteen language columns, checks the 997/1012 row counts and
+# FLORES-200 evaluation data for the fourteen study languages and the candidate targets, plus the fixed
+# dev subsets. build_flores downloads mteb/flores dev.parquet and devtest.parquet at the pinned revision into
+# ROOT/data/flores/raw, extracts those language columns, checks the 997/1012 row counts and
 # saves one row-aligned JSON per split keyed by our short language codes.
 # load_flores verifies the JSON against the manifest before returning it.
 # dev_subset_ids gives the seeded FLORES-dev rows used for model selection (the same rows for every
@@ -13,21 +13,21 @@ import functools
 
 import numpy as np
 
-from ..core.config import ALL14, LANGUAGES, PINS, DataConfig
+from ..core.config import ALL14, DATA_LANGS, PINS, DataConfig, language
 from ..core.io import read_json, write_json_atomic
 from .http import hf_fetch
 from .manifest import begin_build, finish_build, verified_path
 
 
 def build_flores(ctx) -> dict:
-    # Input: Ctx. Downloads the pinned parquet files, extracts and checks the fourteen language columns
-    # and writes ROOT/data/flores/{dev,devtest}.json with its manifest. Output: the manifest.
+    # Input: Ctx. Downloads the pinned parquet files, extracts and checks the study and candidate language
+    # columns and writes ROOT/data/flores/{dev,devtest}.json with its manifest. Output: the manifest.
     import pyarrow.parquet as pq
     pin = PINS["flores"]
     out = begin_build(ctx, ctx.paths.flores_dir())
     fetched = hf_fetch(pin["repo"], out / "raw", files=list(pin["files"].values()), repo_type="dataset",
                        revision=pin["revision"])
-    columns = {code: LANGUAGES[code].flores for code in ALL14}
+    columns = {code: language(code).flores for code in DATA_LANGS}
     rows = {}
     for split, name in pin["files"].items():
         table = pq.read_table(out / "raw" / name, columns=list(columns.values()))

@@ -1,6 +1,7 @@
 # The evaluation exclusion set used by every training and Wikipedia filter.
 # It holds the normalized form (core.text.normalize_for_match) of every FLORES dev and devtest
-# sentence in all fourteen languages and every NTREX sentence in the eleven study languages.
+# sentence and every NTREX sentence in the study and candidate languages, so candidate pairs are filtered
+# exactly as they would be as targets.
 # build_exclusion writes the sorted set to ROOT/data/exclusion/normalized.jsonl.gz with a manifest,
 # so the set and its SHA-256 are fixed once and shared by all pair files and Wikipedia samples.
 # exclusion_set loads it (after a SHA check) and returns the set together with that SHA.
@@ -10,7 +11,7 @@ from __future__ import annotations
 
 import functools
 
-from ..core.config import ALL14
+from ..core.config import DATA_LANGS, NTREX_LANGS
 from ..core.io import read_jsonl_gz, write_jsonl_gz_atomic
 from ..core.text import normalize_for_match
 from .flores import load_flores
@@ -26,13 +27,13 @@ def exclusion_dir(ctx):
 
 
 def collect_texts(ctx) -> list:
-    # Input: Ctx. Output: every FLORES dev/devtest sentence (fourteen languages) and NTREX sentence
-    # (eleven languages), unnormalized.
+    # Input: Ctx. Output: every FLORES dev/devtest sentence (study languages, controls and candidates) and
+    # NTREX sentence (study languages and candidates), unnormalized.
     texts = []
     for split in ("dev", "devtest"):
-        for rows in load_flores(ctx, split, ALL14).values():
+        for rows in load_flores(ctx, split, DATA_LANGS).values():
             texts.extend(rows)
-    for rows in load_ntrex(ctx).values():
+    for rows in load_ntrex(ctx, NTREX_LANGS).values():
         texts.extend(rows)
     return texts
 

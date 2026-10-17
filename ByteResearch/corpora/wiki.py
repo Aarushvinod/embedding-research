@@ -18,7 +18,7 @@ import math
 import random
 from dataclasses import dataclass
 
-from ..core.config import LANGUAGES, PINS, DataConfig
+from ..core.config import PINS, DataConfig, language
 from ..core.io import read_jsonl_gz, write_jsonl_gz_atomic
 from ..core.text import has_special_markup, length_ok, normalize_for_match, script_ratio, split_sentences
 from .exclusion import exclusion_set
@@ -161,11 +161,11 @@ def build_wiki(ctx, lang: str) -> dict:
     out = begin_build(ctx, ctx.paths.wiki_dir(lang))
     resolve = lambda: HfApi().repo_info(repo, repo_type="dataset").sha
     revision = PINS["wikipedia"].get("revision") or retry(resolve, hub_errors(), label=repo)
-    config_name = f"{cfg.wiki_date}.{LANGUAGES[lang].wiki}"
+    config_name = f"{cfg.wiki_date}.{language(lang).wiki}"
     fs, root = HfFileSystem(), f"datasets/{repo}@{revision}/{config_name}"
     groups = row_groups(fs, root)
     excl, excl_sha = exclusion_set(ctx)
-    spec = WikiSpec(LANGUAGES[lang].script, cfg.wiki_min_chars, cfg.wiki_max_chars, 0.8, cfg.wiki_per_article, excl)
+    spec = WikiSpec(language(lang).script, cfg.wiki_min_chars, cfg.wiki_max_chars, 0.8, cfg.wiki_per_article, excl)
     counter, seed = {"row_groups_read": 0}, f"{cfg.seed}:{lang}"
     rows, stats = sample_sentences(article_stream(fs, groups, seed, ARTICLES_PER_GROUP, counter), spec,
                                    cfg.wiki_per_lang, seed)

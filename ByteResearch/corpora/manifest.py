@@ -5,7 +5,7 @@
 # finish_build hashes the outputs, writes manifest.json (sources, config, outputs, stats, code commit
 # and timestamp), marks the outputs read-only and refreshes ROOT/data/DATA_MANIFEST.json.
 # verified_path is what every loader uses: it checks an output's SHA-256 against the manifest once
-# per process and file version.
+# per process and file version, and purge permanently deletes a dataset that is no longer wanted.
 # data_hash_for_condition combines the FLORES, NTREX and one hub's pair manifests into the data hash
 # that training checkpoints record.
 
@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import datetime as _dt
 import functools
+import os
 import shutil
+import stat
+import sys
 from pathlib import Path
 
 from ..core.config import CONDITIONS, TARGETS, resolve_langs
@@ -127,6 +130,28 @@ def verified_path(directory, name) -> Path:
     if not _checked(str(path), st.st_size, st.st_mtime_ns, record["sha256"]):
         raise ValueError(f"SHA-256 mismatch for {path}; the cache was modified")
     return path
+
+
+def _force_remove(func, path, _exc) -> None:
+    # Inputs: the os function that failed inside shutil.rmtree, its path and the error. Makes the path and
+    # its parent writable (outputs are read-only) and retries the call.
+    for p in (path, os.path.dirname(path)):
+        os.chmod(p, os.stat(p).st_mode | stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+    func(path)
+
+
+def purge(ctx, directory) -> int:
+    # Inputs: Ctx and a dataset directory under ROOT/data. Permanently deletes it, read-only outputs
+    # included, and refreshes DATA_MANIFEST.json. Output: the bytes freed (0 when it did not exist).
+    directory = Path(directory)
+    if not directory.exists():
+        return 0
+    directory.resolve().relative_to(ctx.paths.data().resolve())
+    size = sum(f.stat().st_size for f in directory.rglob("*") if f.is_file())
+    hook = {"onexc": _force_remove} if sys.version_info >= (3, 12) else {"onerror": _force_remove}
+    shutil.rmtree(directory, **hook)
+    update_data_manifest(ctx)
+    return size
 
 
 def complete_manifests(ctx) -> dict:

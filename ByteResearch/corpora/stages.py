@@ -4,8 +4,11 @@
 # macrolanguage table behind its label sets, LaBSE and the flores200 SPM model.
 # data.nllb runs over condition x target (the condition's hub to each target) and data.wiki over the
 # study languages; data.table prints and saves the per-pair filter table whenever the pairs change.
-# data.candidates measures the yield of Arabic/Russian pairs for candidate targets that are never trained
-# on (selected through the C2/C3 conditions), and data.candidate_table prints and saves their table.
+# data.candidates builds every hub's pairs for the candidate targets (selected through the conditions)
+# exactly as for targets, data.candidate_wiki samples their Wikipedia sentences and data.candidate_table
+# prints and saves their table; none of it is trained on, but a promoted candidate finds its data ready.
+# data.purge --purge CODES permanently deletes the pairs and Wikipedia samples of candidates that were not
+# chosen; it refuses study and control languages and does nothing without --purge.
 # Every stage is done when its manifest is complete, and a complete manifest is only replaced with
 # --force --rebuild-data (the old directory moves to ROOT/data/_superseded/); --force alone keeps it.
 # The composite `data` runs all of them in dependency order.
@@ -14,14 +17,14 @@ from __future__ import annotations
 
 import functools
 
-from ..core.config import CANDIDATE_HUBS, CANDIDATES, CONDITIONS, TrainConfig, resolve_conditions
+from ..core.config import ALL14, CANDIDATE_HUBS, CANDIDATES, CONDITIONS, TrainConfig, resolve_conditions
 from ..core.registry import Unit, composite, opt, register_stage
 from .assets import asset_dir, build_labse, build_sacrebleu
 from .exclusion import build_exclusion, exclusion_dir
 from .flores import build_flores, dev_halves, dev_subset_ids
 from .iso639 import build_iso639, iso_dir
 from .lid import build_glotlid
-from .manifest import manifest_complete, rebuild_requested
+from .manifest import manifest_complete, purge, rebuild_requested
 from .nllb import build_pairs, filter_table_done, write_filter_table
 from .ntrex import build_ntrex
 from .wiki import build_wiki
@@ -34,6 +37,7 @@ DATA_OPTS = (
         help="LaBSE inference dtype for the NLLB filter (default fp32; fp16 is about 3x faster)"),
 )
 WIKI_OPTS = DATA_OPTS + (opt("--lang", default="all", help="study languages for data.wiki (all | codes)"),)
+PURGE_OPTS = (opt("--purge", default=None, help="data.purge: candidate codes whose data to delete, comma list"),)
 
 
 def _complete(directory_fn):
@@ -127,7 +131,12 @@ def candidate_units(sel: dict, smoke: bool = False) -> list:
     return [Unit(condition=c, lang=x) for c in conds for x in CANDIDATES]
 
 
-@data_stage("data.candidates", lambda c, u: c.paths.nllb_candidate_dir(CONDITIONS[u.condition].hub, u.lang),
+def candidate_wiki_units(sel: dict, smoke: bool = False) -> list:
+    # Inputs: selections and smoke flag (unused). Output: one (lang) Unit per candidate target.
+    return [Unit(lang=x) for x in CANDIDATES]
+
+
+@data_stage("data.candidates", lambda c, u: c.paths.nllb_dir(CONDITIONS[u.condition].hub, u.lang),
             grid=candidate_units, order=22, options=DATA_OPTS,
             requires=("data.flores", "data.ntrex", "data.exclusion", "data.lid_model", "data.iso639",
                       "data.labse_model"))
@@ -150,6 +159,13 @@ def table_stage(ctx, unit):
     write_filter_table(ctx)
 
 
+@data_stage("data.candidate_wiki", lambda c, u: c.paths.wiki_dir(u.lang), grid=candidate_wiki_units,
+            requires=("data.exclusion",), order=23, options=DATA_OPTS)
+def candidate_wiki_stage(ctx, unit):
+    # Inputs: Ctx and a (lang) Unit. Samples that candidate's Wikipedia sentences exactly as for a study language.
+    build_wiki(ctx, unit.lang)
+
+
 @register_stage("data.candidate_table", grid=(), is_done=lambda ctx, unit: filter_table_done(ctx, candidates=True),
                 requires=("data.candidates",), order=31, options=DATA_OPTS)
 def candidate_table_stage(ctx, unit):
@@ -157,6 +173,31 @@ def candidate_table_stage(ctx, unit):
     write_filter_table(ctx, candidates=True)
 
 
+def purge_codes(ctx) -> list:
+    # Input: Ctx. Output: the language codes given with --purge; raises ValueError for a study or control
+    # language, whose data training, evaluation or interp still need.
+    codes = [c.strip() for c in str(ctx.opt("purge") or "").split(",") if c.strip()]
+    protected = [c for c in codes if c in ALL14]
+    if protected:
+        raise ValueError(f"refusing to purge study/control languages {protected}")
+    return codes
+
+
+def purge_done(ctx, unit) -> bool:
+    # Inputs: Ctx and the empty Unit. Output: True unless --purge names languages, so `all` never purges.
+    return not purge_codes(ctx)
+
+
+@register_stage("data.purge", grid=(), is_done=purge_done, order=40, options=PURGE_OPTS)
+def purge_stage(ctx, unit):
+    # Inputs: Ctx and the empty Unit. Permanently deletes every hub's pair cache and the Wikipedia sample of
+    # each --purge language (whether or not it is still listed as a candidate) and prints the space freed.
+    for code in purge_codes(ctx):
+        dirs = [ctx.paths.nllb_dir(h, code) for h in CANDIDATE_HUBS] + [ctx.paths.wiki_dir(code)]
+        freed = sum(purge(ctx, d) for d in dirs)
+        print(f"[data.purge] {code}: deleted {freed / 2**20:.1f} MB", flush=True)
+
+
 composite("data", ("data.flores", "data.ntrex", "data.exclusion", "data.lid_model", "data.iso639", "data.labse_model",
                    "data.sacrebleu", "data.nllb", "data.wiki", "data.table", "data.candidates",
-                   "data.candidate_table"))
+                   "data.candidate_wiki", "data.candidate_table"))
