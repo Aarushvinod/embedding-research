@@ -93,10 +93,9 @@ the current selections.
 | `data.ntrex` | - | NTREX-128 (pinned commit) |
 | `data.exclusion` | - | normalized FLORES/NTREX exclusion set |
 | `data.lid_model` | - | GlotLID |
-| `data.iso639` | - | ISO 639-3 macrolanguage table (pinned SHA-256) |
 | `data.labse_model` | - | LaBSE |
 | `data.sacrebleu` | - | the flores200 SPM model for spBLEU |
-| `data.thresholds` | - | FLORES-dev calibration of every filter threshold (`ROOT/data/thresholds/`) |
+| `data.thresholds` | - | FLORES dev + devtest calibration of the filter thresholds (`ROOT/data/thresholds/`) |
 | `data.nllb` | condition x target | filtered NLLB pairs (hub to target) |
 | `data.wiki` | lang | Wikipedia sentences (LAPE only) |
 | `data.table` | - | prints and saves `ROOT/data/nllb/FILTER_TABLE.json` (pairs left after each filter) |
@@ -123,30 +122,31 @@ Options: `--pairs N` (pairs kept per NLLB file), `--rebuild-data` and `--labse-d
 precision for the NLLB filter; default fp32, fp16 is about 3x faster). The dtype is recorded in each pair
 manifest, so it enters the data hashes.
 
-**Calibrated thresholds.** No quality threshold is fixed by hand. `data.thresholds` scores every FLORES dev
-sentence with the measures the filters use and takes the 1st percentile (`DataConfig.calib_percentile`), with
-no floor:
+**Data filters.** `data.thresholds` scores every FLORES dev + devtest sentence (about 2,000 per language) with
+the measures the filters use and takes the 1st percentile (`DataConfig.calib_percentile`), with no floor:
 
-| Threshold | Calibrated per | Used by |
+| Filter | Rule | Used by |
 |---|---|---|
-| GlotLID summed probability | language | NLLB filter (each side), Wikipedia, DecoderLens buckets |
-| script ratio | language | NLLB filter (each side), Wikipedia |
-| LaBSE cosine | hub -> target direction | NLLB filter |
-| x/hub character-length ratio (1st-99th percentile band) | hub -> target direction | NLLB filter |
+| GlotLID | the language's label is the top label with probability >= its FLORES 1st percentile (per language) | NLLB pairs (each side), Wikipedia |
+| LaBSE cosine | >= the FLORES 1st percentile (per hub -> target direction) | NLLB pairs |
+| x/hub character-length ratio | inside the FLORES 1st-99th percentile band (per direction) | NLLB pairs |
+| script ratio | >= 0.8 of letters in the expected script (fixed; the FLORES 1st percentile is saved for reference) | NLLB pairs (each side), Wikipedia |
+| length | 20-512 characters per side (fixed; 512 is also the training and decoding cap) | NLLB pairs, Wikipedia |
 
-The per-sentence FLORES scores, the thresholds and their distribution summaries are saved in
-`ROOT/data/thresholds/`, printed when built, and each pair manifest records the exact values it was filtered
-with. Fixed rules remain only for the 20-300 character window, exact-pair dedupe, exact-match FLORES/NTREX
-exclusion, markup and malformed lines. DecoderLens labels an output "other" (rather than "und") when GlotLID's
-top non-study label reaches `InterpConfig.lid_other_threshold` (0.5), since non-study languages have no
-calibration.
+Exact-pair dedupe, exact-match FLORES/NTREX exclusion, markup and malformed lines are fixed rules. The
+per-sentence FLORES scores, the thresholds and their distribution statistics are saved in
+`ROOT/data/thresholds/` and printed with the statistics when built, and each pair manifest records the exact
+values it was filtered with.
 
-GlotLID checks accept, for each language, every GlotLID label whose language belongs to the same ISO 639-3
-macrolanguage (e.g. all Arabic varieties) and whose script matches, plus the codes in `LID_EXTRA_CODES`; a
-language in `LID_ONLY_CODES` accepts exactly those codes instead (Malay: `zsm` only, because its `msa`
-macrolanguage includes Indonesian). A text passes when the probabilities of those labels among the top
-`glotlid_top_k` predictions sum to at least the language's calibrated threshold.
-`corpora.thresholds.lid_passes(ctx, texts, lang)` applies the same check to any texts.
+Each language is identified by exactly one GlotLID label, the one of its FLORES variety (`arb_Arab` for Modern
+Standard Arabic, `swh_Latn`, `zsm_Latn`, `als_Latn`, `hye_Armn`, ...), so dialect and variant labels do not
+count. `LID_LABEL_OVERRIDES` maps Tagalog to GlotLID's `fil_Latn` (GlotLID has no Tagalog label), and a missing
+label is an error. `corpora.thresholds.lid_passes(ctx, texts, lang)` applies the same check to any texts.
+
+DecoderLens buckets each lens output by GlotLID's top label: en, src (the hub) or x when that language's label
+is on top with probability >= `InterpConfig.lid_threshold` (0.5, a fixed value to revisit before the interp
+runs), other for any other confident label, und for low confidence or empty output. It reports each bucket's
+fraction of all outputs and its share among identified (non-und) outputs.
 
 ### Training
 

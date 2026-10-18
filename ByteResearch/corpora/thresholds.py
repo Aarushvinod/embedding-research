@@ -1,12 +1,13 @@
 # Filter thresholds calibrated on FLORES dev + devtest instead of fixed by hand.
 # build_thresholds scores every FLORES sentence with the measures the filters use: the probability of the
 # language's GlotLID label (per language), and the LaBSE cosine and the character-length ratio x/hub of each
-# aligned sentence pair (per hub -> target direction, candidates included); the script ratio is scored too but
-# only recorded for reference, since the filters use the fixed DataConfig.min_script.
+# aligned sentence pair (per hub -> target direction, candidates included).
+# The script ratio is scored too but only recorded for reference, since the filters use the fixed
+# DataConfig.min_script.
 # Each threshold is a percentile of those human-translation scores (DataConfig.calib_percentile, 1st by default,
 # with no floor), and the length ratio keeps the band between the two DataConfig.ratio_percentiles.
-# Per-sentence scores, thresholds and distribution summaries are saved under ROOT/data/thresholds and printed;
-# lid_passes applies a language's LID rule and purge_thresholds drops the languages data.purge discards.
+# Per-sentence scores, thresholds and distribution summaries are saved under ROOT/data/thresholds and printed.
+# lid_passes applies a language's LID rule, and purge_thresholds drops the languages data.purge discards.
 
 from __future__ import annotations
 
