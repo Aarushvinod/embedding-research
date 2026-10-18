@@ -230,14 +230,16 @@ def ntrex_file(code: str) -> str:
 
 @dataclass(frozen=True)
 class DataConfig:
-    # Data-building defaults: NLLB cap, the fixed length window, the FLORES-dev percentile behind every
-    # calibrated LID/script/LaBSE minimum (no floor) and the length-ratio band's two percentiles, the number of
+    # Data-building defaults: NLLB cap, the fixed length window (its maximum equals the 512-character training
+    # and decoding cap) and script-ratio minimum, the FLORES percentile behind every calibrated LID and LaBSE
+    # minimum (no floor) and the length-ratio band's two percentiles, the number of
     # GlotLID labels read per prediction when calibrating (to see a language's probability when it is not on
     # top), the LaBSE batch size and inference dtype ("fp32" or "fp16"), Wikipedia sampling sizes, and the
     # seed for every shuffle.
     nllb_cap: int = 100_000
     min_chars: int = 20
-    max_chars: int = 300
+    max_chars: int = 512
+    min_script: float = 0.8
     calib_percentile: float = 1.0
     ratio_percentiles: tuple = (1.0, 99.0)
     glotlid_top_k: int = 10
@@ -247,7 +249,7 @@ class DataConfig:
     wiki_per_lang: int = 40_000
     wiki_per_article: int = 5
     wiki_min_chars: int = 20
-    wiki_max_chars: int = 300
+    wiki_max_chars: int = 512
     seed: int = 0
 
 
@@ -266,7 +268,7 @@ class TrainConfig:
     save_steps: int = 500
     save_total_limit: int = 4
     patience: int = 5
-    max_chars: int = 300
+    max_chars: int = 512
     token_factor: int = 4
     optim: str = "adafactor"
     lr_scheduler: str = "constant_with_warmup"

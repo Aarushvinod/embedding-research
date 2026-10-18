@@ -32,7 +32,7 @@ class FilterSpec:
     hub_script: str
     x_script: str
     min_chars: int = 20
-    max_chars: int = 300
+    max_chars: int = 512
     ratio_min: float = 0.0
     ratio_max: float = float("inf")
     hub_min_script: float = 0.0

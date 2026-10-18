@@ -62,15 +62,15 @@ def pairs_cap(ctx) -> int:
 
 
 def filter_spec(ctx, hub: str, x: str) -> FilterSpec:
-    # Inputs: Ctx, hub and target codes. Output: the FilterSpec with the length window, both scripts, the
-    # FLORES-calibrated thresholds (each side's script and LID minimums, the direction's LaBSE minimum and
-    # length-ratio band), both sides' GlotLID labels and the shared exclusion set.
+    # Inputs: Ctx, hub and target codes. Output: the FilterSpec with the length window, both scripts and the
+    # fixed script minimum, the FLORES-calibrated thresholds (each side's LID minimum, the direction's LaBSE
+    # minimum and length-ratio band), both sides' GlotLID labels and the shared exclusion set.
     cfg, table, d = ctx.config(DataConfig), load_thresholds(ctx), direction_key(hub, x)
     lid_labels(ctx)
     ratio_min, ratio_max = lookup(table, "length_ratio", d)
     return FilterSpec(hub=hub, x=x, hub_script=language(hub).script, x_script=language(x).script,
                       min_chars=cfg.min_chars, max_chars=cfg.max_chars, ratio_min=ratio_min, ratio_max=ratio_max,
-                      hub_min_script=lookup(table, "script", hub), x_min_script=lookup(table, "script", x),
+                      hub_min_script=cfg.min_script, x_min_script=cfg.min_script,
                       hub_lid_min=lookup(table, "lid", hub), x_lid_min=lookup(table, "lid", x),
                       hub_lid=lid_label(hub), x_lid=lid_label(x),
                       labse_min=lookup(table, "labse", d), exclusion=exclusion_set(ctx)[0])

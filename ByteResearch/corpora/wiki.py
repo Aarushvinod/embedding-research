@@ -4,9 +4,9 @@
 # The groups are visited in a seeded random order covering the whole dump and a seeded random batch of
 # articles is taken from each group per round, so the sample spans the dump while only the needed row
 # groups are downloaded.
-# Each article is split into sentences that must be 20-300 characters, free of tokenizer markup, outside the
-# FLORES/NTREX exclusion set, unseen, and reach the language's FLORES-calibrated script ratio and GlotLID
-# minimums (corpora.thresholds); at most five are drawn at random per article.
+# Each article is split into sentences that must be 20-512 characters, at least 80% in the expected script,
+# free of tokenizer markup, outside the FLORES/NTREX exclusion set, unseen, and have the language's GlotLID
+# label on top with its FLORES-calibrated minimum (corpora.thresholds); at most five are drawn per article.
 # Candidates are reservoir-sampled down to the target count.
 # Articles scanned and contributing and any shortfall are recorded in the manifest next to
 # ROOT/data/wiki/{lang}/sentences.jsonl.gz.
@@ -40,7 +40,7 @@ class WikiSpec:
     # GlotLID label as the top label (applied only when a LID function is given).
     script: str
     min_chars: int = 20
-    max_chars: int = 300
+    max_chars: int = 512
     min_script: float = 0.8
     per_article: int = 5
     exclusion: frozenset = frozenset()
@@ -175,7 +175,7 @@ def build_wiki(ctx, lang: str) -> dict:
     excl, excl_sha = exclusion_set(ctx)
     lid_labels(ctx)
     table, model, label = load_thresholds(ctx), load_glotlid(ctx), lid_label(lang)
-    spec = WikiSpec(language(lang).script, cfg.wiki_min_chars, cfg.wiki_max_chars, lookup(table, "script", lang),
+    spec = WikiSpec(language(lang).script, cfg.wiki_min_chars, cfg.wiki_max_chars, cfg.min_script,
                     cfg.wiki_per_article, excl, lookup(table, "lid", lang))
     lid_fn = lambda text: own_top_prob(predict(model, [text], k=1)[0], label)
     counter, seed = {"row_groups_read": 0}, f"{cfg.seed}:{lang}"
