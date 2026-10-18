@@ -19,7 +19,7 @@ import functools
 import math
 import time
 
-from ..core.config import (CANDIDATE_HUBS, CANDIDATE_SOURCES, CANDIDATES, HUBS, NLLB_SOURCES, TARGETS, DataConfig,
+from ..core.config import (CANDIDATE_HUBS, CANDIDATE_SOURCES, HUBS, NLLB_SOURCES, TARGETS, DataConfig,
                            language)
 from ..core.io import read_json, read_jsonl_gz, sha256_json, write_json_atomic, write_jsonl_gz_atomic
 from .assets import asset_revisions, labse_cosines, labse_dtype, load_labse
@@ -32,8 +32,8 @@ from .thresholds import direction_key, load_thresholds, lookup
 
 PAIRS_FILE = "pairs.jsonl.gz"
 TABLE_FILE = "FILTER_TABLE.json"
-TABLES = {False: (HUBS, TARGETS, "nllb", TABLE_FILE),
-          True: (CANDIDATE_HUBS, CANDIDATES, "nllb", "CANDIDATE_TABLE.json")}
+TABLES = {False: (HUBS, [(h, x) for h in HUBS for x in TARGETS], "nllb", TABLE_FILE),
+          True: (HUBS + CANDIDATE_HUBS, list(CANDIDATE_SOURCES), "nllb", "CANDIDATE_TABLE.json")}
 BLOCK = 5000
 
 
@@ -146,8 +146,7 @@ def load_pairs(ctx, hub: str, x: str) -> list:
 def built_pairs(ctx, candidates: bool = False) -> list:
     # Inputs: Ctx and whether to list the candidate pairs. Output: [(hub, x)] of every pair with a complete
     # manifest, in table order.
-    hubs, xs = TABLES[candidates][:2]
-    return [(h, x) for h in hubs for x in xs if manifest_complete(pair_dir(ctx, h, x))]
+    return [(h, x) for h, x in TABLES[candidates][1] if manifest_complete(pair_dir(ctx, h, x))]
 
 
 def table_fingerprint(ctx, candidates: bool = False) -> str:

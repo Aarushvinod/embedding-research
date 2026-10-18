@@ -28,7 +28,7 @@ from .dist import is_main, relaunch_with_torchrun, under_torchrun
 from .io import tee_output
 from .paths import compare_id, run_id
 
-AXES = ("model", "condition", "target", "testset", "metric", "lang", "lr", "size", "variant")
+AXES = ("model", "condition", "target", "testset", "metric", "lang", "lr", "size", "variant", "hub")
 DISCOVER_PACKAGES = ("corpora", "training", "evaluation", "metrics", "experiments")
 BUILTIN = ("list", "status")
 
@@ -46,6 +46,7 @@ class Unit:
     lr: float | None = None
     size: str | None = None
     variant: str | None = None
+    hub: str | None = None
 
     @property
     def run_id(self):

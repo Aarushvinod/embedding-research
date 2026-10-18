@@ -154,6 +154,22 @@ def purge(ctx, directory) -> int:
     return size
 
 
+def source_outputs(directory) -> dict:
+    # Input: a dataset directory. Output: {dataset name: {output: sha256}} of the input datasets its manifest
+    # records in its sources (empty when it has no manifest).
+    m = read_manifest(directory) or {}
+    return {s["dataset"]: s.get("outputs") for s in m.get("sources", []) if isinstance(s, dict) and "dataset" in s}
+
+
+def inputs_changed(directory, inputs: dict) -> bool:
+    # Inputs: a dataset directory and {dataset name: input directory}. Output: whether any recorded input's
+    # output hashes differ from that input's current manifest (so the dataset was built from older inputs).
+    recorded = source_outputs(directory)
+    current = {name: {k: v["sha256"] for k, v in (read_manifest(d) or {}).get("outputs", {}).items()}
+               for name, d in inputs.items()}
+    return any(recorded.get(name) != outs for name, outs in current.items())
+
+
 def complete_manifests(ctx) -> dict:
     # Input: Ctx. Output: {dataset relative path: manifest} for every complete manifest under ROOT/data,
     # excluding superseded copies.

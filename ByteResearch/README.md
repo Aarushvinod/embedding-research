@@ -99,21 +99,31 @@ the current selections.
 | `data.nllb` | condition x target | filtered NLLB pairs (hub to target) |
 | `data.wiki` | lang | Wikipedia sentences (LAPE only) |
 | `data.table` | - | prints and saves `ROOT/data/nllb/FILTER_TABLE.json` (pairs left after each filter) |
-| `data.candidates` | condition x candidate | filtered NLLB pairs from each hub to each candidate target |
-| `data.candidate_wiki` | candidate | Wikipedia sentences for each candidate target |
+| `data.candidates` | hub x language | filtered NLLB pairs: each hub to each candidate target, each candidate hub to every target and candidate it has bitext with |
+| `data.candidate_wiki` | candidate | Wikipedia sentences for each candidate target and candidate hub |
 | `data.candidate_table` | - | prints and saves `ROOT/data/nllb/CANDIDATE_TABLE.json` |
 
 Candidate targets (`CANDIDATE_LANGUAGES` in `core/config.py`: Bulgarian, Urdu, Bengali, Malay, Albanian,
-Ukrainian) get all their data prepared exactly as targets do, but nothing trains on them:
-- FLORES and NTREX include them, and so does the exclusion set.
-- Their pairs from every hub go through the same filters and cap, into the same `ROOT/data/nllb/` folders.
+Ukrainian, Serbian, Estonian) and candidate hubs (`CANDIDATE_HUB_LANGUAGES`: Persian) get all their data prepared
+exactly as targets and hubs do, but nothing trains on them:
+- FLORES and NTREX include them, and so does the exclusion set; each has a calibrated LID threshold.
+- Their pairs go through the same filters and cap, into the same `ROOT/data/nllb/` folders: every hub to each
+  candidate target, and each candidate hub to every target and candidate it has NLLB bitext with (Persian has
+  none with Georgian, Armenian or Bulgarian; `NLLB_UNAVAILABLE`).
 - Their Wikipedia sentences are sampled too.
 
-To promote a candidate, move its row from `_CANDIDATE_ROWS` to `_LANG_ROWS` (as a target, replacing a
-dropped one). Its pairs, FLORES/NTREX rows and Wikipedia sample are then already cached.
+Adding candidates changes the shared caches' language set: FLORES, NTREX, the exclusion set and the thresholds
+then rebuild themselves on the next `data` run (the old copies move to `ROOT/data/_superseded/`), while every
+pair file and Wikipedia sample already built is kept and reused. Each kept pair's manifest still records the
+exclusion set and thresholds it was filtered with.
+
+To promote a candidate, move its row from `_CANDIDATE_ROWS` to `_LANG_ROWS` (as a target, replacing a dropped
+one); to promote a candidate hub, move its row into `_LANG_ROWS` as a hub and point a condition at it. Its pairs,
+FLORES/NTREX rows and Wikipedia sample are then already cached.
 
 To discard the candidates you did not choose, run `python -m ByteResearch.run data.purge --purge sq,uk`. This
-permanently deletes their pairs from every hub and their Wikipedia samples, and removes their languages and
+permanently deletes every pair involving them (as target or as candidate hub) and their Wikipedia samples, and
+removes their languages and
 directions from the calibrated thresholds. It refuses study and control languages, and it works before or
 after you remove them from `_CANDIDATE_ROWS`. Their FLORES/NTREX rows stay in the small shared caches, so the
 exclusion set and every data hash are unchanged.

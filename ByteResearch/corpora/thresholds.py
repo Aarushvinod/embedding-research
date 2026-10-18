@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..core.config import CANDIDATES, DATA_LANGS, HUBS, LID_LANGS, TARGETS, DataConfig, language
+from ..core.config import CANDIDATE_SOURCES, DATA_LANGS, LID_LANGS, NLLB_SOURCES, DataConfig, language
 from ..core.io import read_json, write_json_atomic
 from ..core.text import script_ratio
 from .assets import asset_revisions, labse_cosines, labse_dtype, load_labse
@@ -33,8 +33,8 @@ def thresholds_dir(ctx):
 
 
 def directions() -> list:
-    # Output: every calibrated (hub, x) direction: each hub to each target and each candidate.
-    return [(h, x) for h in HUBS for x in TARGETS + CANDIDATES]
+    # Output: every calibrated (hub, x) direction: every main and candidate NLLB pair.
+    return list(NLLB_SOURCES) + list(CANDIDATE_SOURCES)
 
 
 def direction_key(hub: str, x: str) -> str:

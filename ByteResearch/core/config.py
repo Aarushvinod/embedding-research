@@ -3,8 +3,8 @@
 # NTREX, CCMatrix and Wikipedia codes, scripts and decoder-tag sentinel indices, the GlotLID label
 # overrides, the Unicode script ranges and sentence terminators, so a language change stays here.
 # It also defines the six models, the three fine-tuning conditions, the 24-row NLLB source table, the
-# candidate targets (prepared exactly like targets so promoting one reuses its data, but never trained on)
-# and the pinned revisions of every external resource, and validates them on import.
+# candidate targets and candidate hubs (prepared exactly like targets and hubs so promoting one reuses its
+# data, but never trained on) and the pinned revisions of every external resource, and validates them on import.
 # Frozen config dataclasses carry the defaults from the approved plan for data, training,
 # decoding and interpretability, and smoke_overrides shrinks them for the smoke subtree.
 # Resolver helpers turn CLI selections such as "all", "small" or "byt5,mt5-base" into lists.
@@ -21,8 +21,8 @@ from dataclasses import dataclass
 class Language:
     # One language: short code, English name, FLORES code, NTREX code (None for controls), CCMatrix ISO
     # code (None for controls), Wikipedia subdomain (None for controls), ISO 15924 script, role ("target",
-    # "hub", "control" or "candidate") and the sentinel index k of its decoder tag (-1 for candidates,
-    # which have no tag).
+    # "hub", "control", "candidate" or "candidate_hub") and the sentinel index k of its decoder tag (-1 for
+    # candidates and candidate hubs, which have no tag).
     code: str
     name: str
     flores: str
@@ -82,7 +82,7 @@ _LANG_ROWS = (
     ("zh", "Chinese", "zho_Hans", None, None, None, "Hans", "control"),
     ("el", "Greek", "ell_Grek", None, None, None, "Grek", "control"),
 )
-LID_LABEL_OVERRIDES: dict = {"tl": "fil_Latn"}
+LID_LABEL_OVERRIDES: dict = {"tl": "fil_Latn", "fa": "fas_Arab", "et": "ekk_Latn"}
 
 _CANDIDATE_ROWS = (
     ("bg", "Bulgarian", "bul_Cyrl", "bul", "bg", "bg", "Cyrl", "candidate"),
@@ -91,9 +91,17 @@ _CANDIDATE_ROWS = (
     ("ms", "Malay", "zsm_Latn", "msa", "ms", "ms", "Latn", "candidate"),
     ("sq", "Albanian", "als_Latn", "sqi", "sq", "sq", "Latn", "candidate"),
     ("uk", "Ukrainian", "ukr_Cyrl", "ukr", "uk", "uk", "Cyrl", "candidate"),
+    ("sr", "Serbian", "srp_Cyrl", "srp-Cyrl", "sr", "sr", "Cyrl", "candidate"),
+    ("et", "Estonian", "est_Latn", "est", "et", "et", "Latn", "candidate"),
 )
 CANDIDATE_LANGUAGES: dict = {row[0]: Language(*row, tag_k=-1) for row in _CANDIDATE_ROWS}
 CANDIDATES: tuple = tuple(CANDIDATE_LANGUAGES)
+_CANDIDATE_HUB_ROWS = (
+    ("fa", "Persian", "pes_Arab", "fas", "fa", "fa", "Arab", "candidate_hub"),
+)
+CANDIDATE_HUB_LANGUAGES: dict = {row[0]: Language(*row, tag_k=-1) for row in _CANDIDATE_HUB_ROWS}
+CANDIDATE_HUBS: tuple = tuple(CANDIDATE_HUB_LANGUAGES)
+NLLB_UNAVAILABLE: frozenset = frozenset({("fa", "ka"), ("fa", "hy"), ("fa", "bg")})
 
 TAG_K0 = 86
 MAX_TAG_K = 99
@@ -106,10 +114,10 @@ HUBS: tuple = tuple(c for c, l in LANGUAGES.items() if l.role == "hub")
 CONTROLS: tuple = tuple(c for c, l in LANGUAGES.items() if l.role == "control")
 STUDY11: tuple = TARGETS + HUBS
 ALL14: tuple = STUDY11 + CONTROLS
-CANDIDATE_HUBS: tuple = HUBS
-DATA_LANGS: tuple = ALL14 + CANDIDATES
-NTREX_LANGS: tuple = STUDY11 + CANDIDATES
-LID_LANGS: tuple = STUDY11 + CANDIDATES
+DATA_LANGS: tuple = ALL14 + CANDIDATES + CANDIDATE_HUBS
+NTREX_LANGS: tuple = STUDY11 + CANDIDATES + CANDIDATE_HUBS
+LID_LANGS: tuple = STUDY11 + CANDIDATES + CANDIDATE_HUBS
+WIKI_CANDIDATES: tuple = CANDIDATES + CANDIDATE_HUBS
 
 MODELS: dict[str, ModelSpec] = {
     f"{arch}-{size}": ModelSpec(f"{arch}-{size}", f"google/{arch}-{size}", arch, size)
@@ -136,12 +144,15 @@ _ALLENAI = "https://storage.googleapis.com/allennlp-data-bucket/nllb/{name}.gz"
 _CCMATRIX = "http://data.statmt.org/cc-matrix/{name}.bitextf.tsv.gz"
 NLLB_ALLENAI_HUBS: tuple = ("en",)
 NLLB_ALLENAI_PAIRS: tuple = (("ru", "ka"), ("ru", "hy"))
-NLLB_CCMATRIX_PAIRS: tuple = (("en", "bg"), ("en", "sq"), ("en", "uk"))
+NLLB_CCMATRIX_PAIRS: tuple = (("en", "bg"), ("en", "sq"), ("en", "uk"), ("en", "sr"), ("en", "et"))
 
 
 def language(code: str) -> Language:
-    # Input: a study or candidate language code. Output: its Language; raises KeyError when unknown.
-    return LANGUAGES[code] if code in LANGUAGES else CANDIDATE_LANGUAGES[code]
+    # Input: a study, candidate or candidate-hub language code. Output: its Language; raises KeyError when unknown.
+    for table in (LANGUAGES, CANDIDATE_LANGUAGES, CANDIDATE_HUB_LANGUAGES):
+        if code in table:
+            return table[code]
+    raise KeyError(code)
 
 
 def _nllb_row(hub: str, x: str) -> NllbSource:
@@ -157,7 +168,11 @@ def _nllb_row(hub: str, x: str) -> NllbSource:
 
 
 NLLB_SOURCES: dict[tuple, NllbSource] = {(h, x): _nllb_row(h, x) for h in HUBS for x in TARGETS}
-CANDIDATE_SOURCES: dict[tuple, NllbSource] = {(h, x): _nllb_row(h, x) for h in CANDIDATE_HUBS for x in CANDIDATES}
+CANDIDATE_SOURCES: dict[tuple, NllbSource] = {
+    (h, x): _nllb_row(h, x)
+    for h, x in [(h, x) for h in HUBS for x in CANDIDATES] + [(h, x) for h in CANDIDATE_HUBS for x in TARGETS + CANDIDATES]
+    if (h, x) not in NLLB_UNAVAILABLE
+}
 
 PINS: dict = {
     "flores": {
@@ -435,7 +450,9 @@ def validate_registry() -> None:
     problems += [f"{c}: script {l.script} has no SCRIPT_RANGES entry" for c, l in LANGUAGES.items()
                  if SCRIPT_ALIASES.get(l.script, l.script) not in SCRIPT_RANGES]
     problems += [f"GlotLID label override for unknown language {c}" for c in LID_LABEL_OVERRIDES if c not in LID_LANGS]
-    problems += [f"candidate {c} is already a study language" for c in CANDIDATES if c in LANGUAGES]
+    problems += [f"candidate {c} is already a study language" for c in CANDIDATES + CANDIDATE_HUBS if c in LANGUAGES]
+    problems += [f"candidate hub {c}: missing NTREX/CCMatrix/Wikipedia code" for c, l in CANDIDATE_HUB_LANGUAGES.items()
+                 if None in (l.ntrex, l.ccmatrix, l.wiki)]
     problems += [f"candidate {c}: missing NTREX/CCMatrix/Wikipedia code or script without SCRIPT_RANGES entry"
                  for c, l in CANDIDATE_LANGUAGES.items() if None in (l.ntrex, l.ccmatrix, l.wiki)
                  or SCRIPT_ALIASES.get(l.script, l.script) not in SCRIPT_RANGES]
