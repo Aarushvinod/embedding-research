@@ -5,6 +5,8 @@
 # The interpreter comes from BYTERESEARCH_METRICS_PYTHON, else from the venv metrics/ in the metrics
 # directory (--metrics-dir, else BYTERESEARCH_METRICS_DIR, else ROOT/envs), which also holds metricx/.
 # Callers must free any GPU model before scoring, because the worker loads its own large model.
+# The worker runs with transformers restricted to PyTorch (worker_env), so a system TensorFlow or JAX built
+# for numpy 2 is never imported into the numpy<2 metrics environment.
 
 from __future__ import annotations
 
@@ -16,6 +18,8 @@ import uuid
 from pathlib import Path
 
 from ..core.config import PINS
+
+TORCH_ONLY = {"USE_TORCH": "1", "USE_TF": "0", "USE_FLAX": "0", "TF_CPP_MIN_LOG_LEVEL": "3"}
 
 ENV_VAR = "BYTERESEARCH_METRICS_PYTHON"
 DIR_VAR = "BYTERESEARCH_METRICS_DIR"
@@ -78,6 +82,11 @@ def signature(ctx, metric: str) -> str:
             f"|max_input_length:{METRICX_MAX_INPUT}|ref:yes")
 
 
+def worker_env() -> dict:
+    # Output: the current environment plus TORCH_ONLY, for every process run with the metrics interpreter.
+    return {**os.environ, **TORCH_ONLY}
+
+
 def worker_command(ctx, metric: str, in_path, out_path, batch: int) -> list:
     # Inputs: Ctx, metric name, input/output JSONL paths and batch size. Output: the argv list that
     # runs the worker with the metrics interpreter in isolated mode (-I).
@@ -102,7 +111,7 @@ def run_worker(ctx, metric: str, srcs, hyps, refs, batch: int | None = None) -> 
     in_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     try:
         subprocess.run(worker_command(ctx, metric, in_path, out_path, batch or batch_size(ctx, metric)),
-                       check=True)
+                       check=True, env=worker_env())
         scores = [float(json.loads(x)["score"]) for x in out_path.read_text(encoding="utf-8").splitlines() if x]
     finally:
         shutil.rmtree(work, ignore_errors=True)

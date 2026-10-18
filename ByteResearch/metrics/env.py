@@ -19,7 +19,7 @@ from ..core.paths import PACKAGE_DIR
 from ..core.registry import opt, register_stage
 from ..core.results import now_iso
 from .batching import METRIC_OPTIONS
-from .neural import env_python, metrics_env_dir, metricx_dir, run_worker
+from .neural import env_python, metrics_env_dir, metricx_dir, run_worker, worker_env
 
 REQUIREMENTS = PACKAGE_DIR / "requirements-metrics.txt"
 METRICX_URL = "https://github.com/google-research/metricx.git"
@@ -32,16 +32,17 @@ SELFCHECK_BAD = ["qzx vbn plorf tkk wqq", "zzzz kkkk wwww jjjj"]
 
 
 def _run(cmd, cwd=None) -> None:
-    # Inputs: an argv list and an optional working directory. Prints and runs it, raising on failure.
+    # Inputs: an argv list and an optional working directory. Prints and runs it with the PyTorch-only
+    # environment, raising on failure.
     print("$ " + " ".join(str(c) for c in cmd), flush=True)
-    subprocess.run([str(c) for c in cmd], cwd=cwd, check=True)
+    subprocess.run([str(c) for c in cmd], cwd=cwd, check=True, env=worker_env())
 
 
 def _output(cmd):
     # Input: an argv list (e.g. an interpreter with -c and a snippet that prints one line). Output:
     # the stripped standard output, or None when the command fails or cannot start.
     try:
-        res = subprocess.run([str(c) for c in cmd], capture_output=True, text=True)
+        res = subprocess.run([str(c) for c in cmd], capture_output=True, text=True, env=worker_env())
     except OSError:
         return None
     return res.stdout.strip() if res.returncode == 0 else None
