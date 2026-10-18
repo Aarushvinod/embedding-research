@@ -1,7 +1,7 @@
 # Registered data stages: `python -m ByteResearch.run data[.<part>] [--smoke] [--pairs N] [--rebuild-data]`.
 # data.flores, data.ntrex and data.exclusion build the evaluation sets and the exclusion set;
-# data.lid_model, data.iso639, data.labse_model and data.sacrebleu cache GlotLID, the ISO 639-3
-# macrolanguage table behind its label sets, LaBSE and the flores200 SPM model, and data.thresholds
+# data.lid_model, data.labse_model and data.sacrebleu cache GlotLID, LaBSE and the flores200 SPM model, and
+# data.thresholds
 # calibrates every LID, script, LaBSE and length-ratio threshold on FLORES dev.
 # data.nllb runs over condition x target (the condition's hub to each target) and data.wiki over the
 # study languages; data.table prints and saves the per-pair filter table whenever the pairs change.
@@ -23,7 +23,6 @@ from ..core.registry import Unit, composite, opt, register_stage
 from .assets import asset_dir, build_labse, build_sacrebleu
 from .exclusion import build_exclusion, exclusion_dir
 from .flores import build_flores, dev_halves, dev_subset_ids
-from .iso639 import build_iso639, iso_dir
 from .lid import build_glotlid
 from .manifest import manifest_complete, purge, rebuild_requested
 from .nllb import build_pairs, filter_table_done, write_filter_table
@@ -99,12 +98,6 @@ def lid_model_stage(ctx, unit):
     build_glotlid(ctx)
 
 
-@data_stage("data.iso639", lambda c, u: iso_dir(c), grid=(), order=13, options=DATA_OPTS)
-def iso639_stage(ctx, unit):
-    # Inputs: Ctx and the empty Unit. Downloads the pinned ISO 639-3 macrolanguage table (GlotLID label sets).
-    build_iso639(ctx)
-
-
 @data_stage("data.labse_model", lambda c, u: asset_dir(c, "labse"), grid=(), order=14, options=DATA_OPTS)
 def labse_model_stage(ctx, unit):
     # Inputs: Ctx and the empty Unit. Downloads LaBSE.
@@ -118,7 +111,7 @@ def sacrebleu_stage(ctx, unit):
 
 
 @data_stage("data.thresholds", lambda c, u: thresholds_dir(c), grid=(), order=15, options=DATA_OPTS,
-            requires=("data.flores", "data.lid_model", "data.iso639", "data.labse_model"))
+            requires=("data.flores", "data.lid_model", "data.labse_model"))
 def thresholds_stage(ctx, unit):
     # Inputs: Ctx and the empty Unit. Calibrates and saves the filter thresholds on FLORES dev.
     build_thresholds(ctx)
@@ -126,8 +119,7 @@ def thresholds_stage(ctx, unit):
 
 @data_stage("data.nllb", lambda c, u: c.paths.nllb_dir(CONDITIONS[u.condition].hub, u.target),
             grid=("condition", "target"), order=20, options=DATA_OPTS,
-            requires=("data.flores", "data.ntrex", "data.exclusion", "data.lid_model", "data.iso639",
-                      "data.labse_model", "data.thresholds"))
+            requires=("data.flores", "data.ntrex", "data.exclusion", "data.lid_model", "data.labse_model", "data.thresholds"))
 def nllb_stage(ctx, unit):
     # Inputs: Ctx and a (condition, target) Unit. Streams, filters and saves that hub-target pair file.
     build_pairs(ctx, CONDITIONS[unit.condition].hub, unit.target)
@@ -147,15 +139,14 @@ def candidate_wiki_units(sel: dict, smoke: bool = False) -> list:
 
 @data_stage("data.candidates", lambda c, u: c.paths.nllb_dir(CONDITIONS[u.condition].hub, u.lang),
             grid=candidate_units, order=22, options=DATA_OPTS,
-            requires=("data.flores", "data.ntrex", "data.exclusion", "data.lid_model", "data.iso639",
-                      "data.labse_model", "data.thresholds"))
+            requires=("data.flores", "data.ntrex", "data.exclusion", "data.lid_model", "data.labse_model", "data.thresholds"))
 def candidates_stage(ctx, unit):
     # Inputs: Ctx and a (condition, lang) Unit. Streams, filters and saves that hub-candidate pair file.
     build_pairs(ctx, CONDITIONS[unit.condition].hub, unit.lang)
 
 
 @data_stage("data.wiki", lambda c, u: c.paths.wiki_dir(u.lang), grid=("lang",), order=21, options=WIKI_OPTS,
-            requires=("data.exclusion", "data.lid_model", "data.iso639", "data.thresholds"))
+            requires=("data.exclusion", "data.lid_model", "data.thresholds"))
 def wiki_stage(ctx, unit):
     # Inputs: Ctx and a (lang) Unit. Samples that language's Wikipedia sentences.
     build_wiki(ctx, unit.lang)
@@ -169,7 +160,7 @@ def table_stage(ctx, unit):
 
 
 @data_stage("data.candidate_wiki", lambda c, u: c.paths.wiki_dir(u.lang), grid=candidate_wiki_units, order=23,
-            options=DATA_OPTS, requires=("data.exclusion", "data.lid_model", "data.iso639", "data.thresholds"))
+            options=DATA_OPTS, requires=("data.exclusion", "data.lid_model", "data.thresholds"))
 def candidate_wiki_stage(ctx, unit):
     # Inputs: Ctx and a (lang) Unit. Samples that candidate's Wikipedia sentences exactly as for a study language.
     build_wiki(ctx, unit.lang)
@@ -211,6 +202,6 @@ def purge_stage(ctx, unit):
         print(f"[data.purge] removed {', '.join(codes)} from the calibrated thresholds", flush=True)
 
 
-composite("data", ("data.flores", "data.ntrex", "data.exclusion", "data.lid_model", "data.iso639", "data.labse_model",
+composite("data", ("data.flores", "data.ntrex", "data.exclusion", "data.lid_model", "data.labse_model",
                    "data.sacrebleu", "data.thresholds", "data.nllb", "data.wiki", "data.table", "data.candidates",
                    "data.candidate_wiki", "data.candidate_table"))

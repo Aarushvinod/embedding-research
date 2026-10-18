@@ -1,25 +1,24 @@
-# Language identification with GlotLID, shared by the NLLB filters and the DecoderLens experiment.
+# Language identification with GlotLID, shared by the NLLB and Wikipedia filters and the DecoderLens experiment.
 # load_glotlid downloads cis-lmu/glotlid model.bin into ROOT/data/models/glotlid, records the resolved
 # revision in its manifest, verifies its SHA-256 and loads it with fasttext.
 # predict calls model.f.predict directly, because fasttext's Python wrapper breaks under numpy 2.
-# load_aliases derives each language's accepted labels from ISO 639-3 macrolanguage membership, the script
-# and the labels present in the model (corpora.iso639), for the study languages or the yield-only
-# candidates, and lid_record describes that rule for configs.
-# A text counts as language L when the probabilities of L's labels among its top-k predictions sum to at
-# least L's FLORES-calibrated threshold (corpora.thresholds): labels_prob computes that sum and lid_probs
-# applies it to raw texts.
+# Every language is identified by exactly one GlotLID label, the one of its FLORES variety (e.g. arb_Arab for
+# Modern Standard Arabic, swh_Latn for Swahili), except LID_LABEL_OVERRIDES (Tagalog is GlotLID's fil_Latn);
+# lid_labels checks that every needed label exists in the model.
+# A text counts as language L when L's label is GlotLID's top label with a probability of at least L's
+# threshold (lid_ok); own_top_prob gives that probability (0 when another label is on top) and label_prob
+# reads L's probability from a ranked prediction even when it is not on top (used to calibrate thresholds).
 
 from __future__ import annotations
 
 import functools
 
-from ..core.config import CANDIDATE_LANGUAGES, LANGUAGES, LID_EXTRA_CODES, LID_ONLY_CODES, PINS, DataConfig
-from ..core.io import sha256_json
+from ..core.config import LID_LABEL_OVERRIDES, LID_LANGS, PINS, language
 from .assets import asset_dir, build_hf_asset, ensure_hf_asset
-from .iso639 import LABEL_PREFIX, derive_aliases, iso_table_path, parse_macrolanguages
 from .manifest import verified_path
 
-LID_RULE = "sum of GlotLID top-k probabilities over the language's labels >= the language's FLORES-calibrated minimum"
+LABEL_PREFIX = "__label__"
+LID_RULE = "the language's FLORES-variety GlotLID label is the top label with probability >= the threshold"
 
 
 def build_glotlid(ctx) -> dict:
@@ -52,51 +51,32 @@ def model_labels(model) -> list:
     return [label.removeprefix(LABEL_PREFIX) for label in model.get_labels()]
 
 
-def _items(codes: dict) -> tuple:
-    # Input: {code: ISO codes}. Output: its sorted (code, codes) items as a hashable cache key.
-    return tuple(sorted((c, tuple(v)) for c, v in codes.items()))
+def lid_label(code: str) -> str:
+    # Input: a study or candidate language code. Output: its single GlotLID label (the FLORES variety's code,
+    # or the LID_LABEL_OVERRIDES entry).
+    return LID_LABEL_OVERRIDES.get(code) or language(code).flores
 
 
-@functools.lru_cache(maxsize=4)
-def _aliases(iso_path: str, model_path: str, extra: tuple, only: tuple, candidates: bool) -> dict:
-    # Inputs: the verified macrolanguage table path, the GlotLID model path, the extra and only codes as
-    # sorted (code, codes) items and whether to derive the candidates instead of the study registry (cache
-    # key). Output: {code: frozenset of labels}; raises ValueError when a language ends up with no label.
-    with open(iso_path, encoding="utf-8") as fh:
-        macro = parse_macrolanguages(fh.read())
-    languages = CANDIDATE_LANGUAGES if candidates else LANGUAGES
-    table = derive_aliases(languages, macro, model_labels(_fasttext_model(model_path)), dict(extra), dict(only))
-    empty = sorted(c for c, labels in table.items() if not labels)
-    if empty:
-        raise ValueError(f"GlotLID has no label for {empty}; add ISO codes to LID_EXTRA_CODES in core.config")
+def check_labels(labels) -> dict:
+    # Input: the labels present in the GlotLID model. Output: {code: label} for every LID language; raises
+    # ValueError naming every language whose label the model lacks.
+    table = {code: lid_label(code) for code in LID_LANGS}
+    missing = sorted(c for c, label in table.items() if label not in set(labels))
+    if missing:
+        raise ValueError(f"GlotLID has no label for {missing}; add them to LID_LABEL_OVERRIDES in core.config")
     return table
 
 
-def load_aliases(ctx, candidates: bool = False) -> dict:
-    # Inputs: Ctx and whether to return the yield-only candidates instead of the study registry. Output:
-    # {language code: frozenset of accepted GlotLID labels}, derived from the cached ISO table and GlotLID
-    # model (both downloaded and verified when needed).
-    return _aliases(str(iso_table_path(ctx)), str(glotlid_path(ctx)), _items(LID_EXTRA_CODES),
-                    _items(LID_ONLY_CODES), candidates)
+def lid_labels(ctx) -> dict:
+    # Input: Ctx. Output: {code: GlotLID label} for every study and candidate language, checked against the model.
+    return check_labels(model_labels(load_glotlid(ctx)))
 
 
-def pair_aliases(ctx) -> dict:
-    # Input: Ctx. Output: the study and candidate alias tables merged into one {code: labels} dict (the
-    # codes are disjoint), for filtering any NLLB pair.
-    return {**load_aliases(ctx), **load_aliases(ctx, candidates=True)}
-
-
-def lid_record(ctx, aliases: dict, langs=None) -> dict:
-    # Inputs: Ctx, the alias table (load_aliases) and optional language codes (default all). Output: the LID
-    # rule for manifests and result configs: rule text, top-k, ISO table pin, extra and only codes, the alias
-    # table of those languages and its hash (the calibrated minimums are recorded with each filter spec).
-    table = {c: sorted(v) for c, v in aliases.items() if langs is None or c in langs}
-    cfg, pin = ctx.config(DataConfig), PINS["iso639_3"]
-    return {"rule": LID_RULE, "top_k": cfg.glotlid_top_k,
-            "iso639_3": {"release": pin["release"], "sha256": pin["sha256"]},
-            "extra_codes": {c: list(v) for c, v in LID_EXTRA_CODES.items()},
-            "only_codes": {c: list(v) for c, v in LID_ONLY_CODES.items()}, "aliases": table,
-            "aliases_sha256": sha256_json(table)}
+def lid_record(langs) -> dict:
+    # Input: language codes. Output: the LID rule for manifests and result configs: rule text, each language's
+    # label and the overrides (the thresholds are recorded with each filter spec).
+    return {"rule": LID_RULE, "labels": {c: lid_label(c) for c in langs},
+            "overrides": dict(LID_LABEL_OVERRIDES)}
 
 
 def predict(model, texts, k: int = 1) -> list:
@@ -123,22 +103,21 @@ def top_label(pred) -> tuple:
     return pairs[0] if pairs else ("", 0.0)
 
 
-def labels_prob(pred, labels) -> float:
-    # Inputs: one text's prediction (a pair or a ranked top-k list) and a set of accepted labels. Output:
-    # the summed probability of the predicted labels in that set, so mass split over dialect or variant
-    # labels (e.g. arb/ary/arz for Arabic) still counts for the language.
-    return float(sum(p for label, p in ranked_pairs(pred) if label.removeprefix(LABEL_PREFIX) in labels))
+def own_top_prob(pred, label: str) -> float:
+    # Inputs: one text's prediction and a language's label. Output: the label's probability when it is the
+    # top label, else 0.0 (so `own_top_prob >= threshold` is the LID filter).
+    top, prob = top_label(pred)
+    return float(prob) if top == label else 0.0
 
 
-def label_matches(label: str, lang: str, aliases: dict) -> bool:
-    # Inputs: a GlotLID label (with or without the prefix), a language code and the alias table. Output:
-    # whether the label is one of the language's accepted labels.
-    return label.removeprefix(LABEL_PREFIX) in aliases.get(lang, ())
+def lid_ok(pred, label: str, threshold: float) -> bool:
+    # Inputs: one text's prediction, a language's label and its threshold. Output: whether the label is the top
+    # label with probability >= threshold (the LID filter).
+    top, prob = top_label(pred)
+    return top == label and prob >= threshold
 
 
-def lid_probs(ctx, texts, lang: str) -> list:
-    # Inputs: Ctx, raw texts and a language code. Output: per text, the summed top-k probability of the
-    # language's labels (DataConfig.glotlid_top_k), exactly the quantity the NLLB LID filter thresholds.
-    preds = predict(load_glotlid(ctx), list(texts), k=ctx.config(DataConfig).glotlid_top_k)
-    labels = pair_aliases(ctx)[lang]
-    return [labels_prob(p, labels) for p in preds]
+def label_prob(pred, label: str) -> float:
+    # Inputs: one text's ranked prediction and a language's label. Output: that label's probability (0.0 when it
+    # is not among the predicted labels).
+    return float(next((p for lab, p in ranked_pairs(pred) if lab == label), 0.0))

@@ -1,8 +1,8 @@
 # The ordered filter chain that turns a score-sorted stream of mined pairs into training pairs.
 # Filters run in a fixed order with one rejection counter each: malformed line, exact-pair duplicate,
 # 20-300 characters on both sides, the x/hub character-length ratio band, literal tokenizer markup,
-# FLORES/NTREX exclusion, script consistency per side, GlotLID per side (top-k probabilities of the language's
-# labels summed) and LaBSE cosine; the ratio, script, LID and LaBSE thresholds come from FLORES calibration.
+# FLORES/NTREX exclusion, script consistency per side, GlotLID per side (the language's label must be the top
+# label with at least the side's minimum probability) and LaBSE cosine; the data stage supplies the thresholds.
 # Score-order violations are counted but do not reject a line.
 # For speed the cheap filters run line by line and their survivors are collected into blocks, on which LID
 # and then LaBSE run in batches; lines are then tallied back in stream order.
@@ -15,7 +15,7 @@ import hashlib
 from dataclasses import dataclass, field
 
 from ..core.text import has_special_markup, length_ok, normalize_for_match, script_ratio
-from .lid import LID_RULE, labels_prob, top_label
+from .lid import LID_RULE, lid_ok, own_top_prob, top_label
 
 REASONS = ("malformed", "duplicate", "length", "ratio", "markup", "excluded", "script", "lid", "labse")
 STEPS = ("malformed", "dedupe", "length", "ratio", "markup", "exclusion", "script", "lid", "labse")
@@ -24,9 +24,9 @@ STEPS = ("malformed", "dedupe", "length", "ratio", "markup", "exclusion", "scrip
 @dataclass(frozen=True)
 class FilterSpec:
     # Thresholds for one pair: hub and target codes and scripts, the inclusive character window, the x/hub
-    # length-ratio band, each side's minimum script ratio, the GlotLID rule (each side's accepted labels, whose
-    # probabilities among the top lid_top_k must sum to that side's minimum), the LaBSE minimum cosine and the
-    # exclusion set. The defaults accept everything; the data stage fills in the FLORES-calibrated values.
+    # length-ratio band, each side's minimum script ratio, the GlotLID rule (each side's label, which must be
+    # the top label with at least that side's minimum probability), the LaBSE minimum cosine and the exclusion
+    # set. The defaults accept everything; the data stage fills in its thresholds.
     hub: str
     x: str
     hub_script: str
@@ -39,10 +39,9 @@ class FilterSpec:
     x_min_script: float = 0.0
     hub_lid_min: float = 0.0
     x_lid_min: float = 0.0
-    lid_top_k: int = 10
     lid_rule: str = LID_RULE
-    hub_lid: tuple = ()
-    x_lid: tuple = ()
+    hub_lid: str = ""
+    x_lid: str = ""
     labse_min: float = 0.0
     exclusion: frozenset = frozenset()
 
@@ -50,8 +49,8 @@ class FilterSpec:
 @dataclass
 class Entry:
     # One streamed line: its 1-based line number, the parsed (hub, x, score) or None, the rejection
-    # reason (None while it survives), the top LID predictions, the summed probabilities of the expected
-    # languages and the LaBSE cosine once computed.
+    # reason (None while it survives), the top LID predictions, each side's own-label top probability (0 when
+    # another label is on top) and the LaBSE cosine once computed.
     line_no: int
     parsed: tuple | None
     reason: str | None
@@ -119,17 +118,18 @@ def cheap_reason(parsed, seen: set, spec: FilterSpec):
 
 def score_block(cands: list, spec: FilterSpec, lid_fn, labse_fn) -> None:
     # Inputs: Entries that passed the cheap filters, the spec, lid_fn(texts) -> one prediction per text
-    # (a (label, prob) pair or a ranked top-k list) and labse_fn(left, right) -> cosines. Runs LID on
-    # both sides, then LaBSE on the LID survivors, and records predictions, summed language
-    # probabilities, cosines and rejection reasons on the entries in place.
+    # (a (label, prob) pair or a ranked list) and labse_fn(left, right) -> cosines. Runs LID on both sides,
+    # then LaBSE on the LID survivors, and records predictions, own-label top probabilities, cosines and
+    # rejection reasons on the entries in place.
     if not cands:
         return
     hub_preds = lid_fn([e.parsed[0] for e in cands])
     x_preds = lid_fn([e.parsed[1] for e in cands])
     for e, ph, px in zip(cands, hub_preds, x_preds):
         e.lid_hub, e.lid_x = top_label(ph), top_label(px)
-        e.lid_hub_p, e.lid_x_p = labels_prob(ph, spec.hub_lid), labels_prob(px, spec.x_lid)
-        e.reason = None if e.lid_hub_p >= spec.hub_lid_min and e.lid_x_p >= spec.x_lid_min else "lid"
+        e.lid_hub_p, e.lid_x_p = own_top_prob(ph, spec.hub_lid), own_top_prob(px, spec.x_lid)
+        ok = lid_ok(ph, spec.hub_lid, spec.hub_lid_min) and lid_ok(px, spec.x_lid, spec.x_lid_min)
+        e.reason = None if ok else "lid"
     passed = [e for e in cands if e.reason is None]
     cosines = labse_fn([e.parsed[0] for e in passed], [e.parsed[1] for e in passed]) if passed else []
     for e, cos in zip(passed, cosines):
@@ -140,7 +140,7 @@ def score_block(cands: list, spec: FilterSpec, lid_fn, labse_fn) -> None:
 def make_row(i: int, e: Entry) -> dict:
     # Inputs: the output index and a surviving Entry. Output: the stored pair row
     # {i, line_no, score, hub, x, labse, lid_hub, lid_x, lid_hub_p, lid_x_p} (top label and probability
-    # per side, and the summed probability of the expected language per side).
+    # per side, and each side's own-label top probability).
     hub, x, score = e.parsed
     return {"i": i, "line_no": e.line_no, "score": score, "hub": hub, "x": x, "labse": e.labse,
             "lid_hub": list(e.lid_hub), "lid_x": list(e.lid_x), "lid_hub_p": e.lid_hub_p, "lid_x_p": e.lid_x_p}

@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..core.config import CANDIDATES, DATA_LANGS, HUBS, TARGETS, DataConfig, language
+from ..core.config import CANDIDATES, DATA_LANGS, HUBS, LID_LANGS, TARGETS, DataConfig, language
 from ..core.io import read_json, write_json_atomic
 from ..core.text import script_ratio
 from .assets import asset_revisions, labse_cosines, labse_dtype, load_labse
 from .flores import load_flores
-from .lid import LID_RULE, labels_prob, lid_probs, load_glotlid, pair_aliases, predict
+from .lid import LID_RULE, label_prob, lid_label, lid_labels, lid_ok, load_glotlid, predict
 from .manifest import begin_build, finish_build, manifest_complete, purge, read_manifest, verified_path
 
 TABLE_FILE = "thresholds.json"
@@ -68,9 +68,9 @@ def flores_scores(ctx) -> dict:
     # data language (lid, script) and calibrated direction (labse, length ratio).
     cfg = ctx.config(DataConfig)
     dev = load_flores(ctx, SPLIT, DATA_LANGS)
-    model, aliases, labse = load_glotlid(ctx), pair_aliases(ctx), load_labse(ctx)
-    lid = {lang: [labels_prob(p, aliases[lang]) for p in predict(model, dev[lang], k=cfg.glotlid_top_k)]
-           for lang in DATA_LANGS}
+    model, labels, labse = load_glotlid(ctx), lid_labels(ctx), load_labse(ctx)
+    lid = {lang: [label_prob(p, labels[lang]) for p in predict(model, dev[lang], k=cfg.glotlid_top_k)]
+           for lang in LID_LANGS}
     script = {lang: [script_ratio(t, language(lang).script) for t in dev[lang]] for lang in DATA_LANGS}
     labse_cos = {direction_key(h, x): [float(c) for c in labse_cosines(labse, dev[h], dev[x], cfg.labse_batch)]
                  for h, x in directions()}
@@ -121,10 +121,10 @@ def lookup(table: dict, measure: str, key: str):
 
 
 def lid_passes(ctx, texts, lang: str) -> list:
-    # Inputs: Ctx, raw texts and a language code. Output: per text, whether it passes the NLLB LID filter (its
-    # summed top-k probability of the language reaches the language's calibrated threshold).
-    threshold = lookup(load_thresholds(ctx), "lid", lang)
-    return [p >= threshold for p in lid_probs(ctx, texts, lang)]
+    # Inputs: Ctx, raw texts and a language code. Output: per text, whether it passes the NLLB LID filter (the
+    # language's label is the top label with at least the language's calibrated probability).
+    threshold, label = lookup(load_thresholds(ctx), "lid", lang), lid_label(lang)
+    return [lid_ok(p, label, threshold) for p in predict(load_glotlid(ctx), list(texts), k=1)]
 
 
 def involves(key: str, codes: set) -> bool:

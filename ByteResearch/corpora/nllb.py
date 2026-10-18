@@ -26,7 +26,7 @@ from .assets import asset_revisions, labse_cosines, labse_dtype, load_labse
 from .exclusion import exclusion_set
 from .filters import STEPS, FilterSpec, run_filters, survival
 from .http import GzLineStream
-from .lid import lid_record, load_glotlid, pair_aliases, predict
+from .lid import lid_label, lid_labels, lid_record, load_glotlid, predict
 from .manifest import begin_build, finish_build, manifest_complete, read_manifest, verified_path
 from .thresholds import direction_key, load_thresholds, lookup
 
@@ -64,24 +64,23 @@ def pairs_cap(ctx) -> int:
 def filter_spec(ctx, hub: str, x: str) -> FilterSpec:
     # Inputs: Ctx, hub and target codes. Output: the FilterSpec with the length window, both scripts, the
     # FLORES-calibrated thresholds (each side's script and LID minimums, the direction's LaBSE minimum and
-    # length-ratio band), both sides' accepted GlotLID labels and the shared exclusion set.
-    cfg, aliases, table, d = ctx.config(DataConfig), pair_aliases(ctx), load_thresholds(ctx), direction_key(hub, x)
+    # length-ratio band), both sides' GlotLID labels and the shared exclusion set.
+    cfg, table, d = ctx.config(DataConfig), load_thresholds(ctx), direction_key(hub, x)
+    lid_labels(ctx)
     ratio_min, ratio_max = lookup(table, "length_ratio", d)
     return FilterSpec(hub=hub, x=x, hub_script=language(hub).script, x_script=language(x).script,
                       min_chars=cfg.min_chars, max_chars=cfg.max_chars, ratio_min=ratio_min, ratio_max=ratio_max,
                       hub_min_script=lookup(table, "script", hub), x_min_script=lookup(table, "script", x),
                       hub_lid_min=lookup(table, "lid", hub), x_lid_min=lookup(table, "lid", x),
-                      lid_top_k=cfg.glotlid_top_k, hub_lid=tuple(sorted(aliases[hub])), x_lid=tuple(sorted(aliases[x])),
+                      hub_lid=lid_label(hub), x_lid=lid_label(x),
                       labse_min=lookup(table, "labse", d), exclusion=exclusion_set(ctx)[0])
 
 
 def model_functions(ctx) -> tuple:
-    # Input: Ctx. Output: (lid_fn, labse_fn) wrapping the cached GlotLID (top glotlid_top_k labels per
-    # text) and LaBSE models.
+    # Input: Ctx. Output: (lid_fn, labse_fn) wrapping the cached GlotLID (top label per text) and LaBSE models.
     lid_model, labse = load_glotlid(ctx), load_labse(ctx)
-    cfg = ctx.config(DataConfig)
-    batch, k = cfg.labse_batch, cfg.glotlid_top_k
-    return (lambda texts: predict(lid_model, texts, k=k),
+    batch = ctx.config(DataConfig).labse_batch
+    return (lambda texts: predict(lid_model, texts, k=1),
             lambda left, right: labse_cosines(labse, left, right, batch))
 
 
@@ -122,7 +121,7 @@ def build_pairs(ctx, hub: str, x: str) -> dict:
     config = {"source": dataclasses.asdict(src), "cap": cap, "block": min(BLOCK, cap),
               "filters": {k: v for k, v in dataclasses.asdict(spec).items() if k != "exclusion"},
               "exclusion_sha256": exclusion_set(ctx)[1], "assets": asset_revisions(ctx), "device": ctx.device,
-              "labse_dtype": labse_dtype(ctx), "lid": lid_record(ctx, pair_aliases(ctx), (hub, x))}
+              "labse_dtype": labse_dtype(ctx), "lid": lid_record((hub, x))}
     stats = {"counts": result["counts"], "survival": survival(result["counts"], result["lines_read"]),
              "lines_read": result["lines_read"], "order_violations": result["order_violations"],
              "kept": kept, "shortfall": max(cap - kept, 0), "exhausted": result["exhausted"],

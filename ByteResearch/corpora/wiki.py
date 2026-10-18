@@ -23,7 +23,7 @@ from ..core.io import read_jsonl_gz, write_jsonl_gz_atomic
 from ..core.text import has_special_markup, length_ok, normalize_for_match, script_ratio, split_sentences
 from .exclusion import exclusion_set
 from .http import hub_errors, retry
-from .lid import labels_prob, load_glotlid, pair_aliases, predict
+from .lid import lid_label, lid_labels, load_glotlid, own_top_prob, predict
 from .manifest import begin_build, finish_build, verified_path
 from .thresholds import load_thresholds, lookup
 
@@ -36,8 +36,8 @@ REASONS = ("length", "script", "markup", "excluded", "lid", "duplicate")
 @dataclass(frozen=True)
 class WikiSpec:
     # Sentence filters for one language: expected script, inclusive character window, minimum script
-    # ratio, maximum sentences per article, the exclusion set and the minimum summed GlotLID probability
-    # (applied only when a LID function is given).
+    # ratio, maximum sentences per article, the exclusion set and the minimum probability of the language's
+    # GlotLID label as the top label (applied only when a LID function is given).
     script: str
     min_chars: int = 20
     max_chars: int = 300
@@ -48,9 +48,9 @@ class WikiSpec:
 
 
 def sentence_reason(sentence: str, spec: WikiSpec, seen: set, lid_fn=None):
-    # Inputs: a sentence, the spec, the set of sentences already sampled and an optional lid_fn(text) ->
-    # summed probability of the language. Output: the first failing filter's reason, or None when the
-    # sentence is eligible.
+    # Inputs: a sentence, the spec, the set of sentences already sampled and an optional lid_fn(text) -> the
+    # language label's top probability (0 when another label is on top). Output: the first failing filter's
+    # reason, or None when the sentence is eligible.
     if not length_ok(sentence, spec.min_chars, spec.max_chars):
         return "length"
     if script_ratio(sentence, spec.script) < spec.min_script:
@@ -59,7 +59,7 @@ def sentence_reason(sentence: str, spec: WikiSpec, seen: set, lid_fn=None):
         return "markup"
     if normalize_for_match(sentence) in spec.exclusion:
         return "excluded"
-    if lid_fn is not None and lid_fn(sentence) < spec.lid_min:
+    if lid_fn is not None and not (lid_fn(sentence) > 0 and lid_fn(sentence) >= spec.lid_min):
         return "lid"
     return "duplicate" if sentence in seen else None
 
@@ -173,10 +173,11 @@ def build_wiki(ctx, lang: str) -> dict:
     fs, root = HfFileSystem(), f"datasets/{repo}@{revision}/{config_name}"
     groups = row_groups(fs, root)
     excl, excl_sha = exclusion_set(ctx)
-    table, model, labels = load_thresholds(ctx), load_glotlid(ctx), pair_aliases(ctx)[lang]
+    lid_labels(ctx)
+    table, model, label = load_thresholds(ctx), load_glotlid(ctx), lid_label(lang)
     spec = WikiSpec(language(lang).script, cfg.wiki_min_chars, cfg.wiki_max_chars, lookup(table, "script", lang),
                     cfg.wiki_per_article, excl, lookup(table, "lid", lang))
-    lid_fn = lambda text: labels_prob(predict(model, [text], k=cfg.glotlid_top_k)[0], labels)
+    lid_fn = lambda text: own_top_prob(predict(model, [text], k=1)[0], label)
     counter, seed = {"row_groups_read": 0}, f"{cfg.seed}:{lang}"
     rows, stats = sample_sentences(article_stream(fs, groups, seed, ARTICLES_PER_GROUP, counter), spec,
                                    cfg.wiki_per_lang, seed, lid_fn=lid_fn)
@@ -185,8 +186,7 @@ def build_wiki(ctx, lang: str) -> dict:
               "files": sorted({p.split("/")[-1] for p, _, _ in groups}), "row_groups": len(groups),
               "articles_in_dump": sum(n for _, _, n in groups)}
     config = {"target": cfg.wiki_per_lang, "seed": seed, "articles_per_group": ARTICLES_PER_GROUP,
-              "oversample": OVERSAMPLE, "exclusion_sha256": excl_sha, "lid_top_k": cfg.glotlid_top_k,
-              "lid_labels": sorted(labels),
+              "oversample": OVERSAMPLE, "exclusion_sha256": excl_sha, "lid_label": label,
               "filters": {k: v for k, v in spec.__dict__.items() if k != "exclusion"}}
     return finish_build(ctx, out, sources=[source], config=config, outputs=[SENTENCES_FILE], stats={**stats, **counter})
 

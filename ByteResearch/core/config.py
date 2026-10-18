@@ -1,6 +1,6 @@
 # Fixed study constants and default configuration for the ByteResearch codebase.
 # It defines the fourteen languages (eight targets, three hubs, three controls) with their FLORES,
-# NTREX, CCMatrix and Wikipedia codes, scripts and decoder-tag sentinel indices, the GlotLID ISO-code
+# NTREX, CCMatrix and Wikipedia codes, scripts and decoder-tag sentinel indices, the GlotLID label
 # overrides, the Unicode script ranges and sentence terminators, so a language change stays here.
 # It also defines the six models, the three fine-tuning conditions, the 24-row NLLB source table, the
 # candidate targets (prepared exactly like targets so promoting one reuses its data, but never trained on)
@@ -32,11 +32,6 @@ class Language:
     script: str
     role: str
     tag_k: int
-
-    @property
-    def iso639_3(self) -> str:
-        # Output: the ISO 639-3 code, the language part of the FLORES code (e.g. "arb" for arb_Arab).
-        return self.flores.split("_")[0]
 
 
 @dataclass(frozen=True)
@@ -87,8 +82,7 @@ _LANG_ROWS = (
     ("zh", "Chinese", "zho_Hans", None, None, None, "Hans", "control"),
     ("el", "Greek", "ell_Grek", None, None, None, "Grek", "control"),
 )
-LID_EXTRA_CODES: dict = {"tl": ("fil",)}
-LID_ONLY_CODES: dict = {"ms": ("zsm",)}
+LID_LABEL_OVERRIDES: dict = {"tl": "fil_Latn"}
 
 _CANDIDATE_ROWS = (
     ("bg", "Bulgarian", "bul_Cyrl", "bul", "bg", "bg", "Cyrl", "candidate"),
@@ -115,6 +109,7 @@ ALL14: tuple = STUDY11 + CONTROLS
 CANDIDATE_HUBS: tuple = HUBS
 DATA_LANGS: tuple = ALL14 + CANDIDATES
 NTREX_LANGS: tuple = STUDY11 + CANDIDATES
+LID_LANGS: tuple = STUDY11 + CANDIDATES
 
 MODELS: dict[str, ModelSpec] = {
     f"{arch}-{size}": ModelSpec(f"{arch}-{size}", f"google/{arch}-{size}", arch, size)
@@ -187,9 +182,6 @@ PINS: dict = {
     },
     "comet": {"model": "Unbabel/wmt22-comet-da"},
     "glotlid": {"repo": "cis-lmu/glotlid", "file": "model.bin"},
-    "iso639_3": {"url": "https://iso639-3.sil.org/sites/iso639-3/files/downloads/iso-639-3-macrolanguages.tab",
-                 "release": "20261015", "file": "iso-639-3-macrolanguages.tab",
-                 "sha256": "fb01a86376d9c1abfc96d16be1b6dcffb4776a1f52fa22338d4979e9ffe1822f"},
     "labse": {"model": "sentence-transformers/LaBSE"},
     "sacrebleu": {"chrf_word_order": 2, "bleu_tokenize": "flores200"},
 }
@@ -240,8 +232,9 @@ def ntrex_file(code: str) -> str:
 class DataConfig:
     # Data-building defaults: NLLB cap, the fixed length window, the FLORES-dev percentile behind every
     # calibrated LID/script/LaBSE minimum (no floor) and the length-ratio band's two percentiles, the number of
-    # GlotLID labels whose probabilities are summed, the LaBSE batch size and inference dtype ("fp32" or
-    # "fp16"), Wikipedia sampling sizes, and the seed for every shuffle.
+    # GlotLID labels read per prediction when calibrating (to see a language's probability when it is not on
+    # top), the LaBSE batch size and inference dtype ("fp32" or "fp16"), Wikipedia sampling sizes, and the
+    # seed for every shuffle.
     nllb_cap: int = 100_000
     min_chars: int = 20
     max_chars: int = 300
@@ -313,7 +306,7 @@ class InterpConfig:
     n_boot: int = 10_000
     alpha: float = 0.05
     flush_seconds: float = 60.0
-    lid_other_threshold: float = 0.5
+    lid_threshold: float = 0.5
     lid_window: int = 128
     lape_ks: tuple = (0.5, 1.0, 2.0, 5.0)
     lape_percentile: float = 95.0
@@ -432,16 +425,14 @@ def lang_field(codes, attr: str) -> list:
 def validate_registry() -> None:
     # Checks the language registry and everything derived from it: tag sentinels within mT5's 100
     # (k <= MAX_TAG_K), scripts covered by SCRIPT_RANGES, NTREX/CCMatrix/Wikipedia codes for every study
-    # language, GlotLID override codes, smoke selections and controls drawn from the registry, one NLLB
+    # language, GlotLID label overrides, smoke selections and controls drawn from the registry, one NLLB
     # source per hub and target, and candidates that are new codes with NTREX/CCMatrix/Wikipedia codes and
     # covered scripts. Raises ValueError naming every problem. No output.
     problems = [f"tag k {l.tag_k} of {c} exceeds {MAX_TAG_K}; lower TAG_K0" for c, l in LANGUAGES.items()
                 if l.tag_k > MAX_TAG_K]
     problems += [f"{c}: script {l.script} has no SCRIPT_RANGES entry" for c, l in LANGUAGES.items()
                  if SCRIPT_ALIASES.get(l.script, l.script) not in SCRIPT_RANGES]
-    problems += [f"GlotLID extra codes for unknown language {c}" for c in LID_EXTRA_CODES if c not in LANGUAGES]
-    problems += [f"GlotLID only-codes for unknown language {c}" for c in LID_ONLY_CODES
-                 if c not in LANGUAGES and c not in CANDIDATE_LANGUAGES]
+    problems += [f"GlotLID label override for unknown language {c}" for c in LID_LABEL_OVERRIDES if c not in LID_LANGS]
     problems += [f"candidate {c} is already a study language" for c in CANDIDATES if c in LANGUAGES]
     problems += [f"candidate {c}: missing NTREX/CCMatrix/Wikipedia code or script without SCRIPT_RANGES entry"
                  for c, l in CANDIDATE_LANGUAGES.items() if None in (l.ntrex, l.ccmatrix, l.wiki)

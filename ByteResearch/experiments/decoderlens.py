@@ -5,10 +5,11 @@
 # Stage logprob teacher-forces the English, source-language and X references of the same row and stores
 # per-char log-probs, their differences and the English share (a softmax over the per-char log-probs), with
 # per-layer means and across-layer statistics per target and pooled over targets.
-# Stage lid decodes greedily from every lens (128 characters at most), scores the outputs with GlotLID (summed
-# top-k probabilities over each language's ISO-derived label set, against that language's FLORES-calibrated
-# minimum, as in the data filter) and buckets them as en, src, x, other_study, other or und; stage summary
-# joins both into one per-layer table.
+# Stage lid decodes greedily from every lens (128 characters at most), labels the outputs with GlotLID's top
+# label and buckets them as en, src or x (that language's FLORES-variety label on top with probability >=
+# InterpConfig.lid_threshold), other (any other confident top label) or und (low confidence or empty), and
+# reports the English fraction of all outputs and of identified (non-und) outputs; stage summary joins both
+# into one per-layer table.
 # Work is resumable per (target, chunk of rows), block states are offloaded to the CPU while the lens runs.
 
 from __future__ import annotations
@@ -19,8 +20,8 @@ import numpy as np
 import torch
 from scipy.special import logsumexp
 
-from ..core.config import CONDITIONS, LID_EXTRA_CODES, MODELS, PINS, STUDY11, TARGETS, DataConfig, DecodingConfig, \
-    InterpConfig, resolve_langs
+from ..core.config import CONDITIONS, LID_LABEL_OVERRIDES, MODELS, TARGETS, DecodingConfig, InterpConfig, \
+    resolve_langs
 from ..core.registry import composite, opt, register_stage
 from ..interp.scoring import batching_from, generate_from, lens_output, per_char_logprob, run_batched, to_device
 from ..interp.units import fingerprint, row_chunks
@@ -30,7 +31,7 @@ from .hubness import SPLIT, batching_config, corpus_module, devtest_rows, done_c
 
 EXP = "interp_decoderlens"
 GRID = ("model", "condition")
-BUCKETS = ("en", "src", "x", "other_study", "other", "und")
+BUCKETS = ("en", "src", "x", "other", "und")
 CHUNK_ROWS = 128
 OPTIONS = (opt("--chunk-rows", type=int, default=None, help="DecoderLens resume chunk size in rows (default 128)"),)
 
@@ -84,14 +85,11 @@ def lid_decoding(ctx, unit) -> DecodingConfig:
 def lid_config(ctx, unit) -> dict:
     # Inputs: Ctx and Unit. Output: the fingerprinted lid config.
     icfg, dec = ctx.config(InterpConfig), lid_decoding(ctx, unit)
-    table = corpus_module("thresholds").load_thresholds(ctx, required=False)
-    langs = dict.fromkeys(("en", CONDITIONS[unit.condition].hub, *STUDY11))
     return {**base_config(ctx, unit), "decoding": "greedy", "max_output_chars": dec.max_output_chars,
-            "gen_token_factor": dec.token_factor, "lid": "glotlid",
-            "lid_thresholds": {lang: table.get("lid", {}).get(lang) for lang in langs},
-            "lid_calibration": table.get("percentile"), "lid_other_threshold": icfg.lid_other_threshold,
-            "lid_top_k": ctx.config(DataConfig).glotlid_top_k, "lid_iso639_3": PINS["iso639_3"]["sha256"],
-            "lid_extra_codes": {c: list(v) for c, v in LID_EXTRA_CODES.items()}, "buckets": list(BUCKETS)}
+            "gen_token_factor": dec.token_factor, "lid": "glotlid", "lid_rule": "top label",
+            "lid_threshold": icfg.lid_threshold, "lid_label_overrides": dict(LID_LABEL_OVERRIDES),
+            "buckets": list(BUCKETS)}
+
 
 
 def lens_states(trained, enc_batch) -> tuple:
@@ -136,38 +134,30 @@ def logprob_chunk(ctx, trained, texts: dict, cfg: dict, x: str, crows) -> dict:
     return {f"lp_{role}": [[row[b][role] for row in out] for b in range(trained.n_enc)] for role in cfg["roles"]}
 
 
-def lid_buckets(lid_model, texts, hub: str, x: str, thresholds: dict, other: float, aliases: dict, k: int) -> tuple:
-    # Inputs: a GlotLID model, generated strings, hub, target, {lang: calibrated minimum}, the top-label minimum
-    # for "other", the alias table from corpora.lid.load_aliases and the top-k. Output: (top labels, top probs,
-    # buckets) per string; empty strings are not classified and, like low-confidence ones, become und.
+def lid_buckets(lid_model, texts, hub: str, x: str, threshold: float) -> tuple:
+    # Inputs: a GlotLID model, generated strings, hub, target and the top-label probability threshold. Output:
+    # (top labels, top probs, buckets) per string; empty strings are not classified and, like low-confidence
+    # ones, become und.
     lid = corpus_module("lid")
     clean = [" ".join(str(t).split()) for t in texts]
     keep = [i for i, t in enumerate(clean) if t]
     preds = [None] * len(texts)
-    for i, pred in zip(keep, lid.predict(lid_model, [clean[i] for i in keep], k=k) if keep else []):
+    for i, pred in zip(keep, lid.predict(lid_model, [clean[i] for i in keep], k=1) if keep else []):
         preds[i] = pred
+    labels = {"en": lid.lid_label("en"), "src": lid.lid_label(hub), "x": lid.lid_label(x)}
     tops = [lid.top_label(p) if p is not None else (None, 0.0) for p in preds]
-    buckets = [bucket_of(p, hub, x, thresholds, other, aliases) for p in preds]
+    buckets = [bucket_of(top, prob, labels, threshold) for top, prob in tops]
     return [t[0] for t in tops], [float(t[1]) for t in tops], buckets
 
 
-def bucket_of(pred, hub: str, x: str, thresholds: dict, other: float, aliases: dict) -> str:
-    # Inputs: one string's top-k GlotLID prediction (None for empty text), hub, target, {lang: calibrated
-    # minimum}, the top-label minimum for "other" and the alias table. Output: the bucket: the first of en,
-    # src (the hub; never reached in C1 where src = en) and x whose labels' summed probability reaches that
-    # language's minimum, else other_study for another study language, else other when the top label alone
-    # reaches `other`, else und.
-    lid = corpus_module("lid")
-    if pred is None:
+def bucket_of(top, prob: float, labels: dict, threshold: float) -> str:
+    # Inputs: one string's top GlotLID label and probability (None for empty text), {"en", "src", "x": label}
+    # and the threshold. Output: und when the top probability is below the threshold (or the text is empty),
+    # else the first of en, src (the hub; never reached in C1 where src = en) and x whose label is on top,
+    # else other.
+    if top is None or prob < threshold:
         return "und"
-    prob = {lang: lid.labels_prob(pred, aliases[lang]) for lang in dict.fromkeys(("en", hub, x, *STUDY11))}
-    passes = lambda lang: prob[lang] >= thresholds[lang]
-    named = [b for b, lang in (("en", "en"), ("src", hub), ("x", x)) if passes(lang)]
-    if named:
-        return named[0]
-    if any(passes(lang) for lang in STUDY11):
-        return "other_study"
-    return "other" if lid.top_label(pred)[1] >= other else "und"
+    return next((b for b in ("en", "src", "x") if labels[b] == top), "other")
 
 
 def lid_chunk(lid_model, ctx, trained, texts: dict, cfg: dict, x: str, crows, decoding: DecodingConfig) -> dict:
@@ -178,9 +168,7 @@ def lid_chunk(lid_model, ctx, trained, texts: dict, cfg: dict, x: str, crows, de
     out = run_batched(trained, texts[hub], crows, cfg["max_chars"], cfg["factor"], batching_from(icfg, True),
                       lens_step(trained, read))
     gens = [row[b] for b in range(trained.n_enc) for row in out]
-    aliases, k = corpus_module("lid").load_aliases(ctx), ctx.config(DataConfig).glotlid_top_k
-    thresholds = corpus_module("thresholds").load_thresholds(ctx)["lid"]
-    labels, probs, buckets = lid_buckets(lid_model, gens, hub, x, thresholds, cfg["lid_other_threshold"], aliases, k)
+    labels, probs, buckets = lid_buckets(lid_model, gens, hub, x, cfg["lid_threshold"])
     shape = lambda flat: [flat[b * len(crows):(b + 1) * len(crows)] for b in range(trained.n_enc)]
     return {"text": shape(gens), "label": shape(labels), "prob": shape(probs), "bucket": shape(buckets)}
 
@@ -288,13 +276,28 @@ def bucket_fractions(buckets, hub: str) -> dict:
     return {k: (None if k == "src" and hub == "en" else (b == k).mean(axis=1)) for k in BUCKETS}
 
 
+def identified_shares(frac: dict) -> dict:
+    # Input: per-layer bucket fractions. Output: {bucket: per-layer share among identified outputs} for every
+    # bucket except und (NaN for a layer with no identified output).
+    identified = 1.0 - frac["und"]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return {k: (None if v is None else np.where(identified > 0, v / identified, np.nan))
+                for k, v in frac.items() if k != "und"}
+
+
 def lid_summary(buckets, hub: str) -> dict:
-    # Inputs: buckets [L, n] and the hub. Output: per-layer bucket fractions and the across-layer statistics of
-    # the English fraction (rivals are all other buckets).
+    # Inputs: buckets [L, n] and the hub. Output: per-layer bucket fractions of all outputs and shares among
+    # identified (non-und) outputs, and the across-layer statistics of both English measures (rivals are the
+    # other buckets).
     frac = bucket_fractions(buckets, hub)
+    share = identified_shares(frac)
     rivals = [v for k, v in frac.items() if k != "en" and v is not None]
+    share_rivals = [v for k, v in share.items() if k != "en" and v is not None]
     return {"per_layer": {k: (None if v is None else v.tolist()) for k, v in frac.items()},
-            "en_frac_across_layers": across_layers(frac["en"], rivals)}
+            "per_layer_identified": {k: (None if v is None else nan_to_none(v)) for k, v in share.items()},
+            "en_frac_across_layers": across_layers(frac["en"], rivals),
+            "en_identified_across_layers": across_layers(np.nan_to_num(share["en"]),
+                                                         [np.nan_to_num(v) for v in share_rivals])}
 
 
 def lid_finish(uf, cfg: dict, rows) -> tuple:
@@ -360,8 +363,10 @@ def combined_table(lp_agg: dict, lid_agg: dict, agree: dict) -> dict:
     # (shares, LID fractions, agreement) and the across-layer statistics of both English measures.
     shares = {k: v for k, v in lp_agg["per_layer"].items() if k.startswith("share_")}
     lid_frac = {f"lid_{k}": v for k, v in lid_agg["per_layer"].items()}
-    return {"per_layer": {**shares, **lid_frac, **{k: nan_to_none(v) for k, v in agree.items()}},
+    lid_ident = {f"lid_identified_{k}": v for k, v in lid_agg["per_layer_identified"].items()}
+    return {"per_layer": {**shares, **lid_frac, **lid_ident, **{k: nan_to_none(v) for k, v in agree.items()}},
             "across_layers": {"share_en": lp_agg["en_share_across_layers"], "lid_en": lid_agg["en_frac_across_layers"],
+                              "lid_identified_en": lid_agg["en_identified_across_layers"],
                               "agreement_mean": float(np.nanmean(agree["agreement"]))}}
 
 
