@@ -6,12 +6,23 @@
 # COMET uses the reference-based Unbabel/wmt22-comet-da model through download_model,
 # load_from_checkpoint and predict, on one GPU when CUDA is available.
 # MetricX runs the official metricx24.predict module (no --qe) as `python -m` would, with the
-# repository as cwd, plus a padding collator so batches larger than one work.
+# repository as cwd, plus a padding collator so batches larger than one work and no Trainer logging
+# integrations; TensorFlow and JAX are blocked from importing (block_tf_jax), because a system copy built for
+# numpy 2 crashes this numpy<2 environment when transformers, TensorBoard or anything else pulls it in.
 
 import argparse
 import json
 import os
 import sys
+
+BLOCKED = ("tensorflow", "jax", "jaxlib", "flax")
+
+
+def block_tf_jax():
+    # Marks TensorFlow, JAX and Flax as absent (a None entry in sys.modules makes `import x` raise ImportError
+    # and find_spec return None), so every library falls back to its no-TensorFlow path. No output.
+    for name in BLOCKED:
+        sys.modules[name] = None
 
 
 def parse_args(argv):
@@ -74,13 +85,16 @@ def pad_collate(features):
 def score_metricx(rows, args):
     # Inputs: input rows (already in MetricX's {source, hypothesis, reference} format) and the
     # parsed arguments. Runs metricx24.predict as `python -m` would (runpy, __main__) with the
-    # repository as cwd and on sys.path, after installing the padding collator. Output: MetricX
+    # repository as cwd and on sys.path, after installing the padding collator and turning off the Trainer's
+    # reporting integrations (TensorBoard, W&B, ...). Output: MetricX
     # scores in [0, 25] (lower is better), in input order.
     import runpy
+    import transformers.integrations
     import transformers.trainer
     repo, here = os.path.abspath(args.metricx_repo), os.getcwd()
     out_path = os.path.abspath(args.output) + ".metricx.jsonl"
     os.environ.update(WANDB_DISABLED="true", WANDB_MODE="disabled")
+    transformers.integrations.get_available_reporting_integrations = lambda: []
     transformers.trainer.default_data_collator = pad_collate
     sys.path.insert(0, repo)
     sys.argv = metricx_argv(args, out_path)
@@ -100,8 +114,9 @@ SCORERS = {"comet": score_comet, "metricx": score_metricx}
 
 
 def main(argv=None):
-    # Input: the argument list (default sys.argv[1:]). Reads the rows, scores them with the chosen
-    # metric and writes the scores. Output: the process exit code (0).
+    # Input: the argument list (default sys.argv[1:]). Blocks TensorFlow/JAX, reads the rows, scores them with
+    # the chosen metric and writes the scores. Output: the process exit code (0).
+    block_tf_jax()
     args = parse_args(sys.argv[1:] if argv is None else argv)
     rows = read_rows(args.input)
     write_scores(args.output, SCORERS[args.metric](rows, args) if rows else [])
