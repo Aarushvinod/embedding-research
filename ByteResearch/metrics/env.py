@@ -3,8 +3,9 @@
 # and is created with --system-site-packages, so the CUDA torch is reused; uv is tried before venv.
 # requirements-metrics.txt is installed with pip, constrained to the base torch version so the
 # GPU torch is never replaced, and MetricX is cloned at its pinned commit into <metrics dir>/metricx.
-# A self-check then scores identical and gibberish pairs: an identical hypothesis must get COMET
-# above 0.9 and MetricX near 0, and gibberish must score worse on both.
+# A self-check then scores identical and gibberish pairs: an identical hypothesis must get COMET above 0.9,
+# gibberish must score at least 5 MetricX points worse than identical, and MetricX must give the same scores at
+# batch size 1 as batched (which checks the padding collator).
 # Each step is skipped when already done, and a marker JSON records the finished setup.
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ VERSIONS_SNIPPET = ("from importlib.metadata import version as v; import torch; 
 SELFCHECK_SRC = ["The weather is beautiful today.", "I am going to the market to buy fruit."]
 SELFCHECK_REF = ["Hali ya hewa ni nzuri leo.", "Ninaenda sokoni kununua matunda."]
 SELFCHECK_BAD = ["qzx vbn plorf tkk wqq", "zzzz kkkk wwww jjjj"]
+METRICX_MARGIN = 5.0
+METRICX_BATCH_TOL = 0.05
 
 
 def _run(cmd, cwd=None) -> None:
@@ -88,18 +91,31 @@ def clone_metricx(ctx):
     return repo
 
 
+def check_scores(metric: str, same, bad, single=None) -> bool:
+    # Inputs: the metric, its scores for identical and gibberish hypotheses and, for MetricX, the same rows
+    # scored one at a time. Output: whether COMET gives identical > 0.9 and gibberish lower, and MetricX
+    # (0-25, lower is better) puts every gibberish score at least METRICX_MARGIN above every identical one and
+    # gives the same scores at batch size 1 (within METRICX_BATCH_TOL), which checks the padding collator.
+    if metric == "comet":
+        return min(same) > 0.9 and max(bad) < min(same)
+    batched = list(same) + list(bad)
+    invariant = single is None or max(abs(a - b) for a, b in zip(batched, single)) <= METRICX_BATCH_TOL
+    return min(bad) - max(same) >= METRICX_MARGIN and invariant
+
+
 def self_check(ctx, metrics) -> dict:
-    # Inputs: Ctx and the neural metrics to check. Scores identical and gibberish hypotheses and
-    # asserts identical > 0.9 for COMET, identical < 2 for MetricX and gibberish worse for both.
-    # Output: {metric: {"identical": [...], "gibberish": [...]}}.
+    # Inputs: Ctx and the neural metrics to check. Scores identical and gibberish hypotheses (MetricX also at
+    # batch size 1) and asserts check_scores. Output: {metric: {"identical": [...], "gibberish": [...]}} plus
+    # "batch1" for MetricX.
     out = {}
     for metric in metrics:
-        scores = run_worker(ctx, metric, SELFCHECK_SRC * 2, SELFCHECK_REF + SELFCHECK_BAD, SELFCHECK_REF * 2)
+        args = (SELFCHECK_SRC * 2, SELFCHECK_REF + SELFCHECK_BAD, SELFCHECK_REF * 2)
+        scores = run_worker(ctx, metric, *args)
+        single = run_worker(ctx, metric, *args, batch=1) if metric == "metricx" else None
         same, bad = scores[:2], scores[2:]
-        out[metric] = {"identical": same, "gibberish": bad}
-        print(f"self-check {metric}: identical={same} gibberish={bad}", flush=True)
-        ok = min(same) > 0.9 and max(bad) < min(same) if metric == "comet" else max(same) < 2.0 and min(bad) > max(same)
-        if not ok:
+        out[metric] = {"identical": same, "gibberish": bad, **({"batch1": single} if single else {})}
+        print(f"self-check {metric}: {out[metric]}", flush=True)
+        if not check_scores(metric, same, bad, single):
             raise AssertionError(f"metrics self-check failed for {metric}: {out[metric]}")
     return out
 
