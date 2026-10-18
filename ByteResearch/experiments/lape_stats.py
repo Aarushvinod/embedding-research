@@ -91,7 +91,7 @@ def layer_counts(ids, d_ff: int, n_layers: int) -> np.ndarray:
 
 def different_script(hub: str, targets) -> list:
     # Inputs: a hub code and target codes. Output: the targets whose script differs from the hub's
-    # (for English this drops the Latin-script Swahili and Tagalog).
+    # (for English this drops the Latin-script Swahili, Albanian and Estonian).
     return [t for t in targets if LANGUAGES[t].script != LANGUAGES[hub].script]
 
 

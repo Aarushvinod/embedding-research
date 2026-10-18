@@ -3,7 +3,8 @@
 # revision in its manifest, verifies its SHA-256 and loads it with fasttext.
 # predict calls model.f.predict directly, because fasttext's Python wrapper breaks under numpy 2.
 # Every language is identified by exactly one GlotLID label, the one of its FLORES variety (e.g. arb_Arab for
-# Modern Standard Arabic, swh_Latn for Swahili), except LID_LABEL_OVERRIDES (Tagalog is GlotLID's fil_Latn);
+# Modern Standard Arabic, swh_Latn for Swahili), except LID_LABEL_OVERRIDES (fil_Latn for Tagalog, fas_Arab for
+# Persian, ekk_Latn for Estonian);
 # lid_labels checks that every needed label exists in the model.
 # A text counts as language L when L's label is GlotLID's top label with a probability of at least L's
 # threshold (lid_ok); own_top_prob gives that probability (0 when another label is on top) and label_prob

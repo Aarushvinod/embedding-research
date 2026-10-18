@@ -1,7 +1,7 @@
 # NTREX-128 evaluation data for the eleven study languages (eight targets and three hubs) and the candidates.
 # build_ntrex downloads each language's file from raw.githubusercontent.com at the pinned commit.
-# English uses newstest2019-src.eng.txt and the others newstest2019-ref.{code}.txt (fil for Tagalog, swa
-# for Swahili, arb for Arabic, rus for Russian, and so on).
+# English uses newstest2019-src.eng.txt and the others newstest2019-ref.{code}.txt (swa for Swahili, fas for
+# Persian, srp-Cyrl for Serbian, rus for Russian, and so on).
 # Every file must have exactly 1997 lines.
 # The raw files are kept under ROOT/data/ntrex/raw and a row-aligned ntrex.json keyed by our short codes is
 # written next to them; load_ntrex verifies that JSON against the manifest before returning it.

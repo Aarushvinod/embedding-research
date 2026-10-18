@@ -68,15 +68,15 @@ class NllbSource:
 
 _LANG_ROWS = (
     ("sw", "Swahili", "swh_Latn", "swa", "sw", "sw", "Latn", "target"),
-    ("tl", "Tagalog", "tgl_Latn", "fil", "tl", "tl", "Latn", "target"),
-    ("ka", "Georgian", "kat_Geor", "kat", "ka", "ka", "Geor", "target"),
-    ("hy", "Armenian", "hye_Armn", "hye", "hy", "hy", "Armn", "target"),
+    ("sq", "Albanian", "als_Latn", "sqi", "sq", "sq", "Latn", "target"),
+    ("et", "Estonian", "est_Latn", "est", "et", "et", "Latn", "target"),
+    ("ur", "Urdu", "urd_Arab", "urd", "ur", "ur", "Arab", "target"),
+    ("sr", "Serbian", "srp_Cyrl", "srp-Cyrl", "sr", "sr", "Cyrl", "target"),
     ("si", "Sinhala", "sin_Sinh", "sin", "si", "si", "Sinh", "target"),
     ("mr", "Marathi", "mar_Deva", "mar", "mr", "mr", "Deva", "target"),
     ("ta", "Tamil", "tam_Taml", "tam", "ta", "ta", "Taml", "target"),
-    ("ml", "Malayalam", "mal_Mlym", "mal", "ml", "ml", "Mlym", "target"),
     ("en", "English", "eng_Latn", "eng", "en", "en", "Latn", "hub"),
-    ("ar", "Arabic", "arb_Arab", "arb", "ar", "ar", "Arab", "hub"),
+    ("fa", "Persian", "pes_Arab", "fas", "fa", "fa", "Arab", "hub"),
     ("ru", "Russian", "rus_Cyrl", "rus", "ru", "ru", "Cyrl", "hub"),
     ("es", "Spanish", "spa_Latn", None, None, None, "Latn", "control"),
     ("zh", "Chinese", "zho_Hans", None, None, None, "Hans", "control"),
@@ -86,18 +86,18 @@ LID_LABEL_OVERRIDES: dict = {"tl": "fil_Latn", "fa": "fas_Arab", "et": "ekk_Latn
 
 _CANDIDATE_ROWS = (
     ("bg", "Bulgarian", "bul_Cyrl", "bul", "bg", "bg", "Cyrl", "candidate"),
-    ("ur", "Urdu", "urd_Arab", "urd", "ur", "ur", "Arab", "candidate"),
     ("bn", "Bengali", "ben_Beng", "ben", "bn", "bn", "Beng", "candidate"),
     ("ms", "Malay", "zsm_Latn", "msa", "ms", "ms", "Latn", "candidate"),
-    ("sq", "Albanian", "als_Latn", "sqi", "sq", "sq", "Latn", "candidate"),
     ("uk", "Ukrainian", "ukr_Cyrl", "ukr", "uk", "uk", "Cyrl", "candidate"),
-    ("sr", "Serbian", "srp_Cyrl", "srp-Cyrl", "sr", "sr", "Cyrl", "candidate"),
-    ("et", "Estonian", "est_Latn", "est", "et", "et", "Latn", "candidate"),
+    ("tl", "Tagalog", "tgl_Latn", "fil", "tl", "tl", "Latn", "candidate"),
+    ("ka", "Georgian", "kat_Geor", "kat", "ka", "ka", "Geor", "candidate"),
+    ("hy", "Armenian", "hye_Armn", "hye", "hy", "hy", "Armn", "candidate"),
+    ("ml", "Malayalam", "mal_Mlym", "mal", "ml", "ml", "Mlym", "candidate"),
 )
 CANDIDATE_LANGUAGES: dict = {row[0]: Language(*row, tag_k=-1) for row in _CANDIDATE_ROWS}
 CANDIDATES: tuple = tuple(CANDIDATE_LANGUAGES)
 _CANDIDATE_HUB_ROWS = (
-    ("fa", "Persian", "pes_Arab", "fas", "fa", "fa", "Arab", "candidate_hub"),
+    ("ar", "Arabic", "arb_Arab", "arb", "ar", "ar", "Arab", "candidate_hub"),
 )
 CANDIDATE_HUB_LANGUAGES: dict = {row[0]: Language(*row, tag_k=-1) for row in _CANDIDATE_HUB_ROWS}
 CANDIDATE_HUBS: tuple = tuple(CANDIDATE_HUB_LANGUAGES)
@@ -129,7 +129,7 @@ ARCHS: tuple = ("byt5", "mt5")
 
 CONDITIONS: dict[str, Condition] = {
     "C1": Condition("C1", "en", TARGETS),
-    "C2": Condition("C2", "ar", TARGETS),
+    "C2": Condition("C2", "fa", TARGETS),
     "C3": Condition("C3", "ru", TARGETS),
 }
 
@@ -137,7 +137,7 @@ TESTSETS: tuple = ("flores_devtest", "ntrex")
 METRICS: tuple = ("chrf_pp", "spbleu", "comet", "metricx")
 
 SMOKE_MODELS: tuple = ("byt5-small", "mt5-small")
-SMOKE_TARGETS: tuple = ("sw", "ka")
+SMOKE_TARGETS: tuple = ("sw", "sr")
 SMOKE_CONDITIONS: tuple = ("C1", "C2")
 
 _ALLENAI = "https://storage.googleapis.com/allennlp-data-bucket/nllb/{name}.gz"

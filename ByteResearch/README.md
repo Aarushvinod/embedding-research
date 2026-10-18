@@ -1,7 +1,7 @@
 # ByteResearch
 
 ByteResearch fine-tunes ByT5 and mT5 encoder-decoders (small, base, large) for translation from a hub
-language (C1 English, C2 Arabic, C3 Russian) into a set of target languages. It then evaluates the fine-tuned
+language (C1 English, C2 Persian, C3 Russian) into a set of target languages. It then evaluates the fine-tuned
 models and runs five interpretability experiments on them. Everything runs through one CLI made of small,
 resumable stages, and every result is a JSON file with the same envelope.
 
@@ -103,13 +103,14 @@ the current selections.
 | `data.candidate_wiki` | candidate | Wikipedia sentences for each candidate target and candidate hub |
 | `data.candidate_table` | - | prints and saves `ROOT/data/nllb/CANDIDATE_TABLE.json` |
 
-Candidate targets (`CANDIDATE_LANGUAGES` in `core/config.py`: Bulgarian, Urdu, Bengali, Malay, Albanian,
-Ukrainian, Serbian, Estonian) and candidate hubs (`CANDIDATE_HUB_LANGUAGES`: Persian) get all their data prepared
+Candidate targets (`CANDIDATE_LANGUAGES` in `core/config.py`: Bulgarian, Bengali, Malay, Ukrainian, and the former
+targets Tagalog, Georgian, Armenian, Malayalam) and candidate hubs (`CANDIDATE_HUB_LANGUAGES`: Arabic, the former
+C2 hub) get all their data prepared
 exactly as targets and hubs do, but nothing trains on them:
 - FLORES and NTREX include them, and so does the exclusion set; each has a calibrated LID threshold.
 - Their pairs go through the same filters and cap, into the same `ROOT/data/nllb/` folders: every hub to each
-  candidate target, and each candidate hub to every target and candidate it has NLLB bitext with (Persian has
-  none with Georgian, Armenian or Bulgarian; `NLLB_UNAVAILABLE`).
+  candidate target, and each candidate hub to every target and candidate it has NLLB bitext with (pairs NLLB lacks,
+  such as Persian with Georgian, Armenian or Bulgarian, are listed in `NLLB_UNAVAILABLE`).
 - Their Wikipedia sentences are sampled too.
 
 Adding candidates changes the shared caches' language set: FLORES, NTREX, the exclusion set and the thresholds
