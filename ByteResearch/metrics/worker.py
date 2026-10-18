@@ -7,20 +7,21 @@
 # load_from_checkpoint and predict, on one GPU when CUDA is available.
 # MetricX runs the official metricx24.predict module (no --qe) as `python -m` would, with the
 # repository as cwd, plus a padding collator so batches larger than one work and no Trainer logging
-# integrations; TensorFlow and JAX are blocked from importing (block_tf_jax), because a system copy built for
-# numpy 2 crashes this numpy<2 environment when transformers, TensorBoard or anything else pulls it in.
+# integrations; TensorFlow, JAX and torchvision are blocked from importing (block_tf_jax): system copies built
+# for numpy 2 (or, for torchvision, newer than datasets 3.x expects) crash this pinned environment, and
+# neither metric needs them.
 
 import argparse
 import json
 import os
 import sys
 
-BLOCKED = ("tensorflow", "jax", "jaxlib", "flax")
+BLOCKED = ("tensorflow", "jax", "jaxlib", "flax", "torchvision")
 
 
 def block_tf_jax():
-    # Marks TensorFlow, JAX and Flax as absent (a None entry in sys.modules makes `import x` raise ImportError
-    # and find_spec return None), so every library falls back to its no-TensorFlow path. No output.
+    # Marks TensorFlow, JAX, Flax and torchvision as absent (a None entry in sys.modules makes `import x` raise
+    # ImportError and find_spec return None), so every library takes its path without them. No output.
     for name in BLOCKED:
         sys.modules[name] = None
 
