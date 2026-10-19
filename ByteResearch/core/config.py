@@ -264,7 +264,7 @@ class TrainConfig:
     lrs: tuple = (1e-4, 3e-4, 1e-3)
     sweep_steps: int = 3000
     sweep_directions: tuple = (("C1", "sw"), ("C2", "bn"), ("C3", "sr"))
-    epochs: int = 3
+    epochs: int = 15
     max_steps: int | None = None
     warmup_steps: int = 1000
     global_batch: int = 64

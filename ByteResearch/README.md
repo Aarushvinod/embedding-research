@@ -183,8 +183,8 @@ fraction of all outputs and its share among identified (non-und) outputs.
   direction of a model then trains with that model's selected LR.
 - Dev selection: greedy chrF++ on a fixed, seeded subset of 200 FLORES-dev sentences of the direction's target
   (`TrainConfig.dev_per_target`), evaluated every 500 steps; early stopping after 5 evaluations without
-  improvement, at most 3 epochs, warmup 1000 steps, Adafactor with a constant-with-warmup schedule, bf16,
-  512-character cap.
+  improvement, at most 15 epochs (a cap; early stopping normally ends the run first, and `train.json` records
+  which one did), warmup 1000 steps, Adafactor with a constant-with-warmup schedule, bf16, 512-character cap.
 
 `train` uses `--lr` if given, otherwise the `sweep.select` result. Options are `--per-device-batch`,
 `--max-steps` and, for `sweep`, `--keep-checkpoints`.
