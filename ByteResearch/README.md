@@ -1,7 +1,7 @@
 # ByteResearch
 
 ByteResearch fine-tunes ByT5 and mT5 encoder-decoders (small, base, large) for translation from a hub
-language (C1 English, C2 Persian, C3 Russian) into a set of target languages. It then evaluates the fine-tuned
+language (C1 English, C2 Persian, C3 Russian) into a set of target languages, one model per direction. It then evaluates the fine-tuned
 models and runs five interpretability experiments on them. Everything runs through one CLI made of small,
 resumable stages, and every result is a JSON file with the same envelope.
 
@@ -57,8 +57,9 @@ ROOT/envs/metrics, ROOT/envs/metricx (default METRICS_DIR), ROOT/tmp
 ROOT/smoke/...                                                           same layout, --smoke only
 ```
 
-`run_id` is `{model}__{condition}` (e.g. `byt5-small__C2`). Sweep cells use
-`{model}__{condition}__lr{lr}`, and ByT5-vs-mT5 comparisons use `{size}__{condition}`.
+`run_id` is `{model}__{condition}__{target}` for a trained direction (e.g. `byt5-small__C2__ur`), and
+`{model}__{condition}` for units without a target. Sweep cells use `{model}__{condition}__{target}__lr{lr}`,
+and ByT5-vs-mT5 comparisons use `{size}__{condition}`.
 
 ## CLI
 
@@ -162,9 +163,26 @@ fraction of all outputs and its share among identified (non-und) outputs.
 
 | Stage | Grid | What it does |
 |---|---|---|
-| `sweep` | model x condition x lr | short fixed-step run per LR (DDP) |
-| `sweep.select` | model | picks the LR with the best mean dev chrF++ over C1-C3, saved to `results/sweep/{model}/selection.json` |
-| `train` | model x condition | full fine-tuning with early stopping on dev chrF++ (DDP) |
+| `sweep` | model x sweep direction x lr | short fixed-step run per LR on each sweep direction (DDP) |
+| `sweep.select` | model | picks one LR per model, the best mean final dev chrF++ over the sweep directions, saved to `results/sweep/{model}/selection.json` |
+| `train` | model x condition x target | full fine-tuning of one direction with early stopping on dev chrF++ (DDP) |
+
+- One model per direction: each (model, condition, target) model trains only on the NLLB pair file of the
+  condition's hub and that target (`--target` selects targets).
+- No target tag and no prompt: the encoder sees the source sentence only, the decoder uses standard teacher
+  forcing (decoder input `[start, y...]`, labels `[y..., eos]`) and generation starts from the decoder start
+  token. Sentinel ids are suppressed during generation. Checkpoint meta records `"tags": {}` and
+  `"decoder_prefix": "start"`.
+- Loss: the standard token-level cross-entropy, the mean over all label tokens of the global batch, with the
+  token count taken across gradient-accumulation steps and GPUs, so every batch layout gives the same loss.
+- LR sweep: `TrainConfig.lrs` (1e-4, 3e-4, 1e-3) x `TrainConfig.sweep_steps` (3000) on the fixed
+  `TrainConfig.sweep_directions` (C1-sw, C2-ur, C3-sr; `--condition` and `--target` only narrow them, and the
+  selection needs all of them). Every
+  direction of a model then trains with that model's selected LR.
+- Dev selection: greedy chrF++ on a fixed, seeded subset of 200 FLORES-dev sentences of the direction's target
+  (`TrainConfig.dev_per_target`), evaluated every 500 steps; early stopping after 5 evaluations without
+  improvement, at most 3 epochs, warmup 1000 steps, Adafactor with a constant-with-warmup schedule, bf16,
+  512-character cap.
 
 `train` uses `--lr` if given, otherwise the `sweep.select` result. Options are `--per-device-batch`,
 `--max-steps` and, for `sweep`, `--keep-checkpoints`.
@@ -222,7 +240,7 @@ Notes:
   - any dotted prefix of a stage name.
 - Partial work resumes.
   - **Training** resumes from the newest checkpoint that has a `COMPLETE` marker; half-written checkpoints
-    are deleted. Resume refuses if the config, data, batch geometry or tags have changed.
+    are deleted. Resume refuses if the config, data, batch geometry, tags or decoder prefix have changed.
   - **Translations** count as done only while their data, decoding settings and best checkpoint are
     unchanged; after retraining, `translate` refuses the old file unless `--force` is given. The LR selection
     is likewise recomputed when a sweep cell changes.
@@ -240,9 +258,10 @@ Notes:
 `--smoke` runs a tiny end-to-end check in `ROOT/smoke/`, with this scope:
 - models: byt5-small and mt5-small;
 - conditions: C1 and C2;
-- targets: `SMOKE_TARGETS` from `core/config.py` (sw and ka);
+- targets: `SMOKE_TARGETS` from `core/config.py` (sw and sr);
 - data: 2k pairs per NLLB file and 500 Wikipedia sentences per language;
-- training: 60 steps (eval and save every 20), global batch 8;
+- training: 60 steps (eval and save every 20), global batch 8, 8 dev sentences, sweep directions C1-sw and
+  C2-sr;
 - evaluation: 64 rows; bootstrap: 200 resamples.
 
 `--pilot` runs interp stages on fixed, seeded row subsets, with reduced grids for steering, stitching and
@@ -262,8 +281,8 @@ N-GPU runs train on the same batches. Use `--per-device-batch` to fit GPU memory
 All other stages run in one process, on `cuda:0` (or `--device`).
 
 ```bash
-python -m ByteResearch.run train --model byt5-small --condition C2            # one GPU
-python -m ByteResearch.run train --model byt5-small --condition C2 --gpus 4   # four GPUs
+python -m ByteResearch.run train --model byt5-small --condition C2 --target ur            # one GPU
+python -m ByteResearch.run train --model byt5-small --condition C2 --target ur --gpus 4   # four GPUs
 ```
 
 ## Results
@@ -295,7 +314,7 @@ Main files:
 | File | Contents |
 |---|---|
 | `results/train/{run_id}/train.json` | training log history, best step, stop reason |
-| `results/sweep/{model}__{condition}__lr{lr}/train.json` | one sweep cell |
+| `results/sweep/{model}__{condition}__{target}__lr{lr}/train.json` | one sweep cell |
 | `results/sweep/{model}/selection.json` | selected LR |
 | `results/translate/{run_id}/{testset}.json` | hypotheses, plus each scored metric |
 | `results/compare/{size}__{condition}/{testset}.json` | ByT5 vs mT5 cells; `aggregate.pooled` and `aggregate.wins` per metric |
@@ -307,8 +326,8 @@ Main files:
 - Location: `ROOT/checkpoints/{run_id}/checkpoint-{step}/`.
 - Training saves every 500 steps and keeps the last 3 plus the best (`save_total_limit=4`).
 - Each checkpoint holds the weights, the tokenizer, the trainer/RNG state, `byteresearch_meta.json`
-  (config, data hash, language-tag ids, seeds, world size, versions) and a `COMPLETE` marker.
+  (config, direction data hash, tagless decoder prefix, seeds, world size, versions) and a `COMPLETE` marker.
 - When training ends, the best checkpoint is exported to `ROOT/checkpoints/{run_id}/best/`, which evaluation
   and interp load.
-- Sweep cells checkpoint under `ROOT/checkpoints/{model}__{condition}__lr{lr}/`. These are deleted once the
+- Sweep cells checkpoint under `ROOT/checkpoints/{model}__{condition}__{target}__lr{lr}/`. These are deleted once the
   cell finishes unless `--keep-checkpoints` is given.

@@ -5,8 +5,8 @@
 # It also defines the six models, the three fine-tuning conditions, the hub x target NLLB source table, the
 # candidate targets and candidate hubs (prepared exactly like targets and hubs so promoting one reuses its
 # data, but never trained on) and the pinned revisions of every external resource, and validates them on import.
-# Frozen config dataclasses carry the defaults from the approved plan for data, training,
-# decoding and interpretability, and smoke_overrides shrinks them for the smoke subtree.
+# Frozen config dataclasses carry the defaults from the approved plan for data, training (including the
+# LR-sweep directions), decoding and interpretability, and smoke_overrides shrinks them for the smoke subtree.
 # Resolver helpers turn CLI selections such as "all", "small" or "byt5,mt5-base" into lists.
 
 from __future__ import annotations
@@ -260,10 +260,12 @@ class DataConfig:
 
 @dataclass(frozen=True)
 class TrainConfig:
-    # Training defaults: LR sweep grid and length, full-run epochs, warmup, batch geometry,
-    # checkpoint/eval cadence, early stopping, truncation, optimizer and the fixed dev subset.
+    # Training defaults: LR sweep grid, length and the (condition, target) directions it runs on, full-run
+    # epochs, warmup, batch geometry, checkpoint/eval cadence, early stopping, truncation, optimizer and the
+    # size of the fixed FLORES-dev subset each direction is selected on.
     lrs: tuple = (1e-4, 3e-4, 1e-3)
     sweep_steps: int = 3000
+    sweep_directions: tuple = (("C1", "sw"), ("C2", "ur"), ("C3", "sr"))
     epochs: int = 3
     max_steps: int | None = None
     warmup_steps: int = 1000
@@ -282,7 +284,7 @@ class TrainConfig:
     max_grad_norm: float = 1.0
     logging_steps: int = 50
     dataloader_workers: int = 2
-    dev_per_target: int = 63
+    dev_per_target: int = 200
     seed: int = 0
 
 
@@ -328,7 +330,7 @@ SMOKE: dict = {
     "TrainConfig": {
         "sweep_steps": 60, "max_steps": 60, "warmup_steps": 10, "eval_steps": 20,
         "save_steps": 20, "global_batch": 8, "per_device_batch": 8, "dev_per_target": 8,
-        "logging_steps": 10,
+        "logging_steps": 10, "sweep_directions": (("C1", "sw"), ("C2", "sr")),
     },
     "DecodingConfig": {},
     "InterpConfig": {"pilot_rows": 8, "pilot_wiki": 100, "n_boot": 200, "flush_seconds": 5.0},
@@ -432,9 +434,9 @@ def lang_field(codes, attr: str) -> list:
 def validate_registry() -> None:
     # Checks the language registry and everything derived from it: tag sentinels within mT5's 100
     # (k <= MAX_TAG_K), scripts covered by SCRIPT_RANGES, NTREX/CCMatrix/Wikipedia codes for every study
-    # language, GlotLID label overrides, smoke selections and controls drawn from the registry, one NLLB
-    # source per hub and target, and candidates that are new codes with NTREX/CCMatrix/Wikipedia codes and
-    # covered scripts. Raises ValueError naming every problem. No output.
+    # language, GlotLID label overrides, smoke selections, sweep directions and controls drawn from the
+    # registry, one NLLB source per hub and target, and candidates that are new codes with
+    # NTREX/CCMatrix/Wikipedia codes and covered scripts. Raises ValueError naming every problem. No output.
     problems = [f"tag k {l.tag_k} of {c} exceeds {MAX_TAG_K}; lower TAG_K0" for c, l in LANGUAGES.items()
                 if l.tag_k > MAX_TAG_K]
     problems += [f"{c}: script {l.script} has no SCRIPT_RANGES entry" for c, l in LANGUAGES.items()
@@ -452,6 +454,9 @@ def validate_registry() -> None:
     problems += [f"smoke condition {c} is not a condition" for c in SMOKE_CONDITIONS if c not in CONDITIONS]
     problems += [f"condition {k} uses unknown languages" for k, c in CONDITIONS.items()
                  if c.hub not in HUBS or not set(c.targets) <= set(TARGETS)]
+    sweeps = TrainConfig().sweep_directions + smoke_overrides(TrainConfig()).sweep_directions
+    problems += [f"sweep direction {c}-{t} is not a condition target" for c, t in sweeps
+                 if c not in CONDITIONS or t not in CONDITIONS[c].targets]
     problems += [f"steering control {c} is not a control" for c in InterpConfig().steer_controls if c not in CONTROLS]
     problems += [f"NLLB source missing for {h}-{x}" for h in HUBS for x in TARGETS if (h, x) not in NLLB_SOURCES]
     if problems:

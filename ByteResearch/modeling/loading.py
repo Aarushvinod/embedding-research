@@ -1,9 +1,10 @@
 # Model and tokenizer loading for training, evaluation and interpretability.
 # load_pretrained fetches a Hugging Face ByT5 or mT5 checkpoint by registry key.
-# load_trained opens one of our fine-tuned checkpoints (best, latest complete, or a given step)
-# together with its byteresearch_meta.json, whose stored tag ids are re-verified on load.
-# Both paths produce a Trained bundle with the model, tokenizer, tag ids, generation suppression
-# ids, checkpoint meta and the architecture sizes interpretability code needs.
+# load_trained opens one of our fine-tuned checkpoints (best, latest complete, or a given step; per direction
+# when a target is given) with its byteresearch_meta.json, which records a tagless model ("tags": {} and
+# "decoder_prefix": "start", the trained format) or, for legacy checkpoints, tag ids re-verified on load.
+# Both paths produce a Trained bundle with the model, tokenizer, tag ids (empty when tagless), generation
+# suppression ids, checkpoint meta and the architecture sizes interpretability code needs.
 # prepare_for_interp sets eval mode, disables gradient checkpointing and TF32, enables the KV
 # cache, casts to float32 and asserts gated-GELU FFNs with distinct act modules.
 # Models load through AutoModelForSeq2SeqLM (mT5 keeps its untied LM head), and free_memory, release
@@ -18,17 +19,20 @@ from dataclasses import dataclass, field
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-from ..core.config import ALL_LANGS, MODELS
+from ..core.config import MODELS
 from ..core.io import read_json, sha256_file
 from ..core.paths import META_FILE, run_id
+from .encode import prefix_len
 from .tags import suppress_ids, tag_ids
+
+TAGLESS_PREFIX = "start"
 
 
 @dataclass
 class Trained:
-    # A loaded model bundle: model, tokenizer, {lang: tag id}, generation suppression ids,
-    # checkpoint meta, architecture family, encoder/decoder layer counts, d_model and d_ff, plus
-    # the registry key and condition when known.
+    # A loaded model bundle: model, tokenizer, {lang: tag id} (empty for a tagless model), generation
+    # suppression ids, checkpoint meta, architecture family, encoder/decoder layer counts, d_model and
+    # d_ff, plus the registry key and condition when known.
     model: object
     tok: object
     tags: dict
@@ -51,10 +55,17 @@ class Trained:
         # Input: language code. Output: its tag id; KeyError when the bundle has no tag for it.
         return self.tags[lang]
 
-    def tags_for(self, langs) -> list:
-        # Input: one language code or a per-row sequence of codes. Output: the per-row tag ids
-        # (a single code yields a one-element list).
+    def tags_for(self, langs):
+        # Input: one language code or a per-row sequence of codes. Output: the per-row tag ids (a single
+        # code yields a one-element list), or None for a tagless model, whose decoder prefix is [start].
+        if not self.tags:
+            return None
         return [self.tags[langs]] if isinstance(langs, str) else [self.tags[c] for c in langs]
+
+    @property
+    def prefix_len(self) -> int:
+        # Output: the length of this model's decoder prefix (1 for [start], 2 for [start, tag]).
+        return prefix_len(self.tags or None)
 
 
 def arch_of(model) -> str:
@@ -64,10 +75,10 @@ def arch_of(model) -> str:
 
 
 def make_trained(model, tok, tags=None, meta=None, arch=None, key=None, condition=None) -> Trained:
-    # Inputs: model, tokenizer, optional tag dict (default: looked up for all study and control languages), meta,
-    # arch, registry key and condition. Output: the Trained bundle with suppression ids and sizes.
+    # Inputs: model, tokenizer, optional tag dict (default: none, a tagless model), meta, arch, registry key
+    # and condition. Output: the Trained bundle with suppression ids and sizes.
     cfg = model.config
-    return Trained(model=model, tok=tok, tags=dict(tags or tag_ids(tok, ALL_LANGS)),
+    return Trained(model=model, tok=tok, tags=dict(tags or {}),
                    suppress=suppress_ids(tok, cfg.vocab_size), meta=dict(meta or {}),
                    arch=arch or arch_of(model), n_enc=cfg.num_layers, n_dec=cfg.num_decoder_layers,
                    d_model=cfg.d_model, d_ff=cfg.d_ff, key=key, condition=condition)
@@ -89,11 +100,16 @@ def load_pretrained(model_key: str, dtype=torch.float32, device=None):
 
 
 def check_meta_tags(meta: dict, tok) -> dict:
-    # Inputs: checkpoint meta and tokenizer. Output: the stored {lang: id} tags after verifying that
-    # encoding each language's sentinel still yields the stored id; raises ValueError otherwise.
+    # Inputs: checkpoint meta and tokenizer. Output: {} for tagless meta ("decoder_prefix": "start", no
+    # tags), else the stored {lang: id} tags after verifying that encoding each language's sentinel still
+    # yields the stored id; raises ValueError for tags under a tagless prefix, a mismatch or no tags at all.
     stored = {k: int(v) for k, v in (meta.get("tags") or {}).items()}
+    if meta.get("decoder_prefix") == TAGLESS_PREFIX:
+        if stored:
+            raise ValueError(f"checkpoint meta is tagless but lists tags {stored}")
+        return {}
     if not stored:
-        raise ValueError("checkpoint meta has no tags")
+        raise ValueError("checkpoint meta has no tags and does not mark the model tagless")
     fresh = tag_ids(tok, list(stored))
     if fresh != stored:
         raise ValueError(f"tag ids in meta {stored} differ from tokenizer lookup {fresh}")
@@ -101,11 +117,12 @@ def check_meta_tags(meta: dict, tok) -> dict:
 
 
 def load_trained(ctx, model_key: str, condition: str, which="best", dtype=torch.float32, device=None,
-                 lr=None, for_interp: bool = True) -> Trained:
+                 lr=None, for_interp: bool = True, target=None) -> Trained:
     # Inputs: Ctx, model key, condition, which checkpoint ("best", "latest" or a step), dtype,
-    # device (default ctx.device), optional sweep lr and whether to apply prepare_for_interp.
-    # Output: the Trained bundle with tags read from byteresearch_meta.json.
-    ckpt = ctx.paths.checkpoint_for(run_id(model_key, condition, lr), which)
+    # device (default ctx.device), optional sweep lr, whether to apply prepare_for_interp and the target of a
+    # per-direction model (None for a model__condition run). Output: the Trained bundle with the tags (or
+    # tagless prefix) read from byteresearch_meta.json.
+    ckpt = ctx.paths.checkpoint_for(run_id(model_key, condition, target, lr), which)
     meta = read_json(ckpt / META_FILE)
     if meta is None:
         raise FileNotFoundError(f"missing or unreadable {ckpt / META_FILE}")
@@ -169,10 +186,11 @@ def loaded(ctx, model_key: str, condition: str, **kwargs):
         release(trained)
 
 
-def checkpoint_info(ctx, model_key: str, condition: str, which="best") -> dict:
-    # Inputs: Ctx, model key, condition and which checkpoint. Output: {"path", "which", "step", "lr",
-    # "meta_sha256"} from its byteresearch_meta.json (step/lr/hash None when the meta is missing).
-    ckpt = ctx.paths.checkpoint_for(run_id(model_key, condition), which)
+def checkpoint_info(ctx, model_key: str, condition: str, which="best", target=None) -> dict:
+    # Inputs: Ctx, model key, condition, which checkpoint and the optional per-direction target. Output:
+    # {"path", "which", "step", "lr", "meta_sha256"} from its byteresearch_meta.json (step/lr/hash None
+    # when the meta is missing).
+    ckpt = ctx.paths.checkpoint_for(run_id(model_key, condition, target), which)
     meta_path = ckpt / META_FILE
     meta = read_json(meta_path) or {}
     return {"path": ctx.paths.relative(ckpt), "which": which, "step": meta.get("step"), "lr": meta.get("lr"),

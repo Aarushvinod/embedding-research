@@ -1,12 +1,15 @@
-# The Seq2SeqTrainer subclass used for every ByteResearch fine-tuning run.
-# Its loss is a per-sequence average: float32 token cross-entropy, summed per row, divided by that
-# row's own label count and averaged over rows, so long byte sequences are not up-weighted.
-# Every training log entry gains per-target losses, a digest of the exact examples seen per step,
-# examples seen, throughput, peak memory and timestamps, aggregated over all DDP ranks.
-# Evaluation is replaced by greedy decoding of a fixed FLORES-dev subset through the shared
-# interp.scoring generation path, sharded over ranks and gathered so every rank gets identical
-# macro and per-target chrF++, all inside an RNG-preserving block so resume stays exact.
-# VOLATILE_KEYS lists the timing and memory fields that legitimately differ between runs.
+# The Seq2SeqTrainer subclass used for every ByteResearch fine-tuning run (one hub-to-target direction).
+# Its loss is the standard token-level cross-entropy: summed over every non-ignored label token in float32 and
+# divided by the label-token count of the whole global batch, which the Trainer counts across gradient-
+# accumulation micro-batches and, with average_tokens_across_devices, all-reduces over DDP ranks.
+# The Trainer then scales each rank's loss by the world size (DDP averages gradients) and does not divide by
+# the accumulation steps again, so any rank x accumulation layout gives the model's own mean loss over the
+# global batch, which a plain per-micro-batch mean (T5's built-in loss under the Trainer) would not.
+# Training logs gain a digest of the exact examples seen per step, examples seen, throughput, peak memory
+# and timestamps, aggregated over all DDP ranks, and VOLATILE_KEYS lists the fields that differ between runs.
+# Evaluation is replaced by greedy decoding of a fixed FLORES-dev subset from the [start] prefix through the
+# shared interp.scoring generation path, sharded over ranks and gathered so every rank gets the same chrF++,
+# all inside an RNG-preserving block so resume stays exact.
 
 from __future__ import annotations
 
@@ -35,25 +38,22 @@ VOLATILE_KEYS = frozenset({
 MODEL_KEYS = ("input_ids", "attention_mask", "decoder_input_ids", "decoder_attention_mask")
 
 
-def per_sequence_loss(logits: torch.Tensor, labels: torch.Tensor) -> tuple:
-    # Inputs: logits [B, T, V] and labels [B, T] (-100 ignored). Output: (scalar loss, per-row loss
-    # [B]); token CE in float32, summed per row and divided by that row's label count, mean over rows.
-    tok = F.cross_entropy(logits.float().reshape(-1, logits.shape[-1]), labels.reshape(-1),
-                          ignore_index=IGNORE, reduction="none").view(labels.shape)
-    mask = labels.ne(IGNORE)
-    per_row = (tok * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-    return per_row.mean(), per_row
+def token_loss(outputs, labels: torch.Tensor, num_items_in_batch=None) -> torch.Tensor:
+    # Inputs: model outputs with logits [B, T, V], labels [B, T] (-100 ignored) and the label-token count of
+    # the global batch (None: this batch's own count). Output: the scalar token-level cross-entropy, the
+    # float32 sum over label tokens divided by that count (the model's own mean loss for a single batch).
+    logits = outputs["logits"]
+    labels = labels.to(logits.device)
+    total = F.cross_entropy(logits.float().reshape(-1, logits.shape[-1]), labels.reshape(-1),
+                            ignore_index=IGNORE, reduction="sum")
+    count = labels.ne(IGNORE).sum() if num_items_in_batch is None else num_items_in_batch
+    return total / count
 
 
-def dev_chrf(items, hyps, targets) -> dict:
-    # Inputs: DevItems, hypotheses aligned to them and the target order. Output: {"chrf_pp": macro
-    # mean over targets, "chrf_pp_<t>": corpus chrF++ of target t}.
-    metric = chrf_metric()
-    per = {}
-    for t in targets:
-        pairs = [(h, it.ref) for it, h in zip(items, hyps) if it.target == t]
-        per[t] = metric.corpus_score([p[0] for p in pairs], [[p[1] for p in pairs]]).score
-    return {"chrf_pp": sum(per.values()) / len(per), **{f"chrf_pp_{t}": v for t, v in per.items()}}
+def dev_chrf(items, hyps) -> dict:
+    # Inputs: DevItems and hypotheses aligned to them. Output: {"chrf_pp": corpus chrF++}.
+    score = chrf_metric().corpus_score(list(hyps), [[it.ref for it in items]]).score
+    return {"chrf_pp": score}
 
 
 def examples_digest(steps: dict) -> str:
@@ -64,41 +64,32 @@ def examples_digest(steps: dict) -> str:
 
 
 class ByteTrainer(Seq2SeqTrainer):
-    # Seq2SeqTrainer with per-sequence loss, enriched logs and greedy dev chrF++ evaluation. The
-    # eval_dataset is the list of DevItems. Extra keyword arguments: targets (codes by target index),
-    # tags ({lang: id}), arch, global_batch and gen_batching (Batching for dev generation).
+    # Seq2SeqTrainer with the token-level loss, enriched logs and greedy dev chrF++ evaluation. The
+    # eval_dataset is the list of DevItems. Extra keyword arguments: target (the direction's target code),
+    # arch, global_batch and gen_batching (Batching for dev generation).
 
-    def __init__(self, *args, targets=(), tags=None, arch=None, global_batch=1,
-                 gen_batching=Batching(max_batch=32), **kwargs):
-        # Inputs: the usual Seq2SeqTrainer arguments plus the extras above. Sets
-        # model_accepts_loss_kwargs=False so the loss is never rescaled by token counts.
-        super().__init__(*args, **kwargs)
+    def __init__(self, *args, target=None, arch=None, global_batch=1, gen_batching=Batching(max_batch=32),
+                 **kwargs):
+        # Inputs: the usual Seq2SeqTrainer arguments plus the extras above. Installs token_loss as the
+        # compute_loss_func, so the Trainer counts label tokens over the global batch and never rescales by
+        # accumulation steps, and keeps the token count out of the model's forward call.
+        super().__init__(*args, compute_loss_func=token_loss, **kwargs)
         self.model_accepts_loss_kwargs = False
-        self.dev, self.targets, self.tags, self.arch = list(self.eval_dataset), list(targets), dict(tags or {}), arch
+        self.dev, self.target, self.arch = list(self.eval_dataset), target, arch
         self.global_batch, self.gen_batching = int(global_batch), gen_batching
         self.decoding = dataclasses.replace(DecodingConfig(), num_beams=1)
         self._bundle = None
-        self._reset_window()
+        self._ids = defaultdict(list)
         self._clock = {"log": time.time(), "train": time.time(), "eval_s": 0.0}
 
-    def _reset_window(self) -> None:
-        # Clears the per-target loss sums/counts and the per-step example ids of the logging window.
-        self._sums = torch.zeros(max(len(self.targets), 1), dtype=torch.float64)
-        self._counts = torch.zeros_like(self._sums)
-        self._ids = defaultdict(list)
-
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        # Inputs: model, a collated batch, whether to return outputs, and the (unused) token count.
-        # Output: the per-sequence loss (and model outputs); in training mode also accumulates the
-        # per-target loss sums and the example ids of the current step.
-        out = model(**{k: inputs[k] for k in MODEL_KEYS}, use_cache=False)
-        loss, per_row = per_sequence_loss(out.logits, inputs["labels"])
+        # Inputs: model, a collated batch, whether to return outputs, and the global label-token count.
+        # Output: the token-level loss (and model outputs) from the Trainer's own compute_loss on the model
+        # inputs and labels; in training mode also records the example ids of the current step.
         if model.training:
-            idx = inputs["target_idx"].to(per_row.device)
-            self._sums = self._sums.to(per_row.device).index_add_(0, idx, per_row.detach().double())
-            self._counts = self._counts.to(per_row.device).index_add_(0, idx, torch.ones_like(per_row).double())
             self._ids[self.state.global_step + 1].extend(inputs["example_idx"])
-        return (loss, out) if return_outputs else loss
+        batch = {**{k: inputs[k] for k in MODEL_KEYS}, "labels": inputs["labels"], "use_cache": False}
+        return super().compute_loss(model, batch, return_outputs, num_items_in_batch)
 
     def train(self, *args, **kwargs):
         # Inputs: Trainer.train arguments. Starts this session's clocks, then trains. Output: TrainOutput.
@@ -107,20 +98,16 @@ class ByteTrainer(Seq2SeqTrainer):
         return super().train(*args, **kwargs)
 
     def _window_stats(self) -> dict:
-        # Output: log fields of the window since the last training log, gathered over ranks: loss per
-        # target, examples digest, examples seen, examples/s (eval time excluded) and peak memory.
-        parts = gather_objects((self._sums.tolist(), self._counts.tolist(), dict(self._ids)))
-        sums = [sum(p[0][i] for p in parts) for i in range(len(self._sums))]
-        counts = [sum(p[1][i] for p in parts) for i in range(len(self._counts))]
+        # Output: log fields of the window since the last training log, gathered over ranks: examples digest,
+        # examples seen, examples/s (eval time excluded) and peak memory.
         steps = defaultdict(list)
-        for p in parts:
-            for s, ids in p[2].items():
+        for part in gather_objects(dict(self._ids)):
+            for s, ids in part.items():
                 steps[s].extend(ids)
-        self._reset_window()
+        self._ids = defaultdict(list)
         busy = max(time.time() - self._clock["train"] - self._clock["eval_s"], 1e-9)
-        stats = {f"loss_{t}": s / c for t, s, c in zip(self.targets, sums, counts) if c > 0}
-        stats.update(examples_digest=examples_digest(steps), examples_seen=self.state.global_step * self.global_batch,
-                     examples_per_s=len(steps) * self.global_batch / busy)
+        stats = {"examples_digest": examples_digest(steps), "examples_seen": self.state.global_step * self.global_batch,
+                 "examples_per_s": len(steps) * self.global_batch / busy}
         if torch.cuda.is_available() and self.args.device.type == "cuda":
             stats["peak_mem_gb"] = torch.cuda.max_memory_allocated(self.args.device) / 2 ** 30
             torch.cuda.reset_peak_memory_stats(self.args.device)
@@ -138,26 +125,26 @@ class ByteTrainer(Seq2SeqTrainer):
         super().log(logs, start_time)
 
     def bundle(self):
-        # Output: the cached Trained bundle around the live (unwrapped) model, used for dev decoding
-        # with the run's tags and generation suppression ids.
+        # Output: the cached tagless Trained bundle around the live (unwrapped) model, used for dev decoding
+        # from the [start] prefix with the generation suppression ids.
         if self._bundle is None:
             model = self.accelerator.unwrap_model(self.model)
-            self._bundle = make_trained(model, self.processing_class, self.tags, arch=self.arch)
+            self._bundle = make_trained(model, self.processing_class, arch=self.arch)
         return self._bundle
 
     def dev_scores(self) -> dict:
-        # Output: dev chrF++ (macro and per target). Each rank greedily decodes its shard of the dev
-        # items through interp.scoring.generate, the shards are gathered, and every rank scores all.
+        # Output: dev chrF++. Each rank greedily decodes its shard of the dev items through
+        # interp.scoring.generate, the shards are gathered, and every rank scores all of them.
         w = world()
         rows = list(range(w.rank, len(self.dev), w.size))
         model = self.bundle().model
         was_training = model.training
         model.eval()
-        hyps = generate(self.bundle(), [d.src for d in self.dev], [d.target for d in self.dev], self.decoding,
-                        self.gen_batching, rows=rows) if rows else []
+        hyps = generate(self.bundle(), [d.src for d in self.dev], self.target, self.decoding, self.gen_batching,
+                        rows=rows) if rows else []
         model.train(was_training)
         merged = dict(pair for part in gather_objects(list(zip(rows, hyps))) for pair in part)
-        return dev_chrf(self.dev, [merged[i] for i in range(len(self.dev))], self.targets)
+        return dev_chrf(self.dev, [merged[i] for i in range(len(self.dev))])
 
     def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix: str = "eval", **gen_kwargs) -> dict:
         # Inputs: Trainer.evaluate arguments (only the prefix is used). Output: the prefixed dev

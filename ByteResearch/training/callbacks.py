@@ -65,28 +65,16 @@ def split_history(history) -> dict:
             "final": [e for e in history if "train_runtime" in e]}
 
 
-def _eval_at(evals, step):
-    # Inputs: eval entries and a step (or None). Output: the eval entry logged at that step, or None.
-    return next((e for e in evals if e.get("step") == step), None)
-
-
-def _per_target(entry) -> dict:
-    # Input: an eval entry or None. Output: {target: chrF++} from its eval_chrf_pp_<t> fields.
-    prefix = EVAL_KEY + "_"
-    return {k[len(prefix):]: v for k, v in (entry or {}).items() if k.startswith(prefix)}
-
-
 def train_results(state, info: dict, stop_reason=None) -> tuple:
-    # Inputs: TrainerState, run info {"max_steps", "global_batch", "n_train", ...} and the stop reason
-    # (None while running). Output: (per_item, aggregate) for train.json.
+    # Inputs: TrainerState, run info {"max_steps", "global_batch", "n_train", "target", ...} and the stop
+    # reason (None while running). Output: (per_item, aggregate) for train.json.
     parts = split_history(state.log_history)
     evals = parts["eval"]
     last = evals[-1] if evals else None
-    best = _eval_at(evals, state.best_global_step)
     aggregate = {
-        "best_step": state.best_global_step, "best_metric": state.best_metric, "best_per_target": _per_target(best),
+        "best_step": state.best_global_step, "best_metric": state.best_metric,
         "final_step": last and last["step"], "final_metric": last and last[EVAL_KEY],
-        "final_per_target": _per_target(last), "global_step": state.global_step, "epoch": state.epoch,
+        "global_step": state.global_step, "epoch": state.epoch,
         "examples_seen": state.global_step * info["global_batch"], "stop_reason": stop_reason,
         "wall_time_s": sum(e.get("interval_s") or 0.0 for e in state.log_history), **info,
     }

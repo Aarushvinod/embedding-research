@@ -5,7 +5,8 @@
 # train_config applies the CLI and programmatic overrides on top of the (smoke-aware) TrainConfig.
 # steps_plan derives the number of optimizer steps from the dataset size and the epoch budget.
 # training_args builds the Seq2SeqTrainingArguments with Adafactor, constant-with-warmup, bf16 where
-# supported, per-sequence-loss settings, step-aligned eval/save/logging and exact-resume settings.
+# supported, label-token counts averaged across devices for the token-level loss, step-aligned
+# eval/save/logging and exact-resume settings.
 
 from __future__ import annotations
 
@@ -101,7 +102,7 @@ def training_args(ctx, cfg: TrainConfig, run_dir, lr: float, plan: BatchPlan, ma
         save_total_limit=2 if sweep else cfg.save_total_limit, load_best_model_at_end=not sweep,
         metric_for_best_model=None if sweep else METRIC, greater_is_better=True,
         restore_callback_states_from_checkpoint=True, ignore_data_skip=False,
-        average_tokens_across_devices=False, dataloader_drop_last=True,
+        average_tokens_across_devices=True, dataloader_drop_last=True,
         dataloader_num_workers=cfg.dataloader_workers, remove_unused_columns=False, label_names=["labels"],
         seed=seed, data_seed=seed, report_to="none", disable_tqdm=True, ddp_find_unused_parameters=False,
         prediction_loss_only=True)

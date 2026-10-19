@@ -75,7 +75,7 @@ def _permutation(seed: int, stream: int, n: int) -> list:
     return [int(i) for i in np.random.default_rng([seed, stream]).permutation(n)]
 
 
-def dev_subset_ids(ctx, n_per_target: int = 63) -> list:
+def dev_subset_ids(ctx, n_per_target: int = 200) -> list:
     # Inputs: Ctx and the subset size (pass ctx.config(TrainConfig).dev_per_target for the smoke size).
     # Output: sorted FLORES-dev row ids shared by every target and condition; smaller sizes are
     # prefixes of the same seeded permutation.

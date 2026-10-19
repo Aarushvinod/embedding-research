@@ -100,7 +100,7 @@ def thresholds_stale(ctx, unit=None) -> bool:
 
 @data_stage("data.flores", lambda c, u: c.paths.flores_dir(), flores_stale, grid=(), order=10, options=DATA_OPTS)
 def flores_stage(ctx, unit):
-    # Inputs: Ctx and the empty Unit. Builds FLORES dev/devtest and saves the dev subsets (63 rows and the
+    # Inputs: Ctx and the empty Unit. Builds FLORES dev/devtest and saves the dev subsets (200 rows and the
     # configured size) and the dev halves.
     build_flores(ctx)
     dev_subset_ids(ctx)

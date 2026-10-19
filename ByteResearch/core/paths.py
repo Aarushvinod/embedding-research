@@ -3,8 +3,9 @@
 # variable, then ByteResearch/artifacts; smoke runs live in a separate ROOT/smoke subtree.
 # The Paths class is the only place that spells out the on-disk layout of data, checkpoints,
 # results, large arrays, logs, the metrics environment and scratch space.
-# Run identifiers are also defined here: model__condition for trained models (with an lr suffix
-# for sweep runs) and size__condition for ByT5-versus-mT5 comparisons.
+# Run identifiers are also defined here: model__condition__target for the per-direction trained models
+# (with an lr suffix for sweep runs), model__condition where no target is known, and size__condition for
+# ByT5-versus-mT5 comparisons.
 # Nothing here creates directories except the explicit ensure() helper.
 
 from __future__ import annotations
@@ -30,20 +31,24 @@ def artifacts_root(override=None, smoke: bool = False) -> Path:
     return root / "smoke" if smoke else root
 
 
-def run_id(model: str, condition: str, lr=None) -> str:
-    # Inputs: model key, condition key and an optional learning rate. Output: the run id,
-    # "model__condition" or "model__condition__lr<g>" for LR-sweep runs.
-    base = f"{model}__{condition}"
+def run_id(model: str, condition: str, target=None, lr=None) -> str:
+    # Inputs: model key, condition key, an optional target code and an optional learning rate. Output: the
+    # run id "model__condition[__target]", with "__lr<g>" appended for LR-sweep runs; a non-string target
+    # (e.g. an lr passed in the old third position) raises TypeError.
+    if target is not None and not isinstance(target, str):
+        raise TypeError(f"run_id target must be a language code, got {target!r}; pass lr=...")
+    base = "__".join(p for p in (model, condition, target) if p)
     return base if lr is None else f"{base}__lr{float(lr):g}"
 
 
 def parse_run_id(rid: str) -> dict:
-    # Input: a run id produced by run_id. Output: {"model", "condition", "lr"} with lr a float or None.
+    # Input: a run id produced by run_id. Output: {"model", "condition", "target", "lr"}, with target None
+    # for model__condition ids and lr a float or None.
     parts = rid.split("__")
+    lr = float(parts.pop()[2:]) if len(parts) > 2 and parts[-1].startswith("lr") else None
     if len(parts) not in (2, 3):
         raise ValueError(f"bad run id {rid!r}")
-    lr = float(parts[2][2:]) if len(parts) == 3 and parts[2].startswith("lr") else None
-    return {"model": parts[0], "condition": parts[1], "lr": lr}
+    return {"model": parts[0], "condition": parts[1], "target": parts[2] if len(parts) == 3 else None, "lr": lr}
 
 
 def compare_id(size: str, condition: str) -> str:

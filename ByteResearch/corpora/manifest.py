@@ -6,8 +6,8 @@
 # and timestamp), marks the outputs read-only and refreshes ROOT/data/DATA_MANIFEST.json.
 # verified_path is what every loader uses: it checks an output's SHA-256 against the manifest once
 # per process and file version, and purge permanently deletes a dataset that is no longer wanted.
-# data_hash_for_condition combines the FLORES, NTREX and one hub's pair manifests into the data hash
-# that training checkpoints record.
+# data_hash_for_direction combines the FLORES, NTREX and one hub-target pair manifest into the data hash
+# that per-direction training checkpoints record (data_hash_for_condition covers all of a hub's targets).
 
 from __future__ import annotations
 
@@ -205,15 +205,26 @@ def _outputs_of(directory) -> dict:
     return {k: v["sha256"] for k, v in manifest["outputs"].items()}
 
 
-def data_hash_for_condition(ctx, condition: str) -> str:
-    # Inputs: Ctx and a condition key. Output: the SHA-256 over the output hashes of FLORES, NTREX and
-    # the condition hub's pair manifests for every target (the smoke targets under --smoke). Wikipedia
-    # is deliberately excluded.
-    hub = CONDITIONS[condition].hub
-    targets = resolve_langs("all", TARGETS, ctx.smoke)
+def _pairs_hash(ctx, hub: str, targets) -> str:
+    # Inputs: Ctx, a hub code and target codes. Output: the SHA-256 over the output hashes of FLORES, NTREX and
+    # the hub's pair manifest for each target. Wikipedia is deliberately excluded.
     blob = {
         "flores": _outputs_of(ctx.paths.flores_dir()),
         "ntrex": _outputs_of(ctx.paths.ntrex_dir()),
         "nllb": {f"{hub}__{x}": _outputs_of(ctx.paths.nllb_dir(hub, x)) for x in targets},
     }
     return sha256_json(blob)
+
+
+def data_hash_for_condition(ctx, condition: str) -> str:
+    # Inputs: Ctx and a condition key. Output: the data hash over FLORES, NTREX and the condition hub's pair
+    # manifests for every target (the smoke targets under --smoke).
+    return _pairs_hash(ctx, CONDITIONS[condition].hub, resolve_langs("all", TARGETS, ctx.smoke))
+
+
+def data_hash_for_direction(ctx, condition: str, target: str) -> str:
+    # Inputs: Ctx, a condition key and one of its targets. Output: the data hash a per-direction training
+    # checkpoint records: FLORES, NTREX and that single hub-target pair manifest.
+    if target not in CONDITIONS[condition].targets:
+        raise ValueError(f"{target} is not a target of {condition}")
+    return _pairs_hash(ctx, CONDITIONS[condition].hub, [target])

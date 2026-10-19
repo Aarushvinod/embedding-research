@@ -2,7 +2,7 @@
 # finalize_checkpoint writes byteresearch_meta.json and then, last of all, the COMPLETE marker, so a
 # directory without COMPLETE is by definition half-written and latest_complete_checkpoint skips it.
 # check_resume_compat refuses to resume when the config hash, data hash, world size, per-device
-# batch, gradient accumulation or tag ids differ from the run being started.
+# batch, gradient accumulation, tag ids or decoder prefix differ from the run being started.
 # finished_state tells whether a checkpoint already ended training (step budget or early stopping),
 # so a rerun after a crash goes straight to the export instead of training past the stop.
 # export_best copies the best checkpoint's model and tokenizer to ROOT/checkpoints/{run_id}/best/
@@ -20,7 +20,7 @@ from ..core.io import read_json, write_json_atomic
 from ..core.paths import COMPLETE_MARKER, META_FILE
 from ..core.results import now_iso
 
-COMPAT_KEYS = ("config_hash", "data_hash", "world_size", "per_device_batch", "grad_accum", "tags")
+COMPAT_KEYS = ("config_hash", "data_hash", "world_size", "per_device_batch", "grad_accum", "tags", "decoder_prefix")
 STATE_FILE = "trainer_state.json"
 EXPORT_SKIP = ("optimizer.pt", "scheduler.pt", "scaler.pt", "rng_state*.pth", "training_args.bin",
                STATE_FILE, META_FILE, COMPLETE_MARKER)

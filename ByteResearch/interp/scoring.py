@@ -3,9 +3,10 @@
 # output in float32.
 # lens_output applies the encoder's final layer norm to any block state, so the decoder can read
 # an intermediate layer (DecoderLens).
-# per_char_logprob teacher-forces [start, tag] + reference against precomputed encoder outputs and
-# returns the summed label log-probability excluding EOS divided by the reference's character
-# count, with log-softmax in float32 over chunks of positions (mT5 has 250k logits).
+# per_char_logprob teacher-forces the model's prefix ([start], or [start, tag] for a legacy tagged model)
+# plus the reference against precomputed encoder outputs and returns the summed label log-probability
+# excluding EOS divided by the reference's character count, with log-softmax in float32 over chunks of
+# positions (mT5 has 250k logits).
 # generate_from, the single generation path of the codebase, decodes from precomputed encoder outputs
 # with the shared prefix, suppression and beam settings, and stops each beam once it has decoded the
 # output character cap (CharBudget), with max_new_tokens as the hard cap.
@@ -144,9 +145,11 @@ def decoder_label_logprobs(trained, encoder_outputs, enc_mask, targets: dict, ch
 
 
 def _row_tags(trained, tgt_lang, n: int):
-    # Inputs: Trained, a language code or per-row codes, and the row count. Output: one int tag id
-    # for a single language, else a list of n tag ids.
+    # Inputs: Trained, a language code or per-row codes, and the row count. Output: None for a tagless
+    # model, one int tag id for a single language, else a list of n tag ids.
     tags = trained.tags_for(tgt_lang)
+    if tags is None:
+        return None
     if isinstance(tgt_lang, str):
         return tags[0]
     if len(tags) != n:
@@ -209,7 +212,7 @@ def char_bounds(tok, arch: str, n_rows: int) -> torch.Tensor:
 
 
 class CharBudget(StoppingCriteria):
-    # Per-beam stopping criterion: a sequence is finished once the text decoded after its 2-token
+    # Per-beam stopping criterion: a sequence is finished once the text decoded after its decoder
     # prefix holds at least `budget` characters. A cheap per-id upper bound filters the rows, and only
     # rows whose bound reaches the budget are decoded exactly, so the stop never truncates early.
 
@@ -232,27 +235,27 @@ class CharBudget(StoppingCriteria):
 
 def char_budget(trained, decoding: DecodingConfig) -> StoppingCriteriaList:
     # Inputs: Trained and DecodingConfig. Output: the stopping criteria that end each beam at
-    # max_output_chars decoded characters.
+    # max_output_chars decoded characters after the model's decoder prefix.
     bounds = char_bounds(trained.tok, trained.arch or "mt5", trained.model.config.vocab_size)
-    return StoppingCriteriaList([CharBudget(trained.tok, bounds, decoding.max_output_chars)])
+    return StoppingCriteriaList([CharBudget(trained.tok, bounds, decoding.max_output_chars, trained.prefix_len)])
 
 
 def generate_from(trained, encoder_outputs, enc_mask, tgt_lang, decoding: DecodingConfig = DecodingConfig(),
                   budget_stop: bool = True) -> list:
     # Inputs: Trained, encoder outputs and mask for B rows, target language (code or per-row codes),
     # DecodingConfig and whether beams stop at the character budget (always on outside tests).
-    # Output: B decoded strings, prefix sliced off by position, cut at EOS and truncated to
-    # max_output_chars. Any active decoder hooks fire on every generation step.
+    # Output: B decoded strings, prefix ([start] for a tagless model, the target is then unused) sliced off by
+    # position, cut at EOS and truncated to max_output_chars. Any active decoder hooks fire on every step.
     n = enc_mask.shape[0]
     tags = _row_tags(trained, tgt_lang, n)
-    prefix = decoder_prefix(trained.tok.pad_token_id, [tags] * n if isinstance(tags, int) else tags)
+    prefix = decoder_prefix(trained.tok.pad_token_id, [tags] * n if isinstance(tags, int) else tags, n)
     stop = char_budget(trained, decoding) if budget_stop else None
     with torch.no_grad():
         seqs = trained.model.generate(encoder_outputs=fresh_encoder_outputs(trained, encoder_outputs),
                                       attention_mask=enc_mask.to(trained.device),
                                       decoder_input_ids=prefix.to(trained.device),
                                       generation_config=generation_config(trained, decoding), stopping_criteria=stop)
-    return strip_prefix_and_decode(trained.tok, seqs, decoding.max_output_chars)
+    return strip_prefix_and_decode(trained.tok, seqs, decoding.max_output_chars, trained.prefix_len)
 
 
 def run_batched(trained, src_texts, rows, max_chars: int, factor: int, batching: Batching, step) -> list:

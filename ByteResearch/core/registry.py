@@ -36,7 +36,8 @@ BUILTIN = ("list", "status")
 @dataclass(frozen=True)
 class Unit:
     # One cell of a stage grid. Every axis is optional; stages read only the axes they declare.
-    # run_id is model__condition[__lr] when a model is set, size__condition for comparisons.
+    # run_id is model__condition[__target][__lr] when a model is set (the target makes it a per-direction
+    # run id), size__condition for comparisons.
     model: str | None = None
     condition: str | None = None
     target: str | None = None
@@ -52,7 +53,7 @@ class Unit:
     def run_id(self):
         # Output: the run id for this unit, or None when neither model nor size is set.
         if self.model and self.condition:
-            return run_id(self.model, self.condition, self.lr)
+            return run_id(self.model, self.condition, self.target, self.lr)
         if self.size and self.condition:
             return compare_id(self.size, self.condition)
         return None

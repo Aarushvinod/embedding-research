@@ -3,9 +3,10 @@
 # at factor * max_chars (+1 for EOS), so the byte model is never cut harder than the subword one.
 # Text is encoded with split_special_tokens=True so literal markup stays text where the tokenizer
 # supports it (ByT5 does; mT5's vocabulary itself contains the sentinel pieces).
-# Decoder inputs are built explicitly as [start, tag, y...] with labels [-100, y..., eos], never
-# through T5's shift_right, and generation prefixes are [start, tag].
-# strip_prefix_and_decode removes the two-token prefix by position, cuts at EOS and re-truncates.
+# Decoder inputs are built explicitly, never through T5's shift_right: tagless models (the trained format)
+# use plain teacher forcing [start, y...] with labels [y..., eos] and generate from [start]; legacy tagged
+# models use [start, tag, y...] with labels [-100, y..., eos] and generate from [start, tag].
+# strip_prefix_and_decode removes the prefix (1 or 2 tokens) by position, cuts at EOS and re-truncates.
 
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from ..core.text import truncate_chars
 
 IGNORE = -100
 PREFIX_LEN = 2
+START_LEN = 1
 
 
 def token_cap(max_chars, factor: int = 4):
@@ -41,13 +43,22 @@ def source_rows(tok, texts, max_chars, factor: int = 4) -> list:
     return [ids + [tok.eos_token_id] for ids in _encode_content(tok, texts, max_chars, factor)]
 
 
+def prefix_len(tags_per_row) -> int:
+    # Input: the per-row tags (None for a tagless model). Output: the decoder prefix length, START_LEN for
+    # [start] or PREFIX_LEN for [start, tag].
+    return START_LEN if tags_per_row is None else PREFIX_LEN
+
+
 def target_rows(tok, texts, tags_per_row, max_chars, factor: int = 4) -> list:
-    # Inputs: tokenizer, target strings, a tag id per row (or one int for all) and the caps.
-    # Output: unpadded (decoder_input_ids, labels) pairs: [start, tag, y...] and [-100, y..., eos].
+    # Inputs: tokenizer, target strings, a tag id per row (or one int for all, or None for a tagless model)
+    # and the caps. Output: unpadded (decoder_input_ids, labels) pairs: [start, y...] and [y..., eos] without
+    # tags, [start, tag, y...] and [-100, y..., eos] with tags.
+    content = _encode_content(tok, texts, max_chars, factor)
+    start, eos = tok.pad_token_id, tok.eos_token_id
+    if tags_per_row is None:
+        return [([start] + ids, ids + [eos]) for ids in content]
     tags = _broadcast(tags_per_row, len(texts))
-    start = tok.pad_token_id
-    return [([start, tag] + ids, [IGNORE] + ids + [tok.eos_token_id])
-            for ids, tag in zip(_encode_content(tok, texts, max_chars, factor), tags)]
+    return [([start, tag] + ids, [IGNORE] + ids + [eos]) for ids, tag in zip(content, tags)]
 
 
 def _broadcast(values, n: int) -> list:
@@ -94,22 +105,25 @@ def encode_sources(tok, texts, max_chars, factor: int = 4) -> dict:
 
 
 def encode_targets(tok, texts, tags_per_row, max_chars, factor: int = 4) -> dict:
-    # Inputs: tokenizer, target strings, per-row tag ids (or one int) and the caps. Output: a padded
-    # batch {"decoder_input_ids": [start, tag, y...], "labels": [-100, y..., eos],
-    # "decoder_attention_mask"}; the tag position is never part of the loss.
+    # Inputs: tokenizer, target strings, per-row tag ids (one int, or None for a tagless model) and the caps.
+    # Output: a padded batch {"decoder_input_ids", "labels", "decoder_attention_mask"} laid out as in
+    # target_rows; a tag position is never part of the loss.
     return collate_targets(target_rows(tok, texts, tags_per_row, max_chars, factor), tok.pad_token_id)
 
 
-def decoder_prefix(start_id: int, tags_per_row) -> torch.Tensor:
-    # Inputs: decoder start id and per-row tag ids (sequence or 1-D tensor). Output: LongTensor
-    # [B, 2] of [start, tag] rows for generation.
+def decoder_prefix(start_id: int, tags_per_row, n_rows: int | None = None) -> torch.Tensor:
+    # Inputs: decoder start id, per-row tag ids (sequence or 1-D tensor, or None for a tagless model) and
+    # the row count (needed only without tags). Output: the generation prefix, a LongTensor [B, 1] of
+    # [start] rows without tags or [B, 2] of [start, tag] rows with tags.
+    if tags_per_row is None:
+        return torch.full((int(n_rows), 1), int(start_id), dtype=torch.long)
     tags = torch.as_tensor(tags_per_row, dtype=torch.long).reshape(-1)
     return torch.stack([torch.full_like(tags, int(start_id)), tags], dim=1)
 
 
 def strip_prefix_and_decode(tok, sequences, max_chars, prefix_len: int = PREFIX_LEN) -> list:
     # Inputs: tokenizer, generated sequences [B, T] that start with the decoder prefix, output
-    # character cap and prefix length. Output: decoded strings with the prefix removed by position,
+    # character cap and prefix length (START_LEN for tagless models). Output: decoded strings with the prefix removed by position,
     # everything from the first EOS on dropped, pads removed, then truncated to max_chars.
     out = []
     for row in torch.as_tensor(sequences).tolist():

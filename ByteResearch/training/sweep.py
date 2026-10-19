@@ -1,64 +1,84 @@
-# The learning-rate sweep and its per-model selection.
-# Stage `sweep` trains every (model, condition, lr) cell for a fixed number of steps with the same
-# warmup, batch and data order as the full runs, but without early stopping or a best export, and
-# keeps two checkpoints so a killed cell still resumes; checkpoints are deleted once the cell is done.
-# Each cell writes ROOT/results/sweep/{model}__{condition}__lr{lr}/train.json.
-# Stage `sweep.select` picks, per model, the LR with the best mean final dev chrF++ across the study
-# conditions (C1-C3, or the smoke conditions) and writes ROOT/results/sweep/{model}/selection.json.
-# The full `train` stage reads that selection whenever --lr is not given.
+# The learning-rate sweep and its per-architecture selection.
+# Stage `sweep` trains every (model, sweep direction, lr) cell for a fixed number of steps with the same
+# warmup, batch and data order as the full runs, but without early stopping or a best export, and keeps two
+# checkpoints so a killed cell still resumes; checkpoints are deleted once the cell is done.
+# The sweep directions are the fixed representative (condition, target) pairs of TrainConfig.sweep_directions;
+# --condition and --target only narrow them (so DDP relaunches can pin one cell), and each cell writes
+# ROOT/results/sweep/{model}__{condition}__{target}__lr{lr}/train.json.
+# Stage `sweep.select` picks, per model key, the LR with the best mean final dev chrF++ across the sweep
+# directions and writes ROOT/results/sweep/{model}/selection.json, recomputed whenever a sweep cell changes.
+# The full `train` stage reads that selection for every direction of the model whenever --lr is not given.
 
 from __future__ import annotations
 
 import shutil
 
-from ..core.config import TrainConfig, resolve_conditions, resolve_lrs
+from ..core.config import TARGETS, TrainConfig, resolve_conditions, resolve_langs, resolve_lrs, resolve_models, \
+    smoke_overrides
 from ..core.dist import is_main
 from ..core.paths import run_id
-from ..core.registry import opt, register_stage
+from ..core.registry import Unit, opt, register_stage
 from ..core.results import result_done, result_file
 from .dataset import data_requires
 from .train import MEASUREMENT, OPTIONS, SWEEP_EXP, RunSpec, run_training
 
 
+def sweep_directions(smoke: bool) -> list:
+    # Input: the smoke flag. Output: the (condition, target) sweep directions of the (smoke-aware) TrainConfig.
+    cfg = smoke_overrides(TrainConfig()) if smoke else TrainConfig()
+    return [tuple(d) for d in cfg.sweep_directions]
+
+
+def sweep_units(sel: dict, smoke: bool) -> list:
+    # Inputs: the CLI selections and the smoke flag. Output: one Unit per selected model, sweep direction
+    # within the --condition and --target selections, and selected lr (the sweep grid when --lr is not given).
+    lrs = resolve_lrs(sel.get("lr"), smoke_overrides(TrainConfig()) if smoke else TrainConfig())
+    conds = resolve_conditions(sel.get("condition"), smoke)
+    targets = resolve_langs(sel.get("target"), TARGETS, smoke)
+    dirs = [(c, t) for c, t in sweep_directions(smoke) if c in conds and t in targets]
+    return [Unit(model=m, condition=c, target=t, lr=lr) for m in resolve_models(sel.get("model"), smoke)
+            for c, t in dirs for lr in lrs]
+
+
 def sweep_done(ctx, unit) -> bool:
-    # Inputs: Ctx and Unit (model, condition, lr). Output: whether that cell's train.json is complete.
+    # Inputs: Ctx and Unit (model, condition, target, lr). Output: whether that cell's train.json is complete.
     return result_done(ctx, SWEEP_EXP, unit.run_id, MEASUREMENT)
 
 
-@register_stage("sweep", grid=("model", "condition", "lr"), is_done=sweep_done, requires=data_requires(),
-                ddp=True, order=250,
+@register_stage("sweep", grid=sweep_units, is_done=sweep_done, requires=data_requires(), ddp=True, order=250,
                 options=OPTIONS + (opt("--keep-checkpoints", action="store_true", help="keep sweep checkpoints"),))
 def sweep(ctx, unit) -> None:
-    # Inputs: Ctx and Unit (model, condition, lr). Runs one sweep cell, then removes its checkpoints
+    # Inputs: Ctx and Unit (model, condition, target, lr). Runs one sweep cell, then removes its checkpoints
     # unless --keep-checkpoints.
-    spec = RunSpec(unit.model, unit.condition, float(unit.lr), experiment=SWEEP_EXP, sweep=True)
+    spec = RunSpec(unit.model, unit.condition, unit.target, float(unit.lr), experiment=SWEEP_EXP, sweep=True)
     run_training(ctx, spec)
     if is_main() and not ctx.opt("keep_checkpoints", False):
         shutil.rmtree(ctx.paths.checkpoints_dir(spec.run_id), ignore_errors=True)
 
 
-def final_metric(ctx, model: str, condition: str, lr: float):
-    # Inputs: Ctx, model, condition and lr. Output: the cell's final dev chrF++, or None when its
+def final_metric(ctx, model: str, condition: str, target: str, lr: float):
+    # Inputs: Ctx, model, condition, target and lr. Output: the cell's final dev chrF++, or None when its
     # train.json is missing or incomplete.
-    data = result_file(ctx, SWEEP_EXP, run_id(model, condition, lr), MEASUREMENT).load()
+    data = result_file(ctx, SWEEP_EXP, run_id(model, condition, target, lr), MEASUREMENT).load()
     if not data or not data.get("status", {}).get("complete"):
         return None
     return data["aggregate"].get("final_metric")
 
 
 def selection(ctx, model: str) -> dict:
-    # Inputs: Ctx and model key. Output: {"lr", "mean_chrf_pp", "by_lr": {lr: {condition: chrF++,
-    # "mean": ...}}, "conditions", "lrs"}; raises RuntimeError listing missing sweep cells.
-    conds = resolve_conditions("all", ctx.smoke)
+    # Inputs: Ctx and model key. Output: {"lr", "mean_chrf_pp", "by_lr": {lr: {"condition__target": chrF++,
+    # "mean": ...}}, "directions", "lrs"}; raises RuntimeError listing missing sweep cells.
+    dirs = sweep_directions(ctx.smoke)
     lrs = resolve_lrs(ctx.sel.get("lr"), ctx.config(TrainConfig))
-    table = {lr: {c: final_metric(ctx, model, c, lr) for c in conds} for lr in lrs}
-    missing = [run_id(model, c, lr) for lr, row in table.items() for c, v in row.items() if v is None]
+    table = {lr: {(c, t): final_metric(ctx, model, c, t, lr) for c, t in dirs} for lr in lrs}
+    missing = [run_id(model, c, t, lr) for lr, row in table.items() for (c, t), v in row.items() if v is None]
     if missing:
         raise RuntimeError(f"sweep cells missing or incomplete for {model}: {missing}; run `sweep` first")
-    by_lr = {f"{lr:g}": {**row, "mean": sum(row.values()) / len(row)} for lr, row in table.items()}
+    by_lr = {f"{lr:g}": {**{f"{c}__{t}": v for (c, t), v in row.items()}, "mean": sum(row.values()) / len(row)}
+             for lr, row in table.items()}
     best = max(lrs, key=lambda lr: (by_lr[f"{lr:g}"]["mean"], -lr))
-    return {"lr": best, "mean_chrf_pp": by_lr[f"{best:g}"]["mean"], "by_lr": by_lr, "conditions": conds,
-            "lrs": lrs}
+    return {"lr": best, "mean_chrf_pp": by_lr[f"{best:g}"]["mean"], "by_lr": by_lr,
+            "directions": [list(d) for d in dirs], "lrs": lrs}
 
 
 def select_done(ctx, unit) -> bool:
@@ -80,5 +100,5 @@ def select(ctx, unit) -> None:
     chosen = selection(ctx, unit.model)
     rf = result_file(ctx, SWEEP_EXP, unit.model, "selection", unit=unit)
     rf.write({"by_lr": chosen["by_lr"]}, {k: v for k, v in chosen.items() if k != "by_lr"},
-             config={"conditions": chosen["conditions"], "lrs": chosen["lrs"], "criterion": "mean final dev chrF++"},
-             complete=True)
+             config={"directions": chosen["directions"], "lrs": chosen["lrs"],
+                     "criterion": "mean final dev chrF++ over the sweep directions"}, complete=True)

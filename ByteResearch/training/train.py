@@ -1,11 +1,13 @@
 # The full fine-tuning stage and the shared run driver used by the LR sweep as well.
-# run_training builds one multilingual model per (model, condition[, lr]): it loads the pretrained
-# checkpoint, concatenates the hub's pair files, plans the batch in examples, and runs ByteTrainer
+# run_training builds one model per direction (model, condition, target[, lr]): it loads the pretrained
+# checkpoint, reads that hub-target pair file only, plans the batch in examples, and runs ByteTrainer
 # with checkpoint meta, live train.json results and (for full runs) early stopping on dev chrF++.
+# The model is tagless (no target tag, no prompt): checkpoint meta records "tags": {} and
+# "decoder_prefix": "start", so loading and generation use the [start] prefix everywhere.
 # Resumption is automatic: half-written checkpoints are deleted, the newest complete one is checked
 # for compatibility and resumed, and a checkpoint that already ended training goes straight to export.
 # Full runs export the best checkpoint to ROOT/checkpoints/{run_id}/best/ and mark train.json complete.
-# The learning rate comes from --lr, else from the sweep selection, else a clear error is raised.
+# The learning rate comes from --lr, else from the model's sweep selection, else a clear error is raised.
 
 from __future__ import annotations
 
@@ -16,18 +18,18 @@ from dataclasses import dataclass
 import torch
 from transformers import EarlyStoppingCallback
 
-from ..core.config import ALL_LANGS, CONDITIONS, MODELS, InterpConfig, config_hash, resolve_lrs
+from ..core.config import MODELS, InterpConfig, config_hash, resolve_lrs
 from ..core.dist import barrier, is_main
 from ..core.paths import COMPLETE_MARKER, run_id
 from ..core.registry import opt, register_stage
 from ..core.results import git_commit, library_versions, result_done, result_file
 from ..interp.scoring import batching_from
-from ..modeling.loading import load_pretrained
-from ..modeling.tags import suppress_ids, tag_ids
+from ..modeling.loading import TAGLESS_PREFIX, load_pretrained
+from ..modeling.tags import suppress_ids
 from .args import batch_plan, steps_plan, train_config, train_seed, training_args
 from .callbacks import CheckpointMetaCallback, ResultsCallback, train_results
 from .collator import PairCollator
-from .dataset import PairDataset, condition_targets, data_hash, data_requires, dev_items, train_rows, \
+from .dataset import PairDataset, data_hash, data_requires, dev_items, direction_hub, train_rows, \
     trim_to_batches
 from .resume import check_resume_compat, export_best, finished_state, latest_complete_checkpoint, load_state, \
     read_meta, remove_incomplete
@@ -45,18 +47,19 @@ OPTIONS = (
 
 @dataclass(frozen=True)
 class RunSpec:
-    # One fine-tuning run: model key, condition, learning rate, result experiment ("train" or
+    # One fine-tuning run: model key, condition, target, learning rate, result experiment ("train" or
     # "sweep") and whether it is an LR-sweep run (fixed step budget, no early stopping, no export).
     model: str
     condition: str
+    target: str
     lr: float
     experiment: str = EXP
     sweep: bool = False
 
     @property
     def run_id(self) -> str:
-        # Output: model__condition, with an lr suffix for sweep runs.
-        return run_id(self.model, self.condition, self.lr if self.sweep else None)
+        # Output: model__condition__target, with an lr suffix for sweep runs.
+        return run_id(self.model, self.condition, self.target, self.lr if self.sweep else None)
 
 
 def selected_lr(ctx, model: str) -> float:
@@ -73,18 +76,19 @@ def selected_lr(ctx, model: str) -> float:
     return float(sel["aggregate"]["lr"])
 
 
-def build_meta(ctx, spec: RunSpec, cfg, plan, tok, model, targets, n_train: int, max_steps: int) -> dict:
-    # Inputs: Ctx, RunSpec, TrainConfig, BatchPlan, tokenizer, model, targets, training-set size and
-    # step budget. Output: the checkpoint meta (config + hash, data hash, tags, suppress ids, ids of
-    # tokenizer and model, versions, commit, batch geometry, seeds) shared by every checkpoint.
+def build_meta(ctx, spec: RunSpec, cfg, plan, tok, model, n_train: int, max_steps: int) -> dict:
+    # Inputs: Ctx, RunSpec, TrainConfig, BatchPlan, tokenizer, model, training-set size and step budget.
+    # Output: the checkpoint meta (config + hash, direction data hash, the tagless marker, suppress ids, ids
+    # of tokenizer and model, versions, commit, batch geometry, seeds) shared by every checkpoint.
     seed = train_seed(ctx, cfg)
     config = {"train": {k: v for k, v in dataclasses.asdict(cfg).items() if k not in HASH_EXCLUDE},
-              "model": spec.model, "condition": spec.condition, "lr": spec.lr, "sweep": spec.sweep,
-              "max_steps": max_steps, "targets": list(targets), "seed": seed}
-    return {"model": spec.model, "condition": spec.condition, "lr": spec.lr, "run_id": spec.run_id,
-            "config": config, "config_hash": config_hash(config), "data_hash": data_hash(ctx, spec.condition),
-            "tags": tag_ids(tok, ALL_LANGS), "suppress": suppress_ids(tok, model.config.vocab_size),
-            "targets": list(targets), "hub": CONDITIONS[spec.condition].hub, "tokenizer": MODELS[spec.model].hf_id,
+              "model": spec.model, "condition": spec.condition, "target": spec.target, "lr": spec.lr,
+              "sweep": spec.sweep, "max_steps": max_steps, "decoder_prefix": TAGLESS_PREFIX, "seed": seed}
+    return {"model": spec.model, "condition": spec.condition, "target": spec.target, "lr": spec.lr,
+            "run_id": spec.run_id, "config": config, "config_hash": config_hash(config),
+            "data_hash": data_hash(ctx, spec.condition, spec.target), "tags": {}, "decoder_prefix": TAGLESS_PREFIX,
+            "suppress": suppress_ids(tok, model.config.vocab_size), "hub": direction_hub(spec.condition, spec.target),
+            "tokenizer": MODELS[spec.model].hf_id,
             "model_id": MODELS[spec.model].hf_id, "versions": library_versions(), "git_commit": git_commit(),
             "world_size": plan.world, "per_device_batch": plan.per_device, "grad_accum": plan.grad_accum,
             "global_batch": plan.global_batch, "seeds": {"seed": seed, "data_seed": seed}, "n_train": n_train,
@@ -109,7 +113,7 @@ def results_writer(ctx, spec: RunSpec, meta: dict, info: dict):
     # Inputs: Ctx, RunSpec, run meta and run info. Output: write(state, complete=False,
     # stop_reason=None) -> aggregate, which rebuilds ROOT/results/{experiment}/{run_id}/train.json.
     rf = result_file(ctx, spec.experiment, spec.run_id, MEASUREMENT,
-                     unit={"model": spec.model, "condition": spec.condition, "lr": spec.lr})
+                     unit={"model": spec.model, "condition": spec.condition, "target": spec.target, "lr": spec.lr})
     extra = {"provenance": {"config_hash": meta["config_hash"], "data_hash": meta["data_hash"],
                             "checkpoints": ctx.paths.relative(ctx.paths.checkpoints_dir(spec.run_id))}}
 
@@ -122,18 +126,17 @@ def results_writer(ctx, spec: RunSpec, meta: dict, info: dict):
 
 
 def build_trainer(ctx, spec: RunSpec, cfg, plan, model, tok, data: dict, meta: dict, write, max_steps: int):
-    # Inputs: Ctx, RunSpec, TrainConfig, BatchPlan, model, tokenizer, data {"train", "dev", "targets"},
-    # meta, results writer and step budget. Output: the configured ByteTrainer (callbacks: checkpoint
-    # meta, live results, and early stopping for full runs).
+    # Inputs: Ctx, RunSpec, TrainConfig, BatchPlan, model, tokenizer, data {"train", "dev"}, meta, results
+    # writer and step budget. Output: the configured ByteTrainer (callbacks: checkpoint meta, live results,
+    # and early stopping for full runs).
     callbacks = [CheckpointMetaCallback(lambda st: {**meta, "step": st.global_step}), ResultsCallback(write)]
     if not spec.sweep:
         callbacks.append(EarlyStoppingCallback(early_stopping_patience=cfg.patience))
-    tags = meta["tags"]
-    collator = PairCollator(tok, tuple(tags[t] for t in data["targets"]), cfg.max_chars, cfg.token_factor)
+    collator = PairCollator(tok, cfg.max_chars, cfg.token_factor)
     args = training_args(ctx, cfg, ctx.paths.checkpoints_dir(spec.run_id), spec.lr, plan, max_steps, spec.sweep)
     return ByteTrainer(model=model, args=args, data_collator=collator, train_dataset=data["train"],
-                       eval_dataset=data["dev"], processing_class=tok, callbacks=callbacks, targets=data["targets"],
-                       tags=tags, arch=MODELS[spec.model].arch, global_batch=plan.global_batch,
+                       eval_dataset=data["dev"], processing_class=tok, callbacks=callbacks, target=spec.target,
+                       arch=MODELS[spec.model].arch, global_batch=plan.global_batch,
                        gen_batching=batching_from(ctx.config(InterpConfig), generation=True))
 
 
@@ -143,15 +146,14 @@ def run_training(ctx, spec: RunSpec) -> dict:
     cfg = train_config(ctx)
     plan = batch_plan(cfg.global_batch, ctx.world.size, cfg.per_device_batch)
     model, tok = load_pretrained(spec.model, dtype=torch.float32)
-    targets = condition_targets(ctx, spec.condition)
-    rows = train_rows(ctx, spec.condition, targets)
-    data = {"train": PairDataset(trim_to_batches(rows, plan.global_batch)), "targets": targets,
-            "dev": dev_items(ctx, spec.condition, targets, cfg.dev_per_target)}
+    rows = train_rows(ctx, spec.condition, spec.target)
+    data = {"train": PairDataset(trim_to_batches(rows, plan.global_batch)),
+            "dev": dev_items(ctx, spec.condition, spec.target, cfg.dev_per_target)}
     max_steps = steps_plan(len(data["train"]), cfg, spec.sweep)
-    meta = build_meta(ctx, spec, cfg, plan, tok, model, targets, len(data["train"]), max_steps)
+    meta = build_meta(ctx, spec, cfg, plan, tok, model, len(data["train"]), max_steps)
     info = {"max_steps": max_steps, "global_batch": plan.global_batch, "n_train": len(data["train"]),
             "n_trimmed": len(rows) - len(data["train"]), "n_dev": len(data["dev"]), "lr": spec.lr,
-            "targets": targets, "world_size": plan.world,
+            "target": spec.target, "world_size": plan.world,
             "per_device_batch": plan.per_device, "grad_accum": plan.grad_accum}
     write = results_writer(ctx, spec, meta, info)
     trainer = build_trainer(ctx, spec, cfg, plan, model, tok, data, meta, write, max_steps)
@@ -180,8 +182,9 @@ def train_done(ctx, unit) -> bool:
     return result_done(ctx, EXP, rid, MEASUREMENT) and (ctx.paths.best_checkpoint(rid) / COMPLETE_MARKER).exists()
 
 
-@register_stage("train", grid=("model", "condition"), is_done=train_done, requires=data_requires(), ddp=True,
-                options=OPTIONS, order=300)
+@register_stage("train", grid=("model", "condition", "target"), is_done=train_done, requires=data_requires(),
+                ddp=True, options=OPTIONS, order=300)
 def train(ctx, unit) -> None:
-    # Inputs: Ctx and Unit (model, condition). Runs the full fine-tuning run at the selected LR.
-    run_training(ctx, RunSpec(unit.model, unit.condition, selected_lr(ctx, unit.model)))
+    # Inputs: Ctx and Unit (model, condition, target). Runs the full fine-tuning run of that direction at the
+    # model's selected LR.
+    run_training(ctx, RunSpec(unit.model, unit.condition, unit.target, selected_lr(ctx, unit.model)))
