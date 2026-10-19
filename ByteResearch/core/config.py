@@ -1,8 +1,8 @@
 # Fixed study constants and default configuration for the ByteResearch codebase.
-# It defines the fourteen languages (eight targets, three hubs, three controls) with their FLORES,
+# It defines the eleven languages (five targets, three hubs, three controls) with their FLORES,
 # NTREX, CCMatrix and Wikipedia codes, scripts and decoder-tag sentinel indices, the GlotLID label
 # overrides, the Unicode script ranges and sentence terminators, so a language change stays here.
-# It also defines the six models, the three fine-tuning conditions, the 24-row NLLB source table, the
+# It also defines the six models, the three fine-tuning conditions, the hub x target NLLB source table, the
 # candidate targets and candidate hubs (prepared exactly like targets and hubs so promoting one reuses its
 # data, but never trained on) and the pinned revisions of every external resource, and validates them on import.
 # Frozen config dataclasses carry the defaults from the approved plan for data, training,
@@ -69,12 +69,9 @@ class NllbSource:
 _LANG_ROWS = (
     ("sw", "Swahili", "swh_Latn", "swa", "sw", "sw", "Latn", "target"),
     ("sq", "Albanian", "als_Latn", "sqi", "sq", "sq", "Latn", "target"),
-    ("et", "Estonian", "est_Latn", "est", "et", "et", "Latn", "target"),
-    ("ur", "Urdu", "urd_Arab", "urd", "ur", "ur", "Arab", "target"),
     ("sr", "Serbian", "srp_Cyrl", "srp-Cyrl", "sr", "sr", "Cyrl", "target"),
-    ("si", "Sinhala", "sin_Sinh", "sin", "si", "si", "Sinh", "target"),
-    ("mr", "Marathi", "mar_Deva", "mar", "mr", "mr", "Deva", "target"),
-    ("ta", "Tamil", "tam_Taml", "tam", "ta", "ta", "Taml", "target"),
+    ("ur", "Urdu", "urd_Arab", "urd", "ur", "ur", "Arab", "target"),
+    ("ml", "Malayalam", "mal_Mlym", "mal", "ml", "ml", "Mlym", "target"),
     ("en", "English", "eng_Latn", "eng", "en", "en", "Latn", "hub"),
     ("fa", "Persian", "pes_Arab", "fas", "fa", "fa", "Arab", "hub"),
     ("ru", "Russian", "rus_Cyrl", "rus", "ru", "ru", "Cyrl", "hub"),
@@ -82,26 +79,19 @@ _LANG_ROWS = (
     ("zh", "Chinese", "zho_Hans", None, None, None, "Hans", "control"),
     ("el", "Greek", "ell_Grek", None, None, None, "Grek", "control"),
 )
-LID_LABEL_OVERRIDES: dict = {"tl": "fil_Latn", "fa": "fas_Arab", "et": "ekk_Latn"}
+LID_LABEL_OVERRIDES: dict = {"fa": "fas_Arab", "et": "ekk_Latn"}
 
 _CANDIDATE_ROWS = (
-    ("bg", "Bulgarian", "bul_Cyrl", "bul", "bg", "bg", "Cyrl", "candidate"),
-    ("bn", "Bengali", "ben_Beng", "ben", "bn", "bn", "Beng", "candidate"),
-    ("ms", "Malay", "zsm_Latn", "msa", "ms", "ms", "Latn", "candidate"),
-    ("uk", "Ukrainian", "ukr_Cyrl", "ukr", "uk", "uk", "Cyrl", "candidate"),
-    ("tl", "Tagalog", "tgl_Latn", "fil", "tl", "tl", "Latn", "candidate"),
-    ("ka", "Georgian", "kat_Geor", "kat", "ka", "ka", "Geor", "candidate"),
-    ("hy", "Armenian", "hye_Armn", "hye", "hy", "hy", "Armn", "candidate"),
-    ("ml", "Malayalam", "mal_Mlym", "mal", "ml", "ml", "Mlym", "candidate"),
+    ("et", "Estonian", "est_Latn", "est", "et", "et", "Latn", "candidate"),
+    ("si", "Sinhala", "sin_Sinh", "sin", "si", "si", "Sinh", "candidate"),
+    ("ta", "Tamil", "tam_Taml", "tam", "ta", "ta", "Taml", "candidate"),
 )
 CANDIDATE_LANGUAGES: dict = {row[0]: Language(*row, tag_k=-1) for row in _CANDIDATE_ROWS}
 CANDIDATES: tuple = tuple(CANDIDATE_LANGUAGES)
-_CANDIDATE_HUB_ROWS = (
-    ("ar", "Arabic", "arb_Arab", "arb", "ar", "ar", "Arab", "candidate_hub"),
-)
+_CANDIDATE_HUB_ROWS: tuple = ()
 CANDIDATE_HUB_LANGUAGES: dict = {row[0]: Language(*row, tag_k=-1) for row in _CANDIDATE_HUB_ROWS}
 CANDIDATE_HUBS: tuple = tuple(CANDIDATE_HUB_LANGUAGES)
-NLLB_UNAVAILABLE: frozenset = frozenset({("fa", "ka"), ("fa", "hy"), ("fa", "bg")})
+NLLB_UNAVAILABLE: frozenset = frozenset()
 
 TAG_K0 = 86
 MAX_TAG_K = 99
@@ -112,11 +102,11 @@ LANGUAGES: dict[str, Language] = {
 TARGETS: tuple = tuple(c for c, l in LANGUAGES.items() if l.role == "target")
 HUBS: tuple = tuple(c for c, l in LANGUAGES.items() if l.role == "hub")
 CONTROLS: tuple = tuple(c for c, l in LANGUAGES.items() if l.role == "control")
-STUDY11: tuple = TARGETS + HUBS
-ALL14: tuple = STUDY11 + CONTROLS
-DATA_LANGS: tuple = ALL14 + CANDIDATES + CANDIDATE_HUBS
-NTREX_LANGS: tuple = STUDY11 + CANDIDATES + CANDIDATE_HUBS
-LID_LANGS: tuple = STUDY11 + CANDIDATES + CANDIDATE_HUBS
+STUDY_LANGS: tuple = TARGETS + HUBS
+ALL_LANGS: tuple = STUDY_LANGS + CONTROLS
+DATA_LANGS: tuple = ALL_LANGS + CANDIDATES + CANDIDATE_HUBS
+NTREX_LANGS: tuple = STUDY_LANGS + CANDIDATES + CANDIDATE_HUBS
+LID_LANGS: tuple = STUDY_LANGS + CANDIDATES + CANDIDATE_HUBS
 WIKI_CANDIDATES: tuple = CANDIDATES + CANDIDATE_HUBS
 
 MODELS: dict[str, ModelSpec] = {
@@ -143,8 +133,8 @@ SMOKE_CONDITIONS: tuple = ("C1", "C2")
 _ALLENAI = "https://storage.googleapis.com/allennlp-data-bucket/nllb/{name}.gz"
 _CCMATRIX = "http://data.statmt.org/cc-matrix/{name}.bitextf.tsv.gz"
 NLLB_ALLENAI_HUBS: tuple = ("en",)
-NLLB_ALLENAI_PAIRS: tuple = (("ru", "ka"), ("ru", "hy"))
-NLLB_CCMATRIX_PAIRS: tuple = (("en", "bg"), ("en", "sq"), ("en", "uk"), ("en", "sr"), ("en", "et"))
+NLLB_ALLENAI_PAIRS: tuple = ()
+NLLB_CCMATRIX_PAIRS: tuple = (("en", "sq"), ("en", "sr"), ("en", "et"))
 
 
 def language(code: str) -> Language:
@@ -251,7 +241,7 @@ class DataConfig:
     # GlotLID labels read per prediction when calibrating (to see a language's probability when it is not on
     # top), the LaBSE batch size and inference dtype ("fp32" or "fp16"), Wikipedia sampling sizes, and the
     # seed for every shuffle.
-    nllb_cap: int = 100_000
+    nllb_cap: int = 200_000
     min_chars: int = 20
     max_chars: int = 512
     min_script: float = 0.8
@@ -392,13 +382,13 @@ def resolve_conditions(spec="all", smoke: bool = False) -> list:
 
 
 def resolve_langs(spec="all", pool: tuple = TARGETS, smoke: bool = False) -> list:
-    # Input: language selection ("all" = the whole pool, group names targets/hubs/controls/study11/
-    # all14, or codes), the pool it is drawn from and smoke flag. Output: ordered language codes;
+    # Input: language selection ("all" = the whole pool, group names targets/hubs/controls/study/all_langs,
+    # or codes), the pool it is drawn from and smoke flag. Output: ordered language codes;
     # under smoke, targets outside SMOKE_TARGETS are dropped.
     groups = {"all": pool, "targets": TARGETS, "hubs": HUBS, "controls": CONTROLS,
-              "study11": STUDY11, "all14": ALL14}
-    restrict = tuple(c for c in ALL14 if c not in TARGETS or c in SMOKE_TARGETS) if smoke else None
-    return _resolve(spec, ALL14, groups, restrict)
+              "study": STUDY_LANGS, "all_langs": ALL_LANGS}
+    restrict = tuple(c for c in ALL_LANGS if c not in TARGETS or c in SMOKE_TARGETS) if smoke else None
+    return _resolve(spec, ALL_LANGS, groups, restrict)
 
 
 def resolve_sizes(models: list) -> list:
@@ -456,7 +446,7 @@ def validate_registry() -> None:
     problems += [f"candidate {c}: missing NTREX/CCMatrix/Wikipedia code or script without SCRIPT_RANGES entry"
                  for c, l in CANDIDATE_LANGUAGES.items() if None in (l.ntrex, l.ccmatrix, l.wiki)
                  or SCRIPT_ALIASES.get(l.script, l.script) not in SCRIPT_RANGES]
-    problems += [f"{c}: study language without NTREX, CCMatrix or Wikipedia code" for c in STUDY11
+    problems += [f"{c}: study language without NTREX, CCMatrix or Wikipedia code" for c in STUDY_LANGS
                  if None in (LANGUAGES[c].ntrex, LANGUAGES[c].ccmatrix, LANGUAGES[c].wiki)]
     problems += [f"smoke target {c} is not a target" for c in SMOKE_TARGETS if c not in TARGETS]
     problems += [f"smoke condition {c} is not a condition" for c in SMOKE_CONDITIONS if c not in CONDITIONS]

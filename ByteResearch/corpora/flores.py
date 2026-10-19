@@ -1,4 +1,4 @@
-# FLORES-200 evaluation data for the fourteen study languages and the candidate targets, plus the fixed
+# FLORES-200 evaluation data for the study and control languages and the candidates, plus the fixed
 # dev subsets. build_flores downloads mteb/flores dev.parquet and devtest.parquet at the pinned revision into
 # ROOT/data/flores/raw, extracts those language columns, checks the 997/1012 row counts and
 # saves one row-aligned JSON per split keyed by our short language codes.
@@ -13,7 +13,7 @@ import functools
 
 import numpy as np
 
-from ..core.config import ALL14, DATA_LANGS, PINS, DataConfig, language
+from ..core.config import ALL_LANGS, DATA_LANGS, PINS, DataConfig, language
 from ..core.io import read_json, write_json_atomic
 from .http import hf_fetch
 from .manifest import begin_build, finish_build, verified_path
@@ -48,11 +48,11 @@ def _read_split(path: str, mtime_ns: int) -> dict:
 
 
 def load_flores(ctx, split: str, langs=None) -> dict:
-    # Inputs: Ctx, split ("dev" or "devtest") and optional language codes (default all fourteen).
+    # Inputs: Ctx, split ("dev" or "devtest") and optional language codes (default all study and control languages).
     # Output: {code: [sentences]} with rows aligned across languages, after a SHA check.
     path = verified_path(ctx.paths.flores_dir(), f"{split}.json")
     data = _read_split(str(path), path.stat().st_mtime_ns)
-    return {code: list(data[code]) for code in (langs or ALL14)}
+    return {code: list(data[code]) for code in (langs or ALL_LANGS)}
 
 
 def _saved_ids(ctx, name: str, compute):

@@ -248,7 +248,7 @@ def axis_values(axis: str, sel: dict, smoke: bool = False) -> list:
         "model": lambda: C.resolve_models(get("model"), smoke),
         "condition": lambda: C.resolve_conditions(get("condition"), smoke),
         "target": lambda: C.resolve_langs(get("target"), C.TARGETS, smoke),
-        "lang": lambda: C.resolve_langs(get("lang"), C.STUDY11, smoke),
+        "lang": lambda: C.resolve_langs(get("lang"), C.STUDY_LANGS, smoke),
         "testset": lambda: C.resolve_testsets(get("testset")),
         "metric": lambda: C.resolve_metrics(get("metric")),
         "lr": lambda: C.resolve_lrs(get("lr")),

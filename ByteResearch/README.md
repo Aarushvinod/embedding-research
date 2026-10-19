@@ -103,14 +103,13 @@ the current selections.
 | `data.candidate_wiki` | candidate | Wikipedia sentences for each candidate target and candidate hub |
 | `data.candidate_table` | - | prints and saves `ROOT/data/nllb/CANDIDATE_TABLE.json` |
 
-Candidate targets (`CANDIDATE_LANGUAGES` in `core/config.py`: Bulgarian, Bengali, Malay, Ukrainian, and the former
-targets Tagalog, Georgian, Armenian, Malayalam) and candidate hubs (`CANDIDATE_HUB_LANGUAGES`: Arabic, the former
-C2 hub) get all their data prepared
-exactly as targets and hubs do, but nothing trains on them:
+Candidate targets (`CANDIDATE_LANGUAGES` in `core/config.py`: Estonian, Sinhala, Tamil) and candidate hubs
+(`CANDIDATE_HUB_LANGUAGES`, currently none) get all their data prepared exactly as targets and hubs do, but nothing
+trains on them:
 - FLORES and NTREX include them, and so does the exclusion set; each has a calibrated LID threshold.
 - Their pairs go through the same filters and cap, into the same `ROOT/data/nllb/` folders: every hub to each
-  candidate target, and each candidate hub to every target and candidate it has NLLB bitext with (pairs NLLB lacks,
-  such as Persian with Georgian, Armenian or Bulgarian, are listed in `NLLB_UNAVAILABLE`).
+  candidate target, and each candidate hub to every target and candidate it has NLLB bitext with (pairs NLLB lacks
+  are listed in `NLLB_UNAVAILABLE`).
 - Their Wikipedia sentences are sampled too.
 
 Adding candidates changes the shared caches' language set: FLORES, NTREX, the exclusion set and the thresholds
@@ -129,7 +128,8 @@ directions from the calibrated thresholds. It refuses study and control language
 after you remove them from `_CANDIDATE_ROWS`. Their FLORES/NTREX rows stay in the small shared caches, so the
 exclusion set and every data hash are unchanged.
 
-Options: `--pairs N` (pairs kept per NLLB file), `--rebuild-data` and `--labse-dtype {fp32,fp16}` (LaBSE
+Options: `--pairs N` (pairs kept per NLLB file; default 200k, everything available below that when a file runs
+out; a pair file built with another cap is rebuilt), `--rebuild-data` and `--labse-dtype {fp32,fp16}` (LaBSE
 precision for the NLLB filter; default fp32, fp16 is about 3x faster). The dtype is recorded in each pair
 manifest, so it enters the data hashes.
 
@@ -149,10 +149,9 @@ per-sentence FLORES scores, the thresholds and their distribution statistics are
 `ROOT/data/thresholds/` and printed with the statistics when built, and each pair manifest records the exact
 values it was filtered with.
 
-Each language is identified by exactly one GlotLID label, the one of its FLORES variety (`arb_Arab` for Modern
-Standard Arabic, `swh_Latn`, `zsm_Latn`, `als_Latn`, `hye_Armn`, ...), so dialect and variant labels do not
-count. `LID_LABEL_OVERRIDES` maps Tagalog to GlotLID's `fil_Latn` (GlotLID has no Tagalog label), and a missing
-label is an error. `corpora.thresholds.lid_passes(ctx, texts, lang)` applies the same check to any texts.
+Each language is identified by exactly one GlotLID label, the one of its FLORES variety (`swh_Latn`, `als_Latn`,
+`srp_Cyrl`, `urd_Arab`, `mal_Mlym`, ...), so dialect and variant labels do not count. `LID_LABEL_OVERRIDES` maps
+Persian to GlotLID's `fas_Arab` and Estonian to `ekk_Latn`, and a missing label is an error. `corpora.thresholds.lid_passes(ctx, texts, lang)` applies the same check to any texts.
 
 DecoderLens buckets each lens output by GlotLID's top label: en, src (the hub) or x when that language's label
 is on top with probability >= `InterpConfig.lid_threshold` (0.5, a fixed value to revisit before the interp

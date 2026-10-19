@@ -18,7 +18,7 @@ import dataclasses
 import numpy as np
 import torch
 
-from ..core.config import CONDITIONS, HUBS, STUDY11, TARGETS, DecodingConfig, InterpConfig, resolve_langs
+from ..core.config import CONDITIONS, HUBS, STUDY_LANGS, TARGETS, DecodingConfig, InterpConfig, resolve_langs
 from ..core.io import sha256_json, write_npz_atomic
 from ..core.registry import composite, is_known, opt, product_units, register_stage
 from ..core.results import load_array, run_array_path, run_result, save_run_array
@@ -141,9 +141,9 @@ def known(*names) -> tuple:
 
 
 def study_langs(ctx) -> tuple:
-    # Input: Ctx. Output: the study languages counted for LAPE (all 11; the smoke targets plus hubs
+    # Input: Ctx. Output: the study languages counted for LAPE (all of them; the smoke targets plus hubs
     # under --smoke).
-    return tuple(resolve_langs("study11", STUDY11, ctx.smoke))
+    return tuple(resolve_langs("study", STUDY_LANGS, ctx.smoke))
 
 
 def checkpoint_info(ctx, unit):

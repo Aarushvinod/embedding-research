@@ -1,4 +1,4 @@
-# NTREX-128 evaluation data for the eleven study languages (eight targets and three hubs) and the candidates.
+# NTREX-128 evaluation data for the study languages (targets and hubs) and the candidates.
 # build_ntrex downloads each language's file from raw.githubusercontent.com at the pinned commit.
 # English uses newstest2019-src.eng.txt and the others newstest2019-ref.{code}.txt (swa for Swahili, fas for
 # Persian, srp-Cyrl for Serbian, rus for Russian, and so on).
@@ -11,7 +11,7 @@ from __future__ import annotations
 import functools
 from pathlib import PurePosixPath
 
-from ..core.config import NTREX_LANGS, PINS, STUDY11, ntrex_file
+from ..core.config import NTREX_LANGS, PINS, STUDY_LANGS, ntrex_file
 from ..core.io import read_json, write_bytes_atomic, write_json_atomic
 from .http import fetch_bytes
 from .manifest import begin_build, finish_build, verified_path
@@ -61,8 +61,8 @@ def _read(path: str, mtime_ns: int) -> dict:
 
 
 def load_ntrex(ctx, langs=None) -> dict:
-    # Inputs: Ctx and optional language codes (default all eleven). Output: {code: [sentences]} with rows
+    # Inputs: Ctx and optional language codes (default all study languages). Output: {code: [sentences]} with rows
     # aligned across languages, after a SHA check.
     path = verified_path(ctx.paths.ntrex_dir(), "ntrex.json")
     data = _read(str(path), path.stat().st_mtime_ns)
-    return {code: list(data[code]) for code in (langs or STUDY11)}
+    return {code: list(data[code]) for code in (langs or STUDY_LANGS)}

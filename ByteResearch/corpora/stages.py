@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import functools
 
-from ..core.config import (ALL14, CANDIDATE_HUBS, CANDIDATE_SOURCES, CONDITIONS, DATA_LANGS, NTREX_LANGS,
+from ..core.config import (ALL_LANGS, CANDIDATE_HUBS, CANDIDATE_SOURCES, CONDITIONS, DATA_LANGS, NTREX_LANGS,
                            NLLB_SOURCES, WIKI_CANDIDATES, TrainConfig, resolve_conditions)
 from ..core.registry import Unit, composite, opt, register_stage
 from .assets import asset_dir, build_labse, build_sacrebleu
@@ -23,7 +23,7 @@ from .exclusion import build_exclusion, exclusion_dir
 from .flores import build_flores, dev_halves, dev_subset_ids
 from .lid import build_glotlid
 from .manifest import inputs_changed, manifest_complete, purge, read_manifest, rebuild_requested, supersede
-from .nllb import build_pairs, filter_table_done, write_filter_table
+from .nllb import build_pairs, filter_table_done, pairs_cap, write_filter_table
 from .ntrex import build_ntrex
 from .thresholds import build_thresholds, purge_thresholds, thresholds_dir
 from .wiki import build_wiki
@@ -40,12 +40,12 @@ PURGE_OPTS = (opt("--purge", default=None, help="data.purge: candidate codes who
 
 
 def data_stage(name: str, directory_fn, stale_fn=None, **kwargs):
-    # Inputs: stage name, a function (ctx, unit) -> dataset directory, an optional stale_fn(ctx) -> whether a
-    # complete dataset no longer covers the configured languages or inputs, and register_stage keywords.
+    # Inputs: stage name, a function (ctx, unit) -> dataset directory, an optional stale_fn(ctx, unit) -> whether
+    # a complete dataset no longer matches the configured languages, inputs or cap, and register_stage keywords.
     # Output: a decorator registering fn as a stage that is done when the directory's manifest is complete and
     # not stale; a stale dataset is superseded and rebuilt automatically, and a forced run otherwise leaves a
     # complete dataset untouched (printing a note) unless --rebuild-data is also given.
-    stale = stale_fn or (lambda ctx: False)
+    stale = stale_fn or (lambda ctx, unit: False)
 
     def deco(fn):
         # Input: the stage function. Output: its registered, guarded wrapper.
@@ -53,8 +53,8 @@ def data_stage(name: str, directory_fn, stale_fn=None, **kwargs):
         def guarded(ctx, unit):
             # Inputs: Ctx and Unit. Runs fn unless the dataset is complete, current and --rebuild-data is absent.
             directory = directory_fn(ctx, unit)
-            if manifest_complete(directory) and stale(ctx) and not rebuild_requested(ctx):
-                print(f"[{name}] languages or inputs changed; superseded {directory} -> {supersede(ctx, directory)}",
+            if manifest_complete(directory) and stale(ctx, unit) and not rebuild_requested(ctx):
+                print(f"[{name}] languages, inputs or cap changed; superseded {directory} -> {supersede(ctx, directory)}",
                       flush=True)
             if manifest_complete(directory) and not rebuild_requested(ctx):
                 print(f"[{name}] kept immutable {directory}; add --rebuild-data to supersede it", flush=True)
@@ -63,7 +63,7 @@ def data_stage(name: str, directory_fn, stale_fn=None, **kwargs):
 
         def done(ctx, unit):
             # Inputs: Ctx and Unit. Output: whether the dataset is complete and not stale.
-            return manifest_complete(directory_fn(ctx, unit)) and not stale(ctx)
+            return manifest_complete(directory_fn(ctx, unit)) and not stale(ctx, unit)
         return register_stage(name, is_done=done, **kwargs)(guarded)
     return deco
 
@@ -75,24 +75,26 @@ def missing_langs(directory, key: str, langs) -> bool:
     return bool(m and m.get("complete")) and not set(langs) <= set(m.get("config", {}).get(key, []))
 
 
-def flores_stale(ctx) -> bool:
-    # Input: Ctx. Output: whether the built FLORES lacks a configured data language.
+def flores_stale(ctx, unit=None) -> bool:
+    # Inputs: Ctx and the (unused) Unit. Output: whether the built FLORES lacks a configured data language.
     return missing_langs(ctx.paths.flores_dir(), "columns", DATA_LANGS)
 
 
-def ntrex_stale(ctx) -> bool:
-    # Input: Ctx. Output: whether the built NTREX lacks a configured NTREX language.
+def ntrex_stale(ctx, unit=None) -> bool:
+    # Inputs: Ctx and the (unused) Unit. Output: whether the built NTREX lacks a configured NTREX language.
     return missing_langs(ctx.paths.ntrex_dir(), "langs", NTREX_LANGS)
 
 
-def exclusion_stale(ctx) -> bool:
-    # Input: Ctx. Output: whether the exclusion set was built from other FLORES/NTREX outputs than the current ones.
+def exclusion_stale(ctx, unit=None) -> bool:
+    # Inputs: Ctx and the (unused) Unit. Output: whether the exclusion set was built from other FLORES/NTREX
+    # outputs than the current ones.
     return manifest_complete(exclusion_dir(ctx)) and inputs_changed(
         exclusion_dir(ctx), {"flores": ctx.paths.flores_dir(), "ntrex": ctx.paths.ntrex_dir()})
 
 
-def thresholds_stale(ctx) -> bool:
-    # Input: Ctx. Output: whether the thresholds were calibrated on other FLORES outputs than the current ones.
+def thresholds_stale(ctx, unit=None) -> bool:
+    # Inputs: Ctx and the (unused) Unit. Output: whether the thresholds were calibrated on other FLORES outputs
+    # than the current ones.
     return manifest_complete(thresholds_dir(ctx)) and inputs_changed(thresholds_dir(ctx), {"flores": ctx.paths.flores_dir()})
 
 
@@ -144,7 +146,18 @@ def thresholds_stage(ctx, unit):
     build_thresholds(ctx)
 
 
+def cap_stale(hub_fn):
+    # Input: a function unit -> (hub, x). Output: stale_fn(ctx, unit) that is true when the unit's complete pair
+    # file was built with another cap than the current one (--pairs or DataConfig.nllb_cap).
+    def stale(ctx, unit):
+        # Inputs: Ctx and a pair Unit. Output: whether its complete pair file has a different cap.
+        m = read_manifest(ctx.paths.nllb_dir(*hub_fn(unit)))
+        return bool(m and m.get("complete")) and m.get("config", {}).get("cap") != pairs_cap(ctx)
+    return stale
+
+
 @data_stage("data.nllb", lambda c, u: c.paths.nllb_dir(CONDITIONS[u.condition].hub, u.target),
+            cap_stale(lambda u: (CONDITIONS[u.condition].hub, u.target)),
             grid=("condition", "target"), order=20, options=DATA_OPTS,
             requires=("data.flores", "data.ntrex", "data.exclusion", "data.lid_model", "data.labse_model", "data.thresholds"))
 def nllb_stage(ctx, unit):
@@ -165,7 +178,7 @@ def candidate_wiki_units(sel: dict, smoke: bool = False) -> list:
     return [Unit(lang=x) for x in WIKI_CANDIDATES]
 
 
-@data_stage("data.candidates", lambda c, u: c.paths.nllb_dir(u.hub, u.lang),
+@data_stage("data.candidates", lambda c, u: c.paths.nllb_dir(u.hub, u.lang), cap_stale(lambda u: (u.hub, u.lang)),
             grid=candidate_units, order=22, options=DATA_OPTS,
             requires=("data.flores", "data.ntrex", "data.exclusion", "data.lid_model", "data.labse_model", "data.thresholds"))
 def candidates_stage(ctx, unit):
@@ -206,7 +219,7 @@ def purge_codes(ctx) -> list:
     # Input: Ctx. Output: the language codes given with --purge; raises ValueError for a study or control
     # language, whose data training, evaluation or interp still need.
     codes = [c.strip() for c in str(ctx.opt("purge") or "").split(",") if c.strip()]
-    protected = [c for c in codes if c in ALL14]
+    protected = [c for c in codes if c in ALL_LANGS]
     if protected:
         raise ValueError(f"refusing to purge study/control languages {protected}")
     return codes

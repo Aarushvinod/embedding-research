@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import torch
 from transformers import EarlyStoppingCallback
 
-from ..core.config import ALL14, CONDITIONS, MODELS, InterpConfig, config_hash, resolve_lrs
+from ..core.config import ALL_LANGS, CONDITIONS, MODELS, InterpConfig, config_hash, resolve_lrs
 from ..core.dist import barrier, is_main
 from ..core.paths import COMPLETE_MARKER, run_id
 from ..core.registry import opt, register_stage
@@ -83,7 +83,7 @@ def build_meta(ctx, spec: RunSpec, cfg, plan, tok, model, targets, n_train: int,
               "max_steps": max_steps, "targets": list(targets), "seed": seed}
     return {"model": spec.model, "condition": spec.condition, "lr": spec.lr, "run_id": spec.run_id,
             "config": config, "config_hash": config_hash(config), "data_hash": data_hash(ctx, spec.condition),
-            "tags": tag_ids(tok, ALL14), "suppress": suppress_ids(tok, model.config.vocab_size),
+            "tags": tag_ids(tok, ALL_LANGS), "suppress": suppress_ids(tok, model.config.vocab_size),
             "targets": list(targets), "hub": CONDITIONS[spec.condition].hub, "tokenizer": MODELS[spec.model].hf_id,
             "model_id": MODELS[spec.model].hf_id, "versions": library_versions(), "git_commit": git_commit(),
             "world_size": plan.world, "per_device_batch": plan.per_device, "grad_accum": plan.grad_accum,

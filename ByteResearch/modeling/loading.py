@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-from ..core.config import ALL14, MODELS
+from ..core.config import ALL_LANGS, MODELS
 from ..core.io import read_json, sha256_file
 from ..core.paths import META_FILE, run_id
 from .tags import suppress_ids, tag_ids
@@ -64,10 +64,10 @@ def arch_of(model) -> str:
 
 
 def make_trained(model, tok, tags=None, meta=None, arch=None, key=None, condition=None) -> Trained:
-    # Inputs: model, tokenizer, optional tag dict (default: looked up for all 14 languages), meta,
+    # Inputs: model, tokenizer, optional tag dict (default: looked up for all study and control languages), meta,
     # arch, registry key and condition. Output: the Trained bundle with suppression ids and sizes.
     cfg = model.config
-    return Trained(model=model, tok=tok, tags=dict(tags or tag_ids(tok, ALL14)),
+    return Trained(model=model, tok=tok, tags=dict(tags or tag_ids(tok, ALL_LANGS)),
                    suppress=suppress_ids(tok, cfg.vocab_size), meta=dict(meta or {}),
                    arch=arch or arch_of(model), n_enc=cfg.num_layers, n_dec=cfg.num_decoder_layers,
                    d_model=cfg.d_model, d_ff=cfg.d_ff, key=key, condition=condition)

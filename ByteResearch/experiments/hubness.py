@@ -1,5 +1,5 @@
 # Hubness experiment: which language do the encoder's sentence representations gravitate to, layer by layer?
-# Stage states pools each FLORES devtest sentence of the eleven study languages over its tokens (masked mean
+# Stage states pools each FLORES devtest sentence of the study languages over its tokens (masked mean
 # with EOS) at the embedding output and at every encoder block output, inside forward hooks, in float32.
 # Stage similarity z-scores every dimension over all sentences of all languages at each layer, so massive
 # activation dimensions cannot dominate, and scores a language pair by the mean paired cosine of the two
@@ -18,7 +18,7 @@ import numpy as np
 import torch
 from scipy.stats import rankdata
 
-from ..core.config import PINS, STUDY11, DecodingConfig, InterpConfig, config_hash, resolve_langs
+from ..core.config import PINS, STUDY_LANGS, DecodingConfig, InterpConfig, config_hash, resolve_langs
 from ..core.registry import composite, register_stage
 from ..core.results import ResultFile, load_array, locate, provenance, run_result, save_run_array
 from ..core.text import truncate_chars
@@ -62,7 +62,7 @@ def flores_texts(ctx, langs) -> dict:
 
 def study_langs(ctx) -> list:
     # Input: Ctx. Output: the study languages (8 targets + en, ar, ru; smoke keeps the smoke targets).
-    return resolve_langs("study11", STUDY11, ctx.smoke)
+    return resolve_langs("study", STUDY_LANGS, ctx.smoke)
 
 
 def rows_config(rows) -> dict:
