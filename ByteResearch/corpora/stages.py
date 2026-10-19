@@ -2,11 +2,11 @@
 # data.flores, data.ntrex and data.exclusion build the evaluation sets and the exclusion set; data.lid_model,
 # data.labse_model and data.sacrebleu cache GlotLID, LaBSE and the flores200 SPM model, and data.thresholds
 # calibrates the LID, LaBSE and length-ratio thresholds (and the script reference) on FLORES.
-# data.nllb runs over condition x target and data.wiki over the study languages; data.table prints and saves the
-# per-pair filter table, and data.candidates, data.candidate_wiki and data.candidate_table do the same for the
-# candidate targets and candidate hubs (never trained on, but a promoted candidate finds its data ready).
-# data.purge --purge CODES permanently deletes every pair, Wikipedia sample and threshold of unchosen candidates;
-# it refuses study and control languages and does nothing without --purge.
+# data.nllb runs over condition x target and data.wiki over the study and control languages; data.table prints
+# and saves the per-pair filter table, and data.candidates, data.candidate_wiki and data.candidate_table do the
+# same for the candidate targets and candidate hubs (never trained on, but a promoted one finds its data ready).
+# data.purge --purge CODES permanently deletes every pair (found on disk), Wikipedia sample and threshold of
+# languages no longer wanted; it refuses study and control languages and does nothing without --purge.
 # A stage is done when its manifest is complete, and a complete manifest is only replaced with --force
 # --rebuild-data (the old directory moves to ROOT/data/_superseded/), except that the shared caches (FLORES,
 # NTREX, exclusion set, thresholds) rebuild themselves when the language set grows or their inputs change.
@@ -16,7 +16,7 @@ from __future__ import annotations
 import functools
 
 from ..core.config import (ALL_LANGS, CANDIDATE_HUBS, CANDIDATE_SOURCES, CONDITIONS, DATA_LANGS, NTREX_LANGS,
-                           NLLB_SOURCES, WIKI_CANDIDATES, TrainConfig, resolve_conditions)
+                           WIKI_CANDIDATES, TrainConfig, resolve_conditions, resolve_langs)
 from ..core.registry import Unit, composite, opt, register_stage
 from .assets import asset_dir, build_labse, build_sacrebleu
 from .exclusion import build_exclusion, exclusion_dir
@@ -31,12 +31,12 @@ from .wiki import build_wiki
 DATA_OPTS = (
     opt("--rebuild-data", action="store_true",
         help="with --force: supersede complete data caches (moved to ROOT/data/_superseded/<ts>/)"),
-    opt("--pairs", type=int, default=None, help="pairs kept per NLLB file (default 100k, 2k under --smoke)"),
+    opt("--pairs", type=int, default=None, help="pairs kept per NLLB file (default 200k, 2k under --smoke)"),
     opt("--labse-dtype", choices=("fp32", "fp16"), default=None,
         help="LaBSE inference dtype for the NLLB filter (default fp32; fp16 is about 3x faster)"),
 )
-WIKI_OPTS = DATA_OPTS + (opt("--lang", default="all", help="study languages for data.wiki (all | codes)"),)
-PURGE_OPTS = (opt("--purge", default=None, help="data.purge: candidate codes whose data to delete, comma list"),)
+WIKI_OPTS = DATA_OPTS + (opt("--lang", default="all", help="study and control languages for data.wiki (all | codes)"),)
+PURGE_OPTS = (opt("--purge", default=None, help="data.purge: codes of languages whose data to delete, comma list"),)
 
 
 def data_stage(name: str, directory_fn, stale_fn=None, **kwargs):
@@ -165,6 +165,12 @@ def nllb_stage(ctx, unit):
     build_pairs(ctx, CONDITIONS[unit.condition].hub, unit.target)
 
 
+def wiki_units(sel: dict, smoke: bool = False) -> list:
+    # Inputs: selections and smoke flag. Output: one (lang) Unit per selected study or control language (--lang;
+    # the LAPE language pool together with the candidate hubs' samples).
+    return [Unit(lang=x) for x in resolve_langs(sel.get("lang"), ALL_LANGS, smoke)]
+
+
 def candidate_units(sel: dict, smoke: bool = False) -> list:
     # Inputs: selections and smoke flag. Output: (hub, lang) Units for every candidate pair whose hub is the hub
     # of a selected condition or a candidate hub: each hub to each candidate target, and each candidate hub to
@@ -186,7 +192,7 @@ def candidates_stage(ctx, unit):
     build_pairs(ctx, unit.hub, unit.lang)
 
 
-@data_stage("data.wiki", lambda c, u: c.paths.wiki_dir(u.lang), grid=("lang",), order=21, options=WIKI_OPTS,
+@data_stage("data.wiki", lambda c, u: c.paths.wiki_dir(u.lang), grid=wiki_units, order=21, options=WIKI_OPTS,
             requires=("data.exclusion", "data.lid_model", "data.thresholds"))
 def wiki_stage(ctx, unit):
     # Inputs: Ctx and a (lang) Unit. Samples that language's Wikipedia sentences.
@@ -232,13 +238,13 @@ def purge_done(ctx, unit) -> bool:
 
 @register_stage("data.purge", grid=(), is_done=purge_done, order=40, options=PURGE_OPTS)
 def purge_stage(ctx, unit):
-    # Inputs: Ctx and the empty Unit. Permanently deletes every pair cache involving each --purge language (as
-    # target or as candidate hub) and its Wikipedia sample, whether or not it is still listed as a candidate,
-    # prints the space freed and removes its languages and directions from the calibrated thresholds.
+    # Inputs: Ctx and the empty Unit. Permanently deletes every pair cache on disk involving each --purge language
+    # (as either side) and its Wikipedia sample, whether or not the language is still configured, prints the
+    # space freed and removes its languages and directions from the calibrated thresholds.
     codes = purge_codes(ctx)
-    pairs = list(NLLB_SOURCES) + list(CANDIDATE_SOURCES)
+    built = sorted(d for d in ctx.paths.data("nllb").glob("*__*") if d.is_dir())
     for code in codes:
-        dirs = [ctx.paths.nllb_dir(h, x) for h, x in pairs if code in (h, x)] + [ctx.paths.wiki_dir(code)]
+        dirs = [d for d in built if code in d.name.split("__")] + [ctx.paths.wiki_dir(code)]
         freed = sum(purge(ctx, d) for d in dirs)
         print(f"[data.purge] {code}: deleted {freed / 2**20:.1f} MB", flush=True)
     if codes and purge_thresholds(ctx, codes):

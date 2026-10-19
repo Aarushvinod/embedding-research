@@ -1,4 +1,4 @@
-# NTREX-128 evaluation data for the study languages (targets and hubs) and the candidates.
+# NTREX-128 evaluation data for the study languages (targets and hubs) and the candidates (including English).
 # build_ntrex downloads each language's file from raw.githubusercontent.com at the pinned commit.
 # English uses newstest2019-src.eng.txt and the others newstest2019-ref.{code}.txt (swa for Swahili, fas for
 # Persian, srp-Cyrl for Serbian, rus for Russian, and so on).

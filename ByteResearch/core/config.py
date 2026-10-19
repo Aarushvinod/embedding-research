@@ -3,8 +3,8 @@
 # NTREX, CCMatrix and Wikipedia codes, scripts and decoder-tag sentinel indices, the GlotLID label
 # overrides, the Unicode script ranges and sentence terminators, so a language change stays here.
 # It also defines the six models, the three fine-tuning conditions, the hub x target NLLB source table, the
-# candidate targets and candidate hubs (prepared exactly like targets and hubs so promoting one reuses its
-# data, but never trained on) and the pinned revisions of every external resource, and validates them on import.
+# candidate targets and candidate hubs (English: prepared exactly like targets and hubs so promoting one reuses
+# its data, but never trained on) and the pinned revisions of every external resource, and validates them on import.
 # Frozen config dataclasses carry the defaults from the approved plan for data, training (including the
 # LR-sweep directions), decoding and interpretability, and smoke_overrides shrinks them for the smoke subtree.
 # Resolver helpers turn CLI selections such as "all", "small" or "byt5,mt5-base" into lists.
@@ -20,7 +20,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Language:
     # One language: short code, English name, FLORES code, NTREX code (None for controls), CCMatrix ISO
-    # code (None for controls), Wikipedia subdomain (None for controls), ISO 15924 script, role ("target",
+    # code (None for controls), Wikipedia subdomain, ISO 15924 script, role ("target",
     # "hub", "control", "candidate" or "candidate_hub") and the sentinel index k of its decoder tag (-1 for
     # candidates and candidate hubs, which have no tag).
     code: str
@@ -68,27 +68,25 @@ class NllbSource:
 
 _LANG_ROWS = (
     ("sw", "Swahili", "swh_Latn", "swa", "sw", "sw", "Latn", "target"),
-    ("sq", "Albanian", "als_Latn", "sqi", "sq", "sq", "Latn", "target"),
     ("sr", "Serbian", "srp_Cyrl", "srp-Cyrl", "sr", "sr", "Cyrl", "target"),
-    ("ur", "Urdu", "urd_Arab", "urd", "ur", "ur", "Arab", "target"),
+    ("et", "Estonian", "est_Latn", "est", "et", "et", "Latn", "target"),
     ("ml", "Malayalam", "mal_Mlym", "mal", "ml", "ml", "Mlym", "target"),
-    ("en", "English", "eng_Latn", "eng", "en", "en", "Latn", "hub"),
+    ("bn", "Bengali", "ben_Beng", "ben", "bn", "bn", "Beng", "target"),
+    ("fr", "French", "fra_Latn", "fra", "fr", "fr", "Latn", "hub"),
     ("fa", "Persian", "pes_Arab", "fas", "fa", "fa", "Arab", "hub"),
     ("ru", "Russian", "rus_Cyrl", "rus", "ru", "ru", "Cyrl", "hub"),
-    ("es", "Spanish", "spa_Latn", None, None, None, "Latn", "control"),
-    ("zh", "Chinese", "zho_Hans", None, None, None, "Hans", "control"),
-    ("el", "Greek", "ell_Grek", None, None, None, "Grek", "control"),
+    ("es", "Spanish", "spa_Latn", None, None, "es", "Latn", "control"),
+    ("zh", "Chinese", "zho_Hans", None, None, "zh", "Hans", "control"),
+    ("el", "Greek", "ell_Grek", None, None, "el", "Grek", "control"),
 )
-LID_LABEL_OVERRIDES: dict = {"fa": "fas_Arab", "et": "ekk_Latn"}
+LID_LABEL_OVERRIDES: dict = {"fa": "fas_Arab", "et": "ekk_Latn", "zh": "cmn_Hani"}
 
-_CANDIDATE_ROWS = (
-    ("et", "Estonian", "est_Latn", "est", "et", "et", "Latn", "candidate"),
-    ("si", "Sinhala", "sin_Sinh", "sin", "si", "si", "Sinh", "candidate"),
-    ("ta", "Tamil", "tam_Taml", "tam", "ta", "ta", "Taml", "candidate"),
-)
+_CANDIDATE_ROWS: tuple = ()
 CANDIDATE_LANGUAGES: dict = {row[0]: Language(*row, tag_k=-1) for row in _CANDIDATE_ROWS}
 CANDIDATES: tuple = tuple(CANDIDATE_LANGUAGES)
-_CANDIDATE_HUB_ROWS: tuple = ()
+_CANDIDATE_HUB_ROWS = (
+    ("en", "English", "eng_Latn", "eng", "en", "en", "Latn", "candidate_hub"),
+)
 CANDIDATE_HUB_LANGUAGES: dict = {row[0]: Language(*row, tag_k=-1) for row in _CANDIDATE_HUB_ROWS}
 CANDIDATE_HUBS: tuple = tuple(CANDIDATE_HUB_LANGUAGES)
 NLLB_UNAVAILABLE: frozenset = frozenset()
@@ -106,7 +104,7 @@ STUDY_LANGS: tuple = TARGETS + HUBS
 ALL_LANGS: tuple = STUDY_LANGS + CONTROLS
 DATA_LANGS: tuple = ALL_LANGS + CANDIDATES + CANDIDATE_HUBS
 NTREX_LANGS: tuple = STUDY_LANGS + CANDIDATES + CANDIDATE_HUBS
-LID_LANGS: tuple = STUDY_LANGS + CANDIDATES + CANDIDATE_HUBS
+LID_LANGS: tuple = ALL_LANGS + CANDIDATES + CANDIDATE_HUBS
 WIKI_CANDIDATES: tuple = CANDIDATES + CANDIDATE_HUBS
 
 MODELS: dict[str, ModelSpec] = {
@@ -118,7 +116,7 @@ SIZES: tuple = ("small", "base", "large")
 ARCHS: tuple = ("byt5", "mt5")
 
 CONDITIONS: dict[str, Condition] = {
-    "C1": Condition("C1", "en", TARGETS),
+    "C1": Condition("C1", "fr", TARGETS),
     "C2": Condition("C2", "fa", TARGETS),
     "C3": Condition("C3", "ru", TARGETS),
 }
@@ -134,7 +132,7 @@ _ALLENAI = "https://storage.googleapis.com/allennlp-data-bucket/nllb/{name}.gz"
 _CCMATRIX = "http://data.statmt.org/cc-matrix/{name}.bitextf.tsv.gz"
 NLLB_ALLENAI_HUBS: tuple = ("en",)
 NLLB_ALLENAI_PAIRS: tuple = ()
-NLLB_CCMATRIX_PAIRS: tuple = (("en", "sq"), ("en", "sr"), ("en", "et"))
+NLLB_CCMATRIX_PAIRS: tuple = (("en", "sr"), ("en", "et"))
 
 
 def language(code: str) -> Language:
@@ -265,7 +263,7 @@ class TrainConfig:
     # size of the fixed FLORES-dev subset each direction is selected on.
     lrs: tuple = (1e-4, 3e-4, 1e-3)
     sweep_steps: int = 3000
-    sweep_directions: tuple = (("C1", "sw"), ("C2", "ur"), ("C3", "sr"))
+    sweep_directions: tuple = (("C1", "sw"), ("C2", "bn"), ("C3", "sr"))
     epochs: int = 3
     max_steps: int | None = None
     warmup_steps: int = 1000
@@ -434,7 +432,7 @@ def lang_field(codes, attr: str) -> list:
 def validate_registry() -> None:
     # Checks the language registry and everything derived from it: tag sentinels within mT5's 100
     # (k <= MAX_TAG_K), scripts covered by SCRIPT_RANGES, NTREX/CCMatrix/Wikipedia codes for every study
-    # language, GlotLID label overrides, smoke selections, sweep directions and controls drawn from the
+    # language, Wikipedia codes for every control, GlotLID label overrides, smoke selections, sweep directions and controls drawn from the
     # registry, one NLLB source per hub and target, and candidates that are new codes with
     # NTREX/CCMatrix/Wikipedia codes and covered scripts. Raises ValueError naming every problem. No output.
     problems = [f"tag k {l.tag_k} of {c} exceeds {MAX_TAG_K}; lower TAG_K0" for c, l in LANGUAGES.items()
@@ -450,6 +448,7 @@ def validate_registry() -> None:
                  or SCRIPT_ALIASES.get(l.script, l.script) not in SCRIPT_RANGES]
     problems += [f"{c}: study language without NTREX, CCMatrix or Wikipedia code" for c in STUDY_LANGS
                  if None in (LANGUAGES[c].ntrex, LANGUAGES[c].ccmatrix, LANGUAGES[c].wiki)]
+    problems += [f"control {c}: missing Wikipedia code" for c in CONTROLS if LANGUAGES[c].wiki is None]
     problems += [f"smoke target {c} is not a target" for c in SMOKE_TARGETS if c not in TARGETS]
     problems += [f"smoke condition {c} is not a condition" for c in SMOKE_CONDITIONS if c not in CONDITIONS]
     problems += [f"condition {k} uses unknown languages" for k, c in CONDITIONS.items()

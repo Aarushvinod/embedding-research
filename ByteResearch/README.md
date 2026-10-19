@@ -1,7 +1,8 @@
 # ByteResearch
 
 ByteResearch fine-tunes ByT5 and mT5 encoder-decoders (small, base, large) for translation from a hub
-language (C1 English, C2 Persian, C3 Russian) into a set of target languages, one model per direction. It then evaluates the fine-tuned
+language (C1 French, C2 Persian, C3 Russian) into five target languages (Swahili, Serbian, Estonian, Malayalam,
+Bengali), one model per direction. It then evaluates the fine-tuned
 models and runs five interpretability experiments on them. Everything runs through one CLI made of small,
 resumable stages, and every result is a JSON file with the same envelope.
 
@@ -57,7 +58,7 @@ ROOT/envs/metrics, ROOT/envs/metricx (default METRICS_DIR), ROOT/tmp
 ROOT/smoke/...                                                           same layout, --smoke only
 ```
 
-`run_id` is `{model}__{condition}__{target}` for a trained direction (e.g. `byt5-small__C2__ur`), and
+`run_id` is `{model}__{condition}__{target}` for a trained direction (e.g. `byt5-small__C2__bn`), and
 `{model}__{condition}` for units without a target. Sweep cells use `{model}__{condition}__{target}__lr{lr}`,
 and ByT5-vs-mT5 comparisons use `{size}__{condition}`.
 
@@ -75,7 +76,7 @@ python -m ByteResearch.run <stage | composite | list | status> [selections] [fla
 | `--testset` | `all`, `main` (= `flores_devtest,ntrex`), `flores_devtest`, `ntrex`, `flores_dev` |
 | `--metric` | `all`, `sacre`, `neural`, or `chrf_pp,spbleu,comet,metricx` |
 | `--lr` | learning rates (default: the sweep grid 1e-4, 3e-4, 1e-3) |
-| `--lang` | study languages for `data.wiki` (default: all 11) |
+| `--lang` | study and control languages for `data.wiki` (default: all 11) |
 | `--variant` | LAPE variant tokens such as `k1`, `shared`, `k0.5__en_only` |
 
 Global flags: `--force`, `--no-deps`, `--keep-going`, `--smoke`, `--pilot`, `--gpus N`, `--seed`,
@@ -98,14 +99,15 @@ the current selections.
 | `data.sacrebleu` | - | the flores200 SPM model for spBLEU |
 | `data.thresholds` | - | FLORES dev + devtest calibration of the filter thresholds (`ROOT/data/thresholds/`) |
 | `data.nllb` | condition x target | filtered NLLB pairs (hub to target) |
-| `data.wiki` | lang | Wikipedia sentences (LAPE only) |
+| `data.wiki` | lang | Wikipedia sentences for the study and control languages (LAPE only) |
 | `data.table` | - | prints and saves `ROOT/data/nllb/FILTER_TABLE.json` (pairs left after each filter) |
 | `data.candidates` | hub x language | filtered NLLB pairs: each hub to each candidate target, each candidate hub to every target and candidate it has bitext with |
 | `data.candidate_wiki` | candidate | Wikipedia sentences for each candidate target and candidate hub |
 | `data.candidate_table` | - | prints and saves `ROOT/data/nllb/CANDIDATE_TABLE.json` |
+| `data.purge` | - | with `--purge CODES`: deletes those languages' pairs, Wikipedia samples and thresholds |
 
-Candidate targets (`CANDIDATE_LANGUAGES` in `core/config.py`: Estonian, Sinhala, Tamil) and candidate hubs
-(`CANDIDATE_HUB_LANGUAGES`, currently none) get all their data prepared exactly as targets and hubs do, but nothing
+Candidate targets (`CANDIDATE_LANGUAGES` in `core/config.py`, currently none) and candidate hubs
+(`CANDIDATE_HUB_LANGUAGES`: English) get all their data prepared exactly as targets and hubs do, but nothing
 trains on them:
 - FLORES and NTREX include them, and so does the exclusion set; each has a calibrated LID threshold.
 - Their pairs go through the same filters and cap, into the same `ROOT/data/nllb/` folders: every hub to each
@@ -122,12 +124,11 @@ To promote a candidate, move its row from `_CANDIDATE_ROWS` to `_LANG_ROWS` (as 
 one); to promote a candidate hub, move its row into `_LANG_ROWS` as a hub and point a condition at it. Its pairs,
 FLORES/NTREX rows and Wikipedia sample are then already cached.
 
-To discard the candidates you did not choose, run `python -m ByteResearch.run data.purge --purge sq,uk`. This
-permanently deletes every pair involving them (as target or as candidate hub) and their Wikipedia samples, and
-removes their languages and
-directions from the calibrated thresholds. It refuses study and control languages, and it works before or
-after you remove them from `_CANDIDATE_ROWS`. Their FLORES/NTREX rows stay in the small shared caches, so the
-exclusion set and every data hash are unchanged.
+To discard languages you no longer use, run `python -m ByteResearch.run data.purge --purge sq,ur`. This
+permanently deletes every pair folder on disk involving them (as either side) and their Wikipedia samples, and
+removes their languages and directions from the calibrated thresholds. It refuses study and control languages,
+and it works before or after you remove them from `core/config.py`. Their FLORES/NTREX rows stay in the small
+shared caches, so the exclusion set and every data hash are unchanged.
 
 Options: `--pairs N` (pairs kept per NLLB file; default 200k, everything available below that when a file runs
 out; a pair file built with another cap is rebuilt), `--rebuild-data` and `--labse-dtype {fp32,fp16}` (LaBSE
@@ -150,9 +151,10 @@ per-sentence FLORES scores, the thresholds and their distribution statistics are
 `ROOT/data/thresholds/` and printed with the statistics when built, and each pair manifest records the exact
 values it was filtered with.
 
-Each language is identified by exactly one GlotLID label, the one of its FLORES variety (`swh_Latn`, `als_Latn`,
-`srp_Cyrl`, `urd_Arab`, `mal_Mlym`, ...), so dialect and variant labels do not count. `LID_LABEL_OVERRIDES` maps
-Persian to GlotLID's `fas_Arab` and Estonian to `ekk_Latn`, and a missing label is an error. `corpora.thresholds.lid_passes(ctx, texts, lang)` applies the same check to any texts.
+Each language is identified by exactly one GlotLID label, the one of its FLORES variety (`swh_Latn`, `srp_Cyrl`,
+`mal_Mlym`, `ben_Beng`, `fra_Latn`, ...), so dialect and variant labels do not count. `LID_LABEL_OVERRIDES` maps
+Persian to GlotLID's `fas_Arab`, Estonian to `ekk_Latn` and Chinese to `cmn_Hani`, and a missing label is an
+error. The controls (Spanish, Chinese, Greek) are calibrated too, since their Wikipedia samples use the filter. `corpora.thresholds.lid_passes(ctx, texts, lang)` applies the same check to any texts.
 
 DecoderLens buckets each lens output by GlotLID's top label: en, src (the hub) or x when that language's label
 is on top with probability >= `InterpConfig.lid_threshold` (0.5, a fixed value to revisit before the interp
@@ -176,7 +178,7 @@ fraction of all outputs and its share among identified (non-und) outputs.
 - Loss: the standard token-level cross-entropy, the mean over all label tokens of the global batch, with the
   token count taken across gradient-accumulation steps and GPUs, so every batch layout gives the same loss.
 - LR sweep: `TrainConfig.lrs` (1e-4, 3e-4, 1e-3) x `TrainConfig.sweep_steps` (3000) on the fixed
-  `TrainConfig.sweep_directions` (C1-sw, C2-ur, C3-sr; `--condition` and `--target` only narrow them, and the
+  `TrainConfig.sweep_directions` (C1-sw, C2-bn, C3-sr; `--condition` and `--target` only narrow them, and the
   selection needs all of them). Every
   direction of a model then trains with that model's selected LR.
 - Dev selection: greedy chrF++ on a fixed, seeded subset of 200 FLORES-dev sentences of the direction's target
@@ -281,8 +283,8 @@ N-GPU runs train on the same batches. Use `--per-device-batch` to fit GPU memory
 All other stages run in one process, on `cuda:0` (or `--device`).
 
 ```bash
-python -m ByteResearch.run train --model byt5-small --condition C2 --target ur            # one GPU
-python -m ByteResearch.run train --model byt5-small --condition C2 --target ur --gpus 4   # four GPUs
+python -m ByteResearch.run train --model byt5-small --condition C2 --target bn            # one GPU
+python -m ByteResearch.run train --model byt5-small --condition C2 --target bn --gpus 4   # four GPUs
 ```
 
 ## Results

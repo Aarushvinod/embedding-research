@@ -1,9 +1,9 @@
-# NLLB-mined training pairs: 24 files (three hubs times eight targets) streamed from AllenAI and CCMatrix,
-# plus the candidate pairs (each hub to each candidate target), built identically but never trained on.
+# NLLB-mined training pairs: 15 files (three hubs times five targets) streamed from AllenAI and CCMatrix,
+# plus the candidate pairs (candidate hub English to each target), built identically but never trained on.
 # parse_line reads one TSV line in the file's own layout (AllenAI: text, text, laser score, ...; CCMatrix:
 # score, text, text) and orients it to (hub_text, x_text, score) using core.config.NLLB_SOURCES.
 # build_pairs streams the score-sorted file with GzLineStream and applies the ordered filter chain of
-# corpora.filters with GlotLID and LaBSE, stopping at the cap (100k, 2k under --smoke, or --pairs).
+# corpora.filters with GlotLID and LaBSE, stopping at the cap (200k, 2k under --smoke, or --pairs).
 # It writes ROOT/data/nllb/{hub}__{X}/pairs.jsonl.gz read-only (candidates too, so a promoted candidate's
 # pairs are already in place), with a manifest holding the stream provenance,
 # filter config (LaBSE dtype and LID rule with both sides' GlotLID labels, so both enter the data hashes),
