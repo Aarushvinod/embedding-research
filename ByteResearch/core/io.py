@@ -5,7 +5,8 @@
 # which lets an interrupted stage simply redo the affected step.
 # Gzipped JSONL is written with mtime=0 so identical content gives identical bytes and hashes.
 # The module also provides hashing, read-only marking, a cross-process file lock, a UTF-8 console fix
-# for Windows and tee_output, which copies console output into a per-unit log file.
+# for Windows, tee_output, which copies console output into a per-unit log file, and publish_log, which
+# appends a finished local log to its final location in one write.
 
 from __future__ import annotations
 
@@ -189,3 +190,16 @@ def tee_output(path, header: str = ""):
             yield path
         finally:
             sys.stdout, sys.stderr = saved
+
+
+def publish_log(local, final) -> None:
+    # Inputs: the log file written while a unit ran and its final path. Appends the local log to the final
+    # one in a single write and deletes the local file; does nothing when both are the same path or the
+    # local log does not exist.
+    local, final = Path(local), Path(final)
+    if local == final or not local.exists():
+        return
+    final.parent.mkdir(parents=True, exist_ok=True)
+    with open(final, "a", encoding="utf-8", errors="replace") as out:
+        out.write(local.read_text(encoding="utf-8", errors="replace"))
+    local.unlink()

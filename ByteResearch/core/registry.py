@@ -25,7 +25,7 @@ from typing import Callable
 
 from . import config as C
 from .dist import is_main, relaunch_with_torchrun, under_torchrun
-from .io import tee_output
+from .io import publish_log, tee_output
 from .paths import compare_id, run_id
 
 AXES = ("model", "condition", "target", "testset", "metric", "lang", "lr", "size", "variant", "hub")
@@ -353,13 +353,20 @@ def log_name(unit: Unit) -> str:
     return unit.run_id or "_".join(str(v) for v in unit.as_dict().values()) or "all"
 
 
+@contextlib.contextmanager
 def unit_log(ctx, stage: str, name: str, label: str):
-    # Inputs: Ctx, stage name, log file stem and unit label. Output: a context manager that appends the
-    # console output to ROOT/logs/{stage}/{name}.log (with a timestamped header) on the main rank, and
-    # does nothing on other ranks.
+    # Inputs: Ctx, stage name, log file stem and unit label. Yields while the main rank copies the console
+    # output (with a timestamped header) into the unit's local log, which is appended to
+    # ROOT/logs/{stage}/{name}.log once the unit ends, also after a failure; other ranks log nothing.
     if not is_main():
-        return contextlib.nullcontext()
-    return tee_output(ctx.paths.log(stage, name), f"=== {time.strftime('%Y-%m-%d %H:%M:%S')} {stage} {label}")
+        yield None
+        return
+    local, final = ctx.paths.local_log(stage, name), ctx.paths.log(stage, name)
+    try:
+        with tee_output(local, f"=== {time.strftime('%Y-%m-%d %H:%M:%S')} {stage} {label}") as path:
+            yield path
+    finally:
+        publish_log(local, final)
 
 
 def _run_batch(ctx, stage: Stage, todo: list, summary: dict, keep_going: bool) -> None:

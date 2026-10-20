@@ -50,14 +50,15 @@ def batch_plan(global_batch: int, world: int, per_device: int) -> BatchPlan:
 
 def train_config(ctx) -> TrainConfig:
     # Input: Ctx. Output: the smoke-aware TrainConfig with --per-device-batch/--max-steps and any
-    # programmatic ctx.opts["train_overrides"] dict applied; eval and save steps must coincide and be
-    # multiples of the logging interval so resumed logs line up with uninterrupted ones.
+    # programmatic ctx.opts["train_overrides"] dict applied; save steps must be a multiple of eval steps (every
+    # checkpoint has a dev score) and eval steps of the logging interval, so resumed logs line up with
+    # uninterrupted ones.
     cfg = ctx.config(TrainConfig)
     flags = {k: ctx.opt(k) for k in OVERRIDE_FLAGS if ctx.opt(k) is not None}
     cfg = dataclasses.replace(cfg, **flags, **dict(ctx.opt("train_overrides", {})))
-    if cfg.eval_steps != cfg.save_steps or cfg.save_steps % cfg.logging_steps:
-        raise ValueError(f"eval_steps ({cfg.eval_steps}) must equal save_steps ({cfg.save_steps}) and be a "
-                         f"multiple of logging_steps ({cfg.logging_steps})")
+    if cfg.save_steps % cfg.eval_steps or cfg.eval_steps % cfg.logging_steps:
+        raise ValueError(f"save_steps ({cfg.save_steps}) must be a multiple of eval_steps ({cfg.eval_steps}), and "
+                         f"eval_steps a multiple of logging_steps ({cfg.logging_steps})")
     return cfg
 
 
@@ -89,8 +90,9 @@ def precision(ctx, cfg: TrainConfig) -> dict:
 def training_args(ctx, cfg: TrainConfig, run_dir, lr: float, plan: BatchPlan, max_steps: int,
                   sweep: bool = False) -> Seq2SeqTrainingArguments:
     # Inputs: Ctx, TrainConfig, checkpoint directory, learning rate, BatchPlan, step count and the
-    # sweep flag. Output: Seq2SeqTrainingArguments for one run. Sweeps keep two checkpoints and track
-    # no best model; full runs keep the last three plus the best by dev chrF++ and load it at the end.
+    # sweep flag. Output: Seq2SeqTrainingArguments for one run. Sweeps save no checkpoints and track no best
+    # model; full runs save every save_steps, keep the last three plus the best by dev chrF++ and load it at
+    # the end.
     seed = train_seed(ctx, cfg)
     return Seq2SeqTrainingArguments(
         output_dir=str(run_dir), per_device_train_batch_size=plan.per_device,
@@ -98,8 +100,8 @@ def training_args(ctx, cfg: TrainConfig, run_dir, lr: float, plan: BatchPlan, ma
         lr_scheduler_type=cfg.lr_scheduler, warmup_steps=cfg.warmup_steps, optim=cfg.optim,
         weight_decay=cfg.weight_decay, max_grad_norm=cfg.max_grad_norm, **precision(ctx, cfg),
         logging_strategy="steps", logging_steps=cfg.logging_steps, eval_strategy="steps",
-        eval_steps=cfg.eval_steps, save_strategy="steps", save_steps=cfg.save_steps,
-        save_total_limit=2 if sweep else cfg.save_total_limit, load_best_model_at_end=not sweep,
+        eval_steps=cfg.eval_steps, save_strategy="no" if sweep else "steps", save_steps=cfg.save_steps,
+        save_total_limit=None if sweep else cfg.save_total_limit, load_best_model_at_end=not sweep,
         metric_for_best_model=None if sweep else METRIC, greater_is_better=True,
         restore_callback_states_from_checkpoint=True, ignore_data_skip=False,
         average_tokens_across_devices=True, dataloader_drop_last=True,

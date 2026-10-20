@@ -16,6 +16,7 @@ from pathlib import Path
 
 PACKAGE_DIR = Path(__file__).resolve().parent.parent
 ENV_VAR = "BYTERESEARCH_ARTIFACTS"
+LOCAL_LOGS_VAR = "BYTERESEARCH_LOCAL_LOGS"
 COMPLETE_MARKER = "COMPLETE"
 META_FILE = "byteresearch_meta.json"
 MANIFEST_FILE = "manifest.json"
@@ -152,6 +153,13 @@ class Paths:
     def log(self, stage: str, rid: str) -> Path:
         # Inputs: stage name and run id. Output: ROOT/logs/{stage}/{rid}.log.
         return self.root / "logs" / stage / f"{rid}.log"
+
+    def local_log(self, stage: str, rid: str) -> Path:
+        # Inputs: stage name and run id. Output: the file a unit's console output goes to while it runs:
+        # $BYTERESEARCH_LOCAL_LOGS/{root name}/{stage}/{rid}.log when that variable is set (a local disk, so a
+        # Drive-backed ROOT is not written on every console line), else the final log path itself.
+        base = os.environ.get(LOCAL_LOGS_VAR)
+        return Path(base) / self.root.name / stage / f"{rid}.log" if base else self.log(stage, rid)
 
     def metrics_env(self) -> Path:
         # Output: ROOT/envs/metrics, the separate transformers<5 venv for COMET and MetricX.

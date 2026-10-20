@@ -10,6 +10,8 @@
 # Evaluation is replaced by greedy decoding of a fixed FLORES-dev subset from the [start] prefix through the
 # shared interp.scoring generation path, sharded over ranks and gathered so every rank gets the same chrF++,
 # all inside an RNG-preserving block so resume stays exact.
+# Only evaluations at checkpoint steps can become the best model, so the best step always has a saved
+# checkpoint while dev chrF++ (and early stopping) still runs at every evaluation.
 
 from __future__ import annotations
 
@@ -145,6 +147,13 @@ class ByteTrainer(Seq2SeqTrainer):
         model.train(was_training)
         merged = dict(pair for part in gather_objects(list(zip(rows, hyps))) for pair in part)
         return dev_chrf(self.dev, [merged[i] for i in range(len(self.dev))])
+
+    def _determine_best_metric(self, metrics: dict, trial) -> bool:
+        # Inputs: the evaluation metrics and the (unused) trial. Output: whether they set a new best; only
+        # evaluations at a checkpoint step (global_step a multiple of save_steps) are considered.
+        if self.args.save_strategy == "no" or self.state.global_step % self.args.save_steps:
+            return False
+        return super()._determine_best_metric(metrics, trial)
 
     def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix: str = "eval", **gen_kwargs) -> dict:
         # Inputs: Trainer.evaluate arguments (only the prefix is used). Output: the prefixed dev

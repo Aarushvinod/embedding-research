@@ -1,7 +1,8 @@
 # Trainer callbacks and the train.json measurement built from the trainer's log history.
 # CheckpointMetaCallback runs after every save: all ranks meet at a barrier (so every rank's RNG
 # file is on disk), then rank 0 writes byteresearch_meta.json and finally the COMPLETE marker.
-# ResultsCallback makes rank 0 rewrite ROOT/results/{train|sweep}/{run_id}/train.json on every log.
+# ResultsCallback makes rank 0 rewrite ROOT/results/{train|sweep}/{run_id}/train.json after every evaluation
+# (the run's end writes it once more, complete).
 # The file is rebuilt from state.log_history each time, and a resume restores that history from the
 # checkpoint, so entries logged after the last checkpoint are replaced rather than duplicated.
 # train_results turns the history into columnar per_item blocks (train, eval, final) and an
@@ -38,15 +39,16 @@ class CheckpointMetaCallback(TrainerCallback):
 
 
 class ResultsCallback(TrainerCallback):
-    # on_log hook that rewrites the run's train.json on rank 0. Construct with
+    # on_evaluate hook that rewrites the run's train.json on rank 0. Construct with
     # write_fn(state, complete=False).
 
     def __init__(self, write_fn):
         # Input: the writer function.
         self.write_fn = write_fn
 
-    def on_log(self, args, state, control, logs=None, **kwargs):
-        # Inputs: Trainer callback arguments. Rank 0 rewrites the (incomplete) result from state.
+    def on_evaluate(self, args, state, control, **kwargs):
+        # Inputs: Trainer callback arguments. Rank 0 rewrites the (incomplete) result from state, whose log
+        # history holds every training log and evaluation so far.
         if state.is_world_process_zero:
             self.write_fn(state, complete=False)
 

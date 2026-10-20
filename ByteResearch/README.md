@@ -58,6 +58,10 @@ ROOT/envs/metrics, ROOT/envs/metricx (default METRICS_DIR), ROOT/tmp
 ROOT/smoke/...                                                           same layout, --smoke only
 ```
 
+When `$BYTERESEARCH_LOCAL_LOGS` is set (the Colab notebook sets it to a local VM directory), each unit's
+console output is written there while it runs and appended to `ROOT/logs/{stage}/{run_id}.log` once the unit
+ends, also after a failure, so a Drive-backed `ROOT` is not written on every console line.
+
 `run_id` is `{model}__{condition}__{target}` for a trained direction (e.g. `byt5-small__C2__bn`), and
 `{model}__{condition}` for units without a target. Sweep cells use `{model}__{condition}__{target}__lr{lr}`,
 and ByT5-vs-mT5 comparisons use `{size}__{condition}`.
@@ -182,12 +186,13 @@ fraction of all outputs and its share among identified (non-und) outputs.
   selection needs all of them). Every
   direction of a model then trains with that model's selected LR.
 - Dev selection: greedy chrF++ on a fixed, seeded subset of 200 FLORES-dev sentences of the direction's target
-  (`TrainConfig.dev_per_target`), evaluated every 500 steps; early stopping after 5 evaluations without
+  (`TrainConfig.dev_per_target`), evaluated every 500 steps (`train.json` is rewritten after each
+  evaluation); early stopping after 5 evaluations without
   improvement, at most 15 epochs (a cap; early stopping normally ends the run first, and `train.json` records
   which one did), warmup 1000 steps, Adafactor with a constant-with-warmup schedule, bf16, 512-character cap.
 
-`train` uses `--lr` if given, otherwise the `sweep.select` result. Options are `--per-device-batch`,
-`--max-steps` and, for `sweep`, `--keep-checkpoints`.
+`train` uses `--lr` if given, otherwise the `sweep.select` result. Options are `--per-device-batch` and
+`--max-steps`.
 
 ### Translation evaluation (`eval`)
 
@@ -326,10 +331,11 @@ Main files:
 ## Checkpoints
 
 - Location: `ROOT/checkpoints/{run_id}/checkpoint-{step}/`.
-- Training saves every 500 steps and keeps the last 3 plus the best (`save_total_limit=4`).
+- Training saves every 1000 steps (`TrainConfig.save_steps`, a multiple of the 500-step evaluation interval)
+  and keeps the last 3 plus the best (`save_total_limit=4`). Only evaluations at checkpoint steps can become
+  the best model, so the best always has a checkpoint; early stopping still counts every evaluation.
 - Each checkpoint holds the weights, the tokenizer, the trainer/RNG state, `byteresearch_meta.json`
   (config, direction data hash, tagless decoder prefix, seeds, world size, versions) and a `COMPLETE` marker.
 - When training ends, the best checkpoint is exported to `ROOT/checkpoints/{run_id}/best/`, which evaluation
   and interp load.
-- Sweep cells checkpoint under `ROOT/checkpoints/{model}__{condition}__{target}__lr{lr}/`. These are deleted once the
-  cell finishes unless `--keep-checkpoints` is given.
+- Sweep cells save no checkpoints (fewer Drive writes); a killed sweep cell restarts from its first step.

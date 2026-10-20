@@ -270,7 +270,7 @@ class TrainConfig:
     global_batch: int = 64
     per_device_batch: int = 16
     eval_steps: int = 500
-    save_steps: int = 500
+    save_steps: int = 1000
     save_total_limit: int = 4
     patience: int = 5
     max_chars: int = 512
