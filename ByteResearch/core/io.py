@@ -4,9 +4,10 @@
 # Readers treat a missing or unreadable file as absent and return a default instead of raising,
 # which lets an interrupted stage simply redo the affected step.
 # Gzipped JSONL is written with mtime=0 so identical content gives identical bytes and hashes.
-# The module also provides hashing, read-only marking, a cross-process file lock, a UTF-8 console fix
-# for Windows, tee_output, which copies console output into a per-unit log file, and publish_log, which
-# appends a finished local log to its final location in one write.
+# The module also provides hashing, per-file size/hash records with checkpoint_intact (which checks a
+# checkpoint's files against the records in its meta, so a half-uploaded checkpoint is never trusted),
+# read-only marking, a cross-process file lock, a UTF-8 console fix for Windows, tee_output, which copies
+# console output into a per-unit log file, and publish_log, which appends a finished local log in one write.
 
 from __future__ import annotations
 
@@ -22,6 +23,8 @@ from pathlib import Path
 
 import numpy as np
 from filelock import FileLock
+
+from .paths import COMPLETE_MARKER, META_FILE
 
 
 def _tmp_path(path: Path) -> Path:
@@ -112,6 +115,50 @@ def sha256_file(path, chunk: int = 1 << 20) -> str:
         for block in iter(lambda: fh.read(chunk), b""):
             h.update(block)
     return h.hexdigest()
+
+
+def file_digest(path, chunk: int = 1 << 22) -> dict:
+    # Inputs: a file path and read chunk size. Output: {"size", "sha256", "md5"} of its contents, read in one
+    # pass (md5 is the checksum Google Drive reports for uploaded files).
+    sha, md5, size = hashlib.sha256(), hashlib.md5(), 0
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(chunk), b""):
+            sha.update(block)
+            md5.update(block)
+            size += len(block)
+    return {"size": size, "sha256": sha.hexdigest(), "md5": md5.hexdigest()}
+
+
+def file_records(directory, skip=()) -> dict:
+    # Inputs: a directory and file names to leave out. Output: {relative posix path: file_digest} of every
+    # file below it, sorted by path.
+    directory = Path(directory)
+    return {p.relative_to(directory).as_posix(): file_digest(p) for p in sorted(directory.rglob("*"))
+            if p.is_file() and p.name not in skip}
+
+
+def file_matches(path, record: dict, full: bool = True) -> bool:
+    # Inputs: a file path, its recorded digest and whether to compare the SHA-256 too. Output: whether the
+    # file exists with the recorded size (and hash).
+    path = Path(path)
+    if not path.is_file() or path.stat().st_size != record["size"]:
+        return False
+    return not full or file_digest(path)["sha256"] == record["sha256"]
+
+
+def mismatched_files(directory, records: dict, full: bool = True) -> list:
+    # Inputs: a directory, its recorded {relative path: digest} and whether to compare hashes. Output: the
+    # recorded paths that are missing or differ in size (or hash).
+    return [name for name, rec in records.items() if not file_matches(Path(directory) / name, rec, full)]
+
+
+def checkpoint_intact(ckpt, full: bool = True) -> bool:
+    # Inputs: a checkpoint directory and whether to compare hashes. Output: whether COMPLETE and the meta exist
+    # and every file the meta records under "files" is present with its size (and hash); a meta without file
+    # records (older checkpoints) only needs COMPLETE.
+    ckpt = Path(ckpt)
+    meta = read_json(ckpt / META_FILE) if (ckpt / COMPLETE_MARKER).exists() else None
+    return meta is not None and not mismatched_files(ckpt, meta.get("files") or {}, full)
 
 
 def sha256_json(obj) -> str:

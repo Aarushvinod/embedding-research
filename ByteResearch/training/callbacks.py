@@ -5,6 +5,8 @@
 # (the run's end writes it once more, complete).
 # The file is rebuilt from state.log_history each time, and a resume restores that history from the
 # checkpoint, so entries logged after the last checkpoint are replaced rather than duplicated.
+# DriveWatchdogCallback, on a Drive-backed root, makes every save first confirm with Drive's servers that the
+# previous checkpoint arrived (training.drive_watch), stopping the run on every rank when it has not.
 # train_results turns the history into columnar per_item blocks (train, eval, final) and an
 # aggregate with the best and final dev chrF++, stop reason, wall time and examples seen.
 
@@ -14,8 +16,9 @@ from pathlib import Path
 
 from transformers import TrainerCallback
 
-from ..core.dist import barrier
+from ..core.dist import barrier, gather_objects
 from .args import METRIC
+from .drive_watch import DriveUploadError, confirm
 from .resume import finalize_checkpoint
 
 EVAL_KEY = f"eval_{METRIC}"
@@ -36,6 +39,31 @@ class CheckpointMetaCallback(TrainerCallback):
         if state.is_world_process_zero:
             finalize_checkpoint(Path(args.output_dir) / f"checkpoint-{state.global_step}", self.meta_fn(state))
         barrier()
+
+
+class DriveWatchdogCallback(TrainerCallback):
+    # on_save hook that, after each new checkpoint, confirms on rank 0 that Drive holds the previous one and
+    # raises DriveUploadError on every rank when it does not. Construct with a DriveChecker (None on other
+    # ranks) and the timeout in seconds.
+
+    def __init__(self, checker, timeout: float):
+        # Inputs: the DriveChecker (or None) and the timeout.
+        self.checker = checker
+        self.timeout = timeout
+        self.previous = None
+
+    def on_save(self, args, state, control, **kwargs):
+        # Inputs: Trainer callback arguments. Checks the checkpoint saved before this one, remembers this one
+        # for the next save and stops training when Drive does not hold the previous checkpoint.
+        error = confirm(self.checker, self.previous, self.timeout) if state.is_world_process_zero else None
+        self.previous = Path(args.output_dir) / f"checkpoint-{state.global_step}"
+        raise_first([e for e in gather_objects(error) if e])
+
+
+def raise_first(errors: list) -> None:
+    # Input: error messages gathered from every rank. Raises DriveUploadError with the first one, if any.
+    if errors:
+        raise DriveUploadError(errors[0])
 
 
 class ResultsCallback(TrainerCallback):

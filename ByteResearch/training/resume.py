@@ -1,12 +1,14 @@
 # Checkpoint bookkeeping for exact, safe resumption of fine-tuning runs.
-# finalize_checkpoint writes byteresearch_meta.json and then, last of all, the COMPLETE marker, so a
-# directory without COMPLETE is by definition half-written and latest_complete_checkpoint skips it.
+# finalize_checkpoint records every file's size and hashes in byteresearch_meta.json and then, last of all,
+# writes the COMPLETE marker; a directory without COMPLETE is half-written, and one whose files do not match
+# its meta (e.g. a Drive upload cut off when a session died) is treated the same way, so remove_incomplete
+# deletes both and resumption falls back to the newest intact checkpoint.
 # check_resume_compat refuses to resume when the config hash, data hash, world size, per-device
 # batch, gradient accumulation, tag ids or decoder prefix differ from the run being started.
 # finished_state tells whether a checkpoint already ended training (step budget or early stopping),
 # so a rerun after a crash goes straight to the export instead of training past the stop.
 # export_best copies the best checkpoint's model and tokenizer to ROOT/checkpoints/{run_id}/best/
-# with fresh meta and COMPLETE, the layout modeling.loading.load_trained reads.
+# with fresh meta and COMPLETE, the layout modeling.loading.load_trained reads, after checking its source.
 
 from __future__ import annotations
 
@@ -16,7 +18,7 @@ from pathlib import Path
 
 from transformers import TrainerState
 
-from ..core.io import read_json, write_json_atomic
+from ..core.io import checkpoint_intact, file_records, read_json, write_json_atomic
 from ..core.paths import COMPLETE_MARKER, META_FILE
 from ..core.results import now_iso
 
@@ -32,10 +34,12 @@ class ResumeMismatch(ValueError):
 
 
 def finalize_checkpoint(ckpt, meta: dict) -> Path:
-    # Inputs: a checkpoint directory and its meta dict. Writes byteresearch_meta.json atomically and
-    # then the COMPLETE marker (always last). Output: the directory.
+    # Inputs: a checkpoint directory and its meta dict. Writes byteresearch_meta.json atomically, with the
+    # size and hashes of every other file under "files", and then the COMPLETE marker (always last).
+    # Output: the directory.
     ckpt = Path(ckpt)
-    write_json_atomic(ckpt / META_FILE, {**meta, "finalized": now_iso()})
+    files = file_records(ckpt, skip=(META_FILE, COMPLETE_MARKER))
+    write_json_atomic(ckpt / META_FILE, {**meta, "files": files, "finalized": now_iso()})
     (ckpt / COMPLETE_MARKER).write_text("ok", encoding="utf-8")
     return ckpt
 
@@ -49,9 +53,15 @@ def latest_complete_checkpoint(paths, rid: str):
 
 def remove_incomplete(paths, rid: str) -> list:
     # Inputs: Paths and run id. Deletes every checkpoint-* directory without COMPLETE (leftovers of a
-    # killed save) so checkpoint rotation never counts them. Output: the removed paths.
+    # killed save) and, newest first, every complete one whose files do not match its meta until an intact
+    # one is found, so rotation never counts them and resumption starts from intact files. Output: the
+    # removed paths.
     base = paths.checkpoints_dir(rid)
     stale = [p for p in base.glob("checkpoint-*") if p.is_dir() and not (p / COMPLETE_MARKER).exists()]
+    for _, ckpt in reversed(paths.complete_checkpoints(rid)):
+        if checkpoint_intact(ckpt):
+            break
+        stale.append(ckpt)
     for p in stale:
         shutil.rmtree(p, ignore_errors=True)
     return stale
@@ -101,8 +111,8 @@ def export_best(paths, rid: str, state: TrainerState, meta: dict) -> Path:
     # config and tokenizer into a temporary directory, writes meta (step, metric) and COMPLETE, then
     # swaps it in as ROOT/checkpoints/{rid}/best. Output: the best directory.
     src = best_checkpoint_dir(paths, rid, state)
-    if src is None or not (src / COMPLETE_MARKER).exists():
-        raise FileNotFoundError(f"best checkpoint {src} is missing or incomplete")
+    if src is None or not checkpoint_intact(src):
+        raise FileNotFoundError(f"best checkpoint {src} is missing, incomplete or does not match its meta")
     dest, tmp = paths.best_checkpoint(rid), paths.checkpoints_dir(rid) / "best.tmp"
     shutil.rmtree(tmp, ignore_errors=True)
     shutil.copytree(src, tmp, ignore=shutil.ignore_patterns(*EXPORT_SKIP))

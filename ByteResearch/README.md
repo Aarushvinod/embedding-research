@@ -335,7 +335,18 @@ Main files:
   and keeps the last 3 plus the best (`save_total_limit=4`). Only evaluations at checkpoint steps can become
   the best model, so the best always has a checkpoint; early stopping still counts every evaluation.
 - Each checkpoint holds the weights, the tokenizer, the trainer/RNG state, `byteresearch_meta.json`
-  (config, direction data hash, tagless decoder prefix, seeds, world size, versions) and a `COMPLETE` marker.
+  (config, direction data hash, tagless decoder prefix, seeds, world size, versions, and the size, SHA-256
+  and md5 of every other file under `files`) and a `COMPLETE` marker written last.
+- A checkpoint counts only when `COMPLETE` is there and every recorded file matches its size and SHA-256.
+  Resuming deletes newer checkpoints that fail this (e.g. a Drive upload cut off when a session died) and
+  continues from the newest intact one; exporting `best/` and loading a model refuse a mismatched one, and a
+  run counts as trained only when its `best/` files have their recorded sizes.
+- Drive upload watchdog (Colab): with `BYTERESEARCH_DRIVE_CHECK=1` and `BYTERESEARCH_DRIVE_ROOT` set to the
+  mounted "My Drive" folder (the notebook's Drive cell sets both after `auth.authenticate_user()`), each save
+  first asks Drive's servers whether the previous checkpoint arrived with matching sizes and md5, and the end
+  of a run does the same for `best/`. If Drive does not have it within `BYTERESEARCH_DRIVE_CHECK_TIMEOUT`
+  seconds (default 900), training stops with `DriveUploadError`; rerunning later resumes from the newest
+  intact checkpoint. Sweeps save no checkpoints and are not watched.
 - When training ends, the best checkpoint is exported to `ROOT/checkpoints/{run_id}/best/`, which evaluation
   and interp load.
 - Sweep cells save no checkpoints (fewer Drive writes); a killed sweep cell restarts from its first step.

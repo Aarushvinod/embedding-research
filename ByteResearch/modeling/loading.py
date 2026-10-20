@@ -1,7 +1,8 @@
 # Model and tokenizer loading for training, evaluation and interpretability.
 # load_pretrained fetches a Hugging Face ByT5 or mT5 checkpoint by registry key.
 # load_trained opens one of our fine-tuned checkpoints (best, latest complete, or a given step; per direction
-# when a target is given) with its byteresearch_meta.json, which records a tagless model ("tags": {} and
+# when a target is given), refusing one whose files do not match the sizes and hashes in its
+# byteresearch_meta.json (checked once per process), which also records a tagless model ("tags": {} and
 # "decoder_prefix": "start", the trained format) or, for legacy checkpoints, tag ids re-verified on load.
 # Both paths produce a Trained bundle with the model, tokenizer, tag ids (empty when tagless), generation
 # suppression ids, checkpoint meta and the architecture sizes interpretability code needs.
@@ -13,6 +14,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import gc
 from dataclasses import dataclass, field
 
@@ -20,7 +22,7 @@ import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 from ..core.config import MODELS
-from ..core.io import read_json, sha256_file
+from ..core.io import checkpoint_intact, read_json, sha256_file
 from ..core.paths import META_FILE, run_id
 from .encode import prefix_len
 from .tags import suppress_ids, tag_ids
@@ -126,11 +128,21 @@ def load_trained(ctx, model_key: str, condition: str, which="best", dtype=torch.
     meta = read_json(ckpt / META_FILE)
     if meta is None:
         raise FileNotFoundError(f"missing or unreadable {ckpt / META_FILE}")
+    if not verified_checkpoint(str(ckpt), (ckpt / META_FILE).stat().st_mtime_ns):
+        raise FileNotFoundError(f"{ckpt} does not match the files recorded in its meta (incomplete copy or upload)")
     tok = load_tokenizer(ckpt if (ckpt / "tokenizer_config.json").exists() else model_key)
     model = AutoModelForSeq2SeqLM.from_pretrained(str(ckpt), dtype=dtype)
     model.to(device or ctx.device)
     model = prepare_for_interp(model, float32=dtype == torch.float32) if for_interp else model.eval()
     return make_trained(model, tok, check_meta_tags(meta, tok), meta, MODELS[model_key].arch, model_key, condition)
+
+
+@functools.lru_cache(maxsize=64)
+def verified_checkpoint(path: str, meta_mtime_ns: int) -> bool:
+    # Inputs: a checkpoint path and its meta's modification time (part of the cache key, so a rewritten
+    # checkpoint is checked again). Output: whether every recorded file matches its size and SHA-256, computed
+    # once per process.
+    return checkpoint_intact(path)
 
 
 def gated_ffns(model) -> list:

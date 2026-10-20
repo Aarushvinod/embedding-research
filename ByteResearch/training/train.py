@@ -4,9 +4,11 @@
 # with checkpoint meta, live train.json results and (for full runs) early stopping on dev chrF++.
 # The model is tagless (no target tag, no prompt): checkpoint meta records "tags": {} and
 # "decoder_prefix": "start", so loading and generation use the [start] prefix everywhere.
-# Resumption is automatic: half-written checkpoints are deleted, the newest complete one is checked
-# for compatibility and resumed, and a checkpoint that already ended training goes straight to export.
-# Full runs export the best checkpoint to ROOT/checkpoints/{run_id}/best/ and mark train.json complete.
+# Resumption is automatic: half-written checkpoints and ones whose files do not match their meta are deleted,
+# the newest intact one is checked for compatibility and resumed, and one that already ended training goes
+# straight to export. Full runs export the best checkpoint to ROOT/checkpoints/{run_id}/best/ (with the Drive
+# upload watchdog, after Drive confirms the previous checkpoint at every save and best/ at the end) and mark
+# train.json complete.
 # The learning rate comes from --lr, else from the model's sweep selection, else a clear error is raised.
 
 from __future__ import annotations
@@ -20,14 +22,16 @@ from transformers import EarlyStoppingCallback
 
 from ..core.config import MODELS, InterpConfig, config_hash, resolve_lrs
 from ..core.dist import barrier, is_main
-from ..core.paths import COMPLETE_MARKER, run_id
+from ..core.io import checkpoint_intact
+from ..core.paths import run_id
 from ..core.registry import opt, register_stage
 from ..core.results import git_commit, library_versions, result_done, result_file
 from ..interp.scoring import batching_from
 from ..modeling.loading import TAGLESS_PREFIX, load_pretrained
 from ..modeling.tags import suppress_ids
+from . import drive_watch
 from .args import batch_plan, steps_plan, train_config, train_seed, training_args
-from .callbacks import CheckpointMetaCallback, ResultsCallback, train_results
+from .callbacks import CheckpointMetaCallback, DriveWatchdogCallback, ResultsCallback, raise_first, train_results
 from .collator import PairCollator
 from .dataset import PairDataset, data_hash, data_requires, dev_items, direction_hub, train_rows, \
     trim_to_batches
@@ -125,13 +129,17 @@ def results_writer(ctx, spec: RunSpec, meta: dict, info: dict):
     return write
 
 
-def build_trainer(ctx, spec: RunSpec, cfg, plan, model, tok, data: dict, meta: dict, write, max_steps: int):
+def build_trainer(ctx, spec: RunSpec, cfg, plan, model, tok, data: dict, meta: dict, write, max_steps: int,
+                  checker=None):
     # Inputs: Ctx, RunSpec, TrainConfig, BatchPlan, model, tokenizer, data {"train", "dev"}, meta, results
-    # writer and step budget. Output: the configured ByteTrainer (callbacks: checkpoint meta, live results,
-    # and early stopping for full runs).
+    # writer, step budget and the Drive upload checker (None off rank 0). Output: the configured ByteTrainer
+    # (callbacks: checkpoint meta, live results, and for full runs early stopping plus, when the Drive
+    # watchdog is on, the upload check at every save).
     callbacks = [CheckpointMetaCallback(lambda st: {**meta, "step": st.global_step}), ResultsCallback(write)]
     if not spec.sweep:
         callbacks.append(EarlyStoppingCallback(early_stopping_patience=cfg.patience))
+    if not spec.sweep and drive_watch.enabled():
+        callbacks.append(DriveWatchdogCallback(checker, drive_watch.timeout_s()))
     collator = PairCollator(tok, cfg.max_chars, cfg.token_factor)
     args = training_args(ctx, cfg, ctx.paths.checkpoints_dir(spec.run_id), spec.lr, plan, max_steps, spec.sweep)
     return ByteTrainer(model=model, args=args, data_collator=collator, train_dataset=data["train"],
@@ -142,7 +150,8 @@ def build_trainer(ctx, spec: RunSpec, cfg, plan, model, tok, data: dict, meta: d
 
 def run_training(ctx, spec: RunSpec) -> dict:
     # Inputs: Ctx and RunSpec. Trains (or resumes, or finalizes an already finished run), exports the
-    # best checkpoint for full runs and writes the complete train.json on rank 0. Output: the aggregate.
+    # best checkpoint for full runs (confirming with Drive that best/ arrived when the watchdog is on) and
+    # writes the complete train.json on rank 0. Output: the aggregate.
     cfg = train_config(ctx)
     plan = batch_plan(cfg.global_batch, ctx.world.size, cfg.per_device_batch)
     model, tok = load_pretrained(spec.model, dtype=torch.float32)
@@ -156,7 +165,8 @@ def run_training(ctx, spec: RunSpec) -> dict:
             "target": spec.target, "world_size": plan.world,
             "per_device_batch": plan.per_device, "grad_accum": plan.grad_accum}
     write = results_writer(ctx, spec, meta, info)
-    trainer = build_trainer(ctx, spec, cfg, plan, model, tok, data, meta, write, max_steps)
+    checker = drive_watch.checker_from_env(ctx.paths.root) if is_main() and not spec.sweep else None
+    trainer = build_trainer(ctx, spec, cfg, plan, model, tok, data, meta, write, max_steps, checker)
     ckpt = prepare_run_dir(ctx, spec)
     if ckpt is not None:
         check_resume_compat(read_meta(ckpt), meta)
@@ -169,7 +179,8 @@ def run_training(ctx, spec: RunSpec) -> dict:
     aggregate = None
     if is_main():
         if not spec.sweep:
-            export_best(ctx.paths, spec.run_id, state, meta)
+            best = export_best(ctx.paths, spec.run_id, state, meta)
+            raise_first([e for e in [drive_watch.confirm(checker, best, drive_watch.timeout_s())] if e])
         aggregate = write(state, complete=True, stop_reason="max_steps" if state.global_step >= max_steps
                           else "early_stopping")
     barrier()
@@ -177,9 +188,10 @@ def run_training(ctx, spec: RunSpec) -> dict:
 
 
 def train_done(ctx, unit) -> bool:
-    # Inputs: Ctx and Unit. Output: whether train.json is complete and best/COMPLETE exists.
+    # Inputs: Ctx and Unit. Output: whether train.json is complete and best/ is complete with every file at
+    # its recorded size.
     rid = unit.run_id
-    return result_done(ctx, EXP, rid, MEASUREMENT) and (ctx.paths.best_checkpoint(rid) / COMPLETE_MARKER).exists()
+    return result_done(ctx, EXP, rid, MEASUREMENT) and checkpoint_intact(ctx.paths.best_checkpoint(rid), full=False)
 
 
 @register_stage("train", grid=("model", "condition", "target"), is_done=train_done, requires=data_requires(),
