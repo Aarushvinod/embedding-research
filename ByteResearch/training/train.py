@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import dataclasses
 import shutil
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 from transformers import EarlyStoppingCallback
@@ -129,10 +131,18 @@ def results_writer(ctx, spec: RunSpec, meta: dict, info: dict):
     return write
 
 
+def trainer_dir(ctx, spec: RunSpec) -> Path:
+    # Inputs: Ctx and RunSpec. Output: the Trainer's output folder: ROOT/checkpoints/{run_id} for full runs, and
+    # for sweeps (which save nothing, though the Trainer always creates its output folder) a fresh local
+    # temporary folder, so no empty folder appears under ROOT.
+    return Path(tempfile.mkdtemp(prefix="byteresearch_sweep_")) if spec.sweep else ctx.paths.checkpoints_dir(spec.run_id)
+
+
 def build_trainer(ctx, spec: RunSpec, cfg, plan, model, tok, data: dict, meta: dict, write, max_steps: int,
-                  checker=None):
+                  checker=None, out_dir=None):
     # Inputs: Ctx, RunSpec, TrainConfig, BatchPlan, model, tokenizer, data {"train", "dev"}, meta, results
-    # writer, step budget and the Drive upload checker (None off rank 0). Output: the configured ByteTrainer
+    # writer, step budget, the Drive upload checker (None off rank 0) and the Trainer output folder (default
+    # ROOT/checkpoints/{run_id}). Output: the configured ByteTrainer
     # (callbacks: checkpoint meta, live results, and for full runs early stopping plus, when the Drive
     # watchdog is on, the upload check at every save).
     callbacks = [CheckpointMetaCallback(lambda st: {**meta, "step": st.global_step}), ResultsCallback(write)]
@@ -141,11 +151,25 @@ def build_trainer(ctx, spec: RunSpec, cfg, plan, model, tok, data: dict, meta: d
     if not spec.sweep and drive_watch.enabled():
         callbacks.append(DriveWatchdogCallback(checker, drive_watch.timeout_s()))
     collator = PairCollator(tok, cfg.max_chars, cfg.token_factor)
-    args = training_args(ctx, cfg, ctx.paths.checkpoints_dir(spec.run_id), spec.lr, plan, max_steps, spec.sweep)
+    out_dir = out_dir or ctx.paths.checkpoints_dir(spec.run_id)
+    args = training_args(ctx, cfg, out_dir, spec.lr, plan, max_steps, spec.sweep)
     return ByteTrainer(model=model, args=args, data_collator=collator, train_dataset=data["train"],
                        eval_dataset=data["dev"], processing_class=tok, callbacks=callbacks, target=spec.target,
                        arch=MODELS[spec.model].arch, global_batch=plan.global_batch,
                        gen_batching=batching_from(ctx.config(InterpConfig), generation=True))
+
+
+def fit(ctx, spec: RunSpec, trainer, meta: dict, max_steps: int, patience):
+    # Inputs: Ctx, RunSpec, the built trainer, run meta, step budget and early-stopping patience (None for
+    # sweeps). Resumes from the newest intact compatible checkpoint (or starts fresh) and trains unless that
+    # checkpoint already ended training. Output: the final TrainerState.
+    ckpt = prepare_run_dir(ctx, spec)
+    if ckpt is not None:
+        check_resume_compat(read_meta(ckpt), meta)
+    if ckpt is not None and finished_state(load_state(ckpt), max_steps, patience):
+        return load_state(ckpt)
+    trainer.train(resume_from_checkpoint=str(ckpt) if ckpt is not None else None)
+    return trainer.state
 
 
 def run_training(ctx, spec: RunSpec) -> dict:
@@ -166,16 +190,13 @@ def run_training(ctx, spec: RunSpec) -> dict:
             "per_device_batch": plan.per_device, "grad_accum": plan.grad_accum}
     write = results_writer(ctx, spec, meta, info)
     checker = drive_watch.checker_from_env(ctx.paths.root) if is_main() and not spec.sweep else None
-    trainer = build_trainer(ctx, spec, cfg, plan, model, tok, data, meta, write, max_steps, checker)
-    ckpt = prepare_run_dir(ctx, spec)
-    if ckpt is not None:
-        check_resume_compat(read_meta(ckpt), meta)
-    patience = None if spec.sweep else cfg.patience
-    done = ckpt is not None and finished_state(load_state(ckpt), max_steps, patience)
-    state = load_state(ckpt) if done else None
-    if state is None:
-        trainer.train(resume_from_checkpoint=str(ckpt) if ckpt is not None else None)
-        state = trainer.state
+    out_dir = trainer_dir(ctx, spec)
+    try:
+        trainer = build_trainer(ctx, spec, cfg, plan, model, tok, data, meta, write, max_steps, checker, out_dir)
+        state = fit(ctx, spec, trainer, meta, max_steps, None if spec.sweep else cfg.patience)
+    finally:
+        if spec.sweep:
+            shutil.rmtree(out_dir, ignore_errors=True)
     aggregate = None
     if is_main():
         if not spec.sweep:
