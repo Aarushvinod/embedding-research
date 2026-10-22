@@ -78,7 +78,7 @@ python -m ByteResearch.run <stage | composite | list | status> [selections] [fla
 | `--condition` | `C1,C2,C3` |
 | `--target` | target codes from `core/config.py` |
 | `--testset` | `all`, `main` (= `flores_devtest,ntrex`), `flores_devtest`, `ntrex`, `flores_dev` |
-| `--metric` | `all`, `sacre`, `neural`, or `chrf_pp,spbleu,comet,metricx` |
+| `--metric` | `all`, `sacre`, `neural`, or `chrf_pp,bleu,spbleu,comet,metricx` |
 | `--lr` | learning rates (default: the sweep grid 1e-4, 3e-4, 1e-3) |
 | `--lang` | study and control languages for `data.wiki` (default: all 11) |
 | `--variant` | LAPE variant tokens such as `k1`, `shared`, `k0.5__en_only` |
@@ -198,17 +198,28 @@ fraction of all outputs and its share among identified (non-und) outputs.
 
 | Stage | Grid | What it does |
 |---|---|---|
-| `translate` | model x condition x testset | beam-search hypotheses for all targets of the condition |
-| `score` | model x condition x testset x metric | adds one metric's per-sentence scores and aggregates to the translate file |
-| `compare` | size x condition x testset | ByT5 vs mT5 paired bootstrap per target and pooled |
+| `translate` | model x condition x target x testset | one direction's beam-search hypotheses from its `best/` checkpoint |
+| `score` | model x condition x target x testset x metric | adds one metric's per-sentence scores and aggregates to the direction's translate file |
+| `compare` | size x condition x testset | ByT5 vs mT5 paired bootstrap per direction and pooled over the hub's targets |
+
+- Each direction is translated by its own model, `checkpoints/{model}__{condition}__{target}/best`, with beam
+  search (4 beams); only the top hypothesis is kept, next to its source and reference.
+- Test sets: FLORES devtest (main result), NTREX-128 (replication) and FLORES dev. FLORES dev is computed
+  too, but a 200-sentence subset of it chose the LR and the early-stopping checkpoint, so it is not a clean
+  test set.
+- Metrics: chrF++ (primary), BLEU (sacreBLEU 13a tokenizer), spBLEU (BLEU on the FLORES-200 SentencePiece
+  model, the FLORES convention), COMET and MetricX. The corpus metrics keep per-sentence statistics for the
+  bootstrap.
+- `compare` writes, per metric, one cell per direction and a pooled cell per hub that macro-averages its
+  targets while resampling the parallel test rows jointly, plus win counts over the directions.
 
 Options:
 - `translate`: `--eval-rows N`, `--gen-batch N`.
 - `score`: `--comet-batch-size`, `--metricx-batch-size`, `--metricx-model`, `--metrics-batch-rows N`.
   Score units requested together share COMET/MetricX worker calls (at most N rows each, default 60000),
   so the neural model loads once per batch of files rather than once per file.
-- `compare` always requires both architectures of the size, whatever `--model` selects.
-- `compare`: `--did`, which adds the C2/C3-vs-C1 difference-in-differences once all conditions are scored.
+- `compare` always requires both architectures of the size and every target of the condition, whatever
+  `--model` selects.
 
 ### Interpretability (`interp`, or `interp.<experiment>`)
 
@@ -248,8 +259,8 @@ Notes:
 - Partial work resumes.
   - **Training** resumes from the newest checkpoint that has a `COMPLETE` marker; half-written checkpoints
     are deleted. Resume refuses if the config, data, batch geometry, tags or decoder prefix have changed.
-  - **Translations** count as done only while their data, decoding settings and best checkpoint are
-    unchanged; after retraining, `translate` refuses the old file unless `--force` is given. The LR selection
+  - **Translations** count as done only while their data, decoding settings and the direction's best
+    checkpoint are unchanged; after retraining, `translate` refuses the old file unless `--force` is given. The LR selection
     is likewise recomputed when a sweep cell changes.
   - **Interp measurements** flush finished units periodically (`status.complete=false` plus
     `status.units_done`) and continue from there. A result written under a different config fingerprint is
@@ -323,9 +334,8 @@ Main files:
 | `results/train/{run_id}/train.json` | training log history, best step, stop reason |
 | `results/sweep/{model}__{condition}__{target}__lr{lr}/train.json` | one sweep cell |
 | `results/sweep/{model}/selection.json` | selected LR |
-| `results/translate/{run_id}/{testset}.json` | hypotheses, plus each scored metric |
-| `results/compare/{size}__{condition}/{testset}.json` | ByT5 vs mT5 cells; `aggregate.pooled` and `aggregate.wins` per metric |
-| `results/compare/{size}__did/{testset}.json` | difference-in-differences (`--did`) |
+| `results/translate/{model}__{condition}__{target}/{testset}.json` | one direction's sources, references and hypotheses, plus each scored metric |
+| `results/compare/{size}__{condition}/{testset}.json` | ByT5 vs mT5 cells per direction; `aggregate.pooled` and `aggregate.wins` per metric |
 | `results/interp_{experiment}/{run_id}/{measurement}[__{variant}].json` | interp measurements |
 
 ## Checkpoints

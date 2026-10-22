@@ -29,7 +29,7 @@ def build_parser(stages) -> argparse.ArgumentParser:
     p.add_argument("--condition", default="all", help="all | C1,C2,C3")
     p.add_argument("--target", default="all", help="all | target codes, comma list")
     p.add_argument("--testset", default="all", help="all | flores_devtest,ntrex")
-    p.add_argument("--metric", default="all", help="all | sacre | neural | chrf_pp,spbleu,comet,metricx")
+    p.add_argument("--metric", default="all", help="all | sacre | neural | chrf_pp,bleu,spbleu,comet,metricx")
     p.add_argument("--lr", default=None, help="learning rate(s), comma list (default: the sweep grid)")
     p.add_argument("--artifacts", default=None, help="artifacts root (default $BYTERESEARCH_ARTIFACTS or ByteResearch/artifacts)")
     p.add_argument("--smoke", action="store_true", help="tiny end-to-end run in ROOT/smoke")

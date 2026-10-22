@@ -122,7 +122,7 @@ CONDITIONS: dict[str, Condition] = {
 }
 
 TESTSETS: tuple = ("flores_devtest", "ntrex")
-METRICS: tuple = ("chrf_pp", "spbleu", "comet", "metricx")
+METRICS: tuple = ("chrf_pp", "bleu", "spbleu", "comet", "metricx")
 
 SMOKE_MODELS: tuple = ("byt5-small", "mt5-small")
 SMOKE_TARGETS: tuple = ("sw", "sr")
@@ -404,7 +404,7 @@ def resolve_testsets(spec="all") -> list:
 
 def resolve_metrics(spec="all") -> list:
     # Input: metric selection ("all", "sacre", "neural" or comma list). Output: ordered metric names.
-    groups = {"all": METRICS, "sacre": ("chrf_pp", "spbleu"), "neural": ("comet", "metricx")}
+    groups = {"all": METRICS, "sacre": ("chrf_pp", "bleu", "spbleu"), "neural": ("comet", "metricx")}
     return _resolve(spec, METRICS, groups, None)
 
 

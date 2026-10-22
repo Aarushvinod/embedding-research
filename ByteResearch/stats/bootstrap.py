@@ -195,4 +195,4 @@ def bleu_score_fn(metric=None):
     return lambda sums: bleu_from_stats(sums, metric.smooth_method)
 
 
-CORPUS_SCORE_FNS = {"chrf_pp": chrf_score_fn, "spbleu": bleu_score_fn}
+CORPUS_SCORE_FNS = {"chrf_pp": chrf_score_fn, "bleu": bleu_score_fn, "spbleu": bleu_score_fn}

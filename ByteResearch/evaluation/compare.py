@@ -1,18 +1,17 @@
 # ByT5 versus mT5 comparisons of scored translations, with paired bootstrap significance.
-# For one size, condition and test set, each (target, metric) cell compares the two models on the
-# same sentence ids; corpus metrics resample sacreBLEU statistics and mean metrics resample values.
-# The pooled cell macro-averages over targets while resampling FLORES rows jointly across targets,
-# because the rows are parallel; all cells use stats.bootstrap.paired_bootstrap with fixed seeds.
-# The difference-in-differences compares the ByT5 - mT5 gap in C2/C3 with the gap in C1, using the
-# same joint resampling over the four systems: macro(A, D) - macro(B, C) equals half the DiD.
-# Results go to results/compare/{size}__{condition}/{testset}.json and {size}__did/{testset}.json
-# (with a __pilot suffix under --pilot).
+# For one size, condition and test set, the scores come from the per-direction translate files
+# results/translate/{model}__{condition}__{target}/{testset}.json of both architectures.
+# Each (target, metric) cell compares the two direction models on the same sentence ids; corpus metrics
+# resample sacreBLEU statistics and mean metrics resample values.
+# The pooled cell macro-averages over the condition's targets while resampling the test-set rows jointly
+# across targets, because the rows are parallel; all cells use stats.bootstrap.paired_bootstrap with fixed
+# seeds. Results go to results/compare/{size}__{condition}/{testset}.json (with a __pilot suffix under --pilot).
 
 from __future__ import annotations
 
 import numpy as np
 
-from ..core.config import ARCHS, CONDITIONS, InterpConfig, config_hash, model_for, resolve_conditions
+from ..core.config import ARCHS, CONDITIONS, TARGETS, InterpConfig, config_hash, model_for, resolve_langs
 from ..core.paths import compare_id, run_id
 from ..core.results import ResultFile, locate, run_result
 from ..interp.units import measurement_done
@@ -24,38 +23,46 @@ from .generate import EXP as TRANSLATE_EXP
 EXP = "compare"
 CELL_FIELDS = ("target", "metric", "byt5", "mt5", "delta", "ci_low", "ci_high", "p_value", "n", "significant",
                "byt5_gain", "better")
-DID_FIELDS = ("condition", "target", "metric", "delta", "ci_low", "ci_high", "p_value", "n", "significant",
-              "byt5_gain")
 
 
-def translate_file(ctx, model: str, condition: str, testset: str) -> ResultFile:
-    # Inputs: Ctx, model key, condition and test set. Output: the ResultFile of that translate result.
-    return ResultFile(locate(ctx, TRANSLATE_EXP, run_id(model, condition), testset)["result"])
+def translate_file(ctx, model: str, condition: str, target: str, testset: str) -> ResultFile:
+    # Inputs: Ctx, model key, condition, target and test set. Output: the ResultFile of that direction's
+    # translate result.
+    return ResultFile(locate(ctx, TRANSLATE_EXP, run_id(model, condition, target), testset)["result"])
+
+
+def condition_targets(ctx, condition: str) -> list:
+    # Inputs: Ctx and condition key. Output: the condition's targets a comparison covers (restricted to
+    # the smoke targets in smoke mode).
+    allowed = resolve_langs("all", TARGETS, ctx.smoke)
+    return [t for t in CONDITIONS[condition].targets if t in allowed]
 
 
 def load_scored(ctx, model: str, condition: str, testset: str, metric: str) -> dict:
-    # Inputs: Ctx, model, condition, test set and canonical metric. Output: {target: {sid: value}}
-    # with stats vectors for corpus metrics and sentence values for mean metrics; raises when the
-    # metric has not been scored.
-    data = translate_file(ctx, model, condition, testset).load() or {}
-    rows = data.get("per_item", {}).get("rows")
-    scores = data.get("per_item", {}).get("scores", {}).get(metric)
-    if not rows or not scores:
-        raise FileNotFoundError(f"{model}__{condition}/{testset} has no {metric} scores; run the score stage")
-    col = scores["stats"] if METRICS[metric]["kind"] == "corpus" else scores["values"]
+    # Inputs: Ctx, model, condition, test set and canonical metric. Output: {target: {sid: value}} over
+    # the condition's targets, with stats vectors for corpus metrics and sentence values for mean metrics;
+    # raises when a direction's file lacks the metric.
     out = {}
-    for t, sid, v in zip(rows["target"], rows["sid"], col):
-        out.setdefault(t, {})[sid] = v
+    for target in condition_targets(ctx, condition):
+        data = translate_file(ctx, model, condition, target, testset).load() or {}
+        rows = data.get("per_item", {}).get("rows")
+        scores = data.get("per_item", {}).get("scores", {}).get(metric)
+        if not rows or not scores:
+            raise FileNotFoundError(f"{run_id(model, condition, target)}/{testset} has no {metric} scores; "
+                                    f"run the score stage")
+        col = scores["stats"] if METRICS[metric]["kind"] == "corpus" else scores["values"]
+        out[target] = dict(zip(rows["sid"], col))
     return out
 
 
 def input_digests(ctx, runs, testset: str, metrics) -> dict:
-    # Inputs: Ctx, (model, condition) pairs, test set and metrics. Output: {"run_id|metric": rows
-    # digest of the stored scores, or None}, so comparisons are redone when their inputs change.
+    # Inputs: Ctx, (model, condition, target) directions, test set and metrics. Output: {"run_id|metric":
+    # rows digest of the stored scores, or None}, so comparisons are redone when their inputs change.
     out = {}
-    for model, cond in runs:
-        scores = ((translate_file(ctx, model, cond, testset).load() or {}).get("aggregate", {}).get("scores", {}))
-        out.update({f"{run_id(model, cond)}|{m}": (scores.get(m) or {}).get("rows_sha256") for m in metrics})
+    for model, cond, target in runs:
+        data = translate_file(ctx, model, cond, target, testset).load() or {}
+        scores = data.get("aggregate", {}).get("scores", {})
+        out.update({f"{run_id(model, cond, target)}|{m}": (scores.get(m) or {}).get("rows_sha256") for m in metrics})
     return out
 
 
@@ -116,7 +123,7 @@ def size_models(size: str) -> tuple:
 def compare_config(ctx, size: str, condition: str, testset: str, metrics) -> dict:
     # Inputs: Ctx, size, condition, test set and metrics. Output: the compare config (metrics,
     # bootstrap settings and input digests) whose hash fingerprints the result.
-    runs = [(m, condition) for m in size_models(size)]
+    runs = [(m, condition, t) for m in size_models(size) for t in condition_targets(ctx, condition)]
     return {"size": size, "condition": condition, "testset": testset, "metrics": list(metrics),
             **boot_settings(ctx), "inputs": input_digests(ctx, runs, testset, metrics)}
 
@@ -148,60 +155,3 @@ def compare_done(ctx, size: str, condition: str, testset: str, metrics) -> bool:
     # complete for exactly this config (metrics, bootstrap settings and current input scores).
     cfg = compare_config(ctx, size, condition, testset, [canonical(m) for m in metrics])
     return measurement_done(locate(ctx, EXP, compare_id(size, condition), testset)["result"], config_hash(cfg))
-
-
-def did_conditions(ctx) -> tuple:
-    # Input: Ctx. Output: (reference condition "C1", the other conditions in this run mode).
-    conds = resolve_conditions("all", ctx.smoke)
-    return conds[0], conds[1:]
-
-
-def did_config(ctx, size: str, testset: str, metrics) -> dict:
-    # Inputs: Ctx, size, test set and metrics. Output: the DiD config whose hash fingerprints it.
-    ref, others = did_conditions(ctx)
-    runs = [(m, c) for c in (ref, *others) for m in size_models(size)]
-    return {"size": size, "testset": testset, "reference": ref, "conditions": list(others),
-            "metrics": list(metrics), **boot_settings(ctx), "inputs": input_digests(ctx, runs, testset, metrics)}
-
-
-def did_cells(ctx, size: str, testset: str, metric: str, boot: dict) -> list:
-    # Inputs: Ctx, size, test set, metric and bootstrap settings. Output: DiD cells per (condition,
-    # target) and pooled: (byt5_C - mt5_C) - (byt5_C1 - mt5_C1), with the four systems' rows
-    # resampled jointly (macro(A, D) - macro(B, C) is half the DiD, hence scale 2).
-    ref, others = did_conditions(ctx)
-    fn, (bm, mm) = metric_score_fn(ctx, metric), size_models(size)
-    load = {(m, c): load_scored(ctx, m, c, testset, metric) for c in (ref, *others) for m in (bm, mm)}
-    cells = []
-    for cond in others:
-        sys4 = [load[(bm, cond)], load[(mm, ref)], load[(mm, cond)], load[(bm, ref)]]
-        targets = [t for t in sys4[0] if all(t in s for s in sys4)]
-        for label, ts in [*[(t, [t]) for t in targets], ("pooled", targets)]:
-            plus = [sys4[0][t] for t in ts] + [sys4[1][t] for t in ts]
-            minus = [sys4[2][t] for t in ts] + [sys4[3][t] for t in ts]
-            cells.append({**contrast(plus, minus, metric, fn, boot, 2.0), "condition": cond, "target": label,
-                          "metric": metric})
-    return cells
-
-
-def did_ready(ctx, size: str, testset: str, metrics) -> bool:
-    # Inputs: Ctx, size, test set and metrics. Output: whether every system the DiD needs is scored.
-    return all(did_config(ctx, size, testset, metrics)["inputs"].values())
-
-
-def write_did(ctx, size: str, testset: str, metrics) -> dict:
-    # Inputs: Ctx, size, test set and metrics. Writes results/compare/{size}__did/{testset}.json with
-    # per-(condition, target, metric) cells and pooled aggregates. Output: the envelope.
-    metrics = [canonical(m) for m in metrics]
-    cfg, boot = did_config(ctx, size, testset, metrics), boot_settings(ctx)
-    cells = [c for m in metrics for c in did_cells(ctx, size, testset, m, boot)]
-    pooled = {f"{c['condition']}|{c['metric']}": c for c in cells if c["target"] == "pooled"}
-    rf = run_result(ctx, EXP, f"{size}__did", testset)
-    return rf.write({"cells": columnar(cells, DID_FIELDS)}, {"pooled": pooled, "hub_of": {
-        c: CONDITIONS[c].hub for c in (cfg["reference"], *cfg["conditions"])}}, config=cfg, complete=True,
-        extra={"status": {"fingerprint": config_hash(cfg)}})
-
-
-def did_done(ctx, size: str, testset: str, metrics) -> bool:
-    # Inputs: Ctx, size, test set and metrics. Output: whether the DiD result matches this config.
-    cfg = did_config(ctx, size, testset, [canonical(m) for m in metrics])
-    return measurement_done(locate(ctx, EXP, f"{size}__did", testset)["result"], config_hash(cfg))

@@ -1,6 +1,7 @@
-# sacreBLEU metrics: chrF++ (CHRF with word_order=2) and spBLEU (BLEU with the flores200 SPM).
-# Both are computed on detokenized text and keep per-sentence sufficient statistics extracted by
-# sacreBLEU itself, the same path its paired significance tests use.
+# sacreBLEU metrics: chrF++ (CHRF with word_order=2), BLEU (sacreBLEU's default 13a tokenizer) and spBLEU
+# (BLEU with the flores200 SPM, the FLORES convention). All are computed on detokenized text and keep
+# per-sentence sufficient statistics extracted by sacreBLEU itself, the same path its paired significance
+# tests use.
 # Summing the statistics over any subset of rows reproduces the corpus score of that subset, so
 # corpus scores, per-target scores and bootstrap samples all come from one stats matrix.
 # Sentence values are the same corpus formula applied to a single row's statistics.
@@ -16,10 +17,12 @@ from ..stats import bootstrap as B
 
 
 def metric_object(ctx, name: str):
-    # Inputs: Ctx and "chrf_pp" or "spbleu". Output: the sacreBLEU metric object (CHRF word_order=2
-    # or BLEU tokenize=flores200), with the SPM cache pointed at ROOT/data/sacrebleu.
+    # Inputs: Ctx and "chrf_pp", "bleu" or "spbleu". Output: the sacreBLEU metric object (CHRF word_order=2,
+    # BLEU tokenize=13a or BLEU tokenize=flores200), with the SPM cache pointed at ROOT/data/sacrebleu.
     use_sacrebleu_cache(ctx)
-    return B.chrf_metric() if name == "chrf_pp" else B.spbleu_metric()
+    if name == "chrf_pp":
+        return B.chrf_metric()
+    return B.spbleu_metric("13a" if name == "bleu" else "flores200")
 
 
 def score_fn(metric, name: str):

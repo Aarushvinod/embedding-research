@@ -1,5 +1,5 @@
 # Public translation-metric API shared by evaluation and the interpretability experiments.
-# METRICS lists the four metrics with their kind ("corpus" for chrF++/spBLEU, "mean" for
+# METRICS lists the five metrics with their kind ("corpus" for chrF++/BLEU/spBLEU, "mean" for
 # COMET/MetricX) and direction; MetricX is the only one where lower is better.
 # score_rows scores rows of {id, src, hyp, ref, target?} and returns sentence-level values,
 # per-sentence sacreBLEU statistics for the corpus metrics (for stats.bootstrap) and aggregates
@@ -19,6 +19,7 @@ from . import neural, sacre
 from .batching import score_keyed
 METRICS = {
     "chrf_pp": {"kind": "corpus", "higher": True},
+    "bleu": {"kind": "corpus", "higher": True},
     "spbleu": {"kind": "corpus", "higher": True},
     "comet": {"kind": "mean", "higher": True},
     "metricx": {"kind": "mean", "higher": False},
