@@ -235,6 +235,11 @@ All interp stages run on the `best/` checkpoints of the fine-tuned models.
 
 Notes:
 - Each measurement is its own stage, e.g. `interp.lape.overlap`.
+- Hubness runs per direction model: it pools the source, en, es, zh, el and target FLORES devtest sentences at
+  the embedding output and every encoder block, z-scores each dimension over the six languages per layer, and
+  ranks the five references by paired cosine to the source, with the English margin over es/zh/el, per layer
+  (at relative depth) and averaged over all layers. Pooled states, the z-score statistics and the cosines are
+  saved as arrays.
 - LAPE needs `data.wiki`, and its selection, overlap and ablation units run per k (`--variant k1`).
 - `interp.steering.estimate` times one scoring and generation pass, prints projected stage times and writes
   nothing. It is not part of the composite.

@@ -1,11 +1,10 @@
-# Hubness experiment: which language do the encoder's sentence representations gravitate to, layer by layer?
-# Stage states pools each FLORES devtest sentence of the study languages over its tokens (masked mean
-# with EOS) at the embedding output and at every encoder block output, inside forward hooks, in float32.
-# Stage similarity z-scores every dimension over all sentences of all languages at each layer, so massive
-# activation dimensions cannot dominate, and scores a language pair by the mean paired cosine of the two
-# translations of the same sentence.
-# Stage ranks orders, for every language, the other ten by that similarity and averages each language's rank
-# in the others' lists over the block layers, giving a hub ordering and nearest-neighbour fractions.
+# Hubness experiment: does a direction model's encoder pull its source sentences towards English, layer by layer?
+# Stage states pools the FLORES devtest sentences of the source (hub), English, the es/zh/el controls and the
+# model's target over their tokens (masked mean with EOS) at the embedding output and every encoder block.
+# Stage similarity z-scores every dimension over all six languages' sentences at each layer, saves those
+# means and standard deviations, and scores each reference by paired cosine to the source, z-scored and plain.
+# Stage ranks orders the five references per layer, takes the English margin over the controls, places each
+# layer at its relative depth and averages ranks and margins over all layers including the embedding output.
 # The module also holds the helpers shared with the DecoderLens experiment: FLORES access, checkpoint
 # provenance and resumable unit files whose pilot paths come from core.results.locate.
 
@@ -18,7 +17,7 @@ import numpy as np
 import torch
 from scipy.stats import rankdata
 
-from ..core.config import PINS, STUDY_LANGS, DecodingConfig, InterpConfig, config_hash, resolve_langs
+from ..core.config import CONDITIONS, CONTROLS, PINS, DecodingConfig, InterpConfig, config_hash
 from ..core.registry import composite, register_stage
 from ..core.results import ResultFile, load_array, locate, provenance, run_result, save_run_array
 from ..core.text import truncate_chars
@@ -31,7 +30,8 @@ from ..modeling.loading import loaded as load_model
 EXP = "interp_hubness"
 SPLIT = "devtest"
 EMB = "emb"
-GRID = ("model", "condition")
+GRID = ("model", "condition", "target")
+ENGLISH = "en"
 
 
 def n_flores_rows() -> int:
@@ -60,11 +60,6 @@ def flores_texts(ctx, langs) -> dict:
     return {lang: list(data[lang]) for lang in langs}
 
 
-def study_langs(ctx) -> list:
-    # Input: Ctx. Output: the study languages (8 targets + en, ar, ru; smoke keeps the smoke targets).
-    return resolve_langs("study", STUDY_LANGS, ctx.smoke)
-
-
 def rows_config(rows) -> dict:
     # Input: row ids. Output: their count and hash, for config fingerprints.
     return {"n_rows": len(rows), "rows_hash": config_hash(list(rows))}
@@ -78,9 +73,9 @@ def batching_config(ctx) -> dict:
 
 
 def checkpoint_info(ctx, unit) -> dict:
-    # Inputs: Ctx and a model x condition Unit. Output: the checkpoint path and its meta step/lr (read from
-    # byteresearch_meta.json when present) for provenance.
-    info = describe_checkpoint(ctx, unit.model, unit.condition)
+    # Inputs: Ctx and a model x condition x target Unit. Output: the direction checkpoint's path and its meta
+    # step/lr (read from byteresearch_meta.json when present) for provenance.
+    info = describe_checkpoint(ctx, unit.model, unit.condition, target=unit.target)
     return {k: info[k] for k in ("path", "which", "step", "lr")}
 
 
@@ -115,9 +110,9 @@ def load_result(ctx, unit, experiment: str, measurement: str, cfg: dict) -> dict
 
 
 def loaded(ctx, unit):
-    # Inputs: Ctx and a model x condition Unit. Output: a context manager yielding the fine-tuned Trained
-    # bundle (float32, prepared for interp, on ctx.device) that releases the model on exit.
-    return load_model(ctx, unit.model, unit.condition, device=ctx.device)
+    # Inputs: Ctx and a model x condition x target Unit. Output: a context manager yielding the direction's
+    # fine-tuned Trained bundle (float32, prepared for interp, on ctx.device) that releases the model on exit.
+    return load_model(ctx, unit.model, unit.condition, target=unit.target, device=ctx.device)
 
 
 def nan_to_none(a, digits=None):
@@ -149,12 +144,24 @@ def pooled_states(trained, enc_batch) -> tuple:
     return torch.stack(layers, 1).numpy(), mask.sum(1).long().cpu().numpy()
 
 
+def references(unit) -> list:
+    # Input: a model x condition x target Unit. Output: the reference languages: English, the controls and
+    # the model's target.
+    return [ENGLISH, *CONTROLS, unit.target]
+
+
+def encoded_langs(unit) -> list:
+    # Input: a model x condition x target Unit. Output: the source (hub) language followed by the references.
+    return [CONDITIONS[unit.condition].hub, *references(unit)]
+
+
 def states_config(ctx, unit) -> dict:
     # Inputs: Ctx and Unit. Output: the fingerprinted config of the states measurement.
     icfg = ctx.config(InterpConfig)
-    return {"model": unit.model, "condition": unit.condition, "split": SPLIT, "langs": study_langs(ctx),
-            **rows_config(devtest_rows(ctx)), "max_chars": icfg.max_chars, "factor": DecodingConfig().token_factor,
-            "pooling": "masked_mean_with_eos", "layers": "emb+blocks", "dtype": "float32", "checkpoint": "best"}
+    return {"model": unit.model, "condition": unit.condition, "target": unit.target, "split": SPLIT,
+            "langs": encoded_langs(unit), **rows_config(devtest_rows(ctx)), "max_chars": icfg.max_chars,
+            "factor": DecodingConfig().token_factor, "pooling": "masked_mean_with_eos", "layers": "emb+blocks",
+            "dtype": "float32", "checkpoint": "best"}
 
 
 def pool_language(ctx, unit, trained, texts, rows, lang: str) -> dict:
@@ -201,8 +208,8 @@ def states_columns(uf, langs, rows) -> tuple:
 @register_stage("interp.hubness.states", grid=GRID, is_done=done_check(EXP, "states", states_config),
                 requires=("train",), order=510)
 def states(ctx, unit):
-    # Inputs: Ctx and a model x condition Unit. Writes pooled encoder states for every study language and
-    # layer (.npy per language) and the states result JSON listing them.
+    # Inputs: Ctx and a model x condition x target Unit. Writes pooled encoder states for the source, English,
+    # the controls and the target at every layer (.npy per language) and the states result JSON listing them.
     if not ctx.force and done_check(EXP, "states", states_config)(ctx, unit):
         return
     cfg = states_config(ctx, unit)
@@ -213,125 +220,125 @@ def states(ctx, unit):
         uf.finalize(aggregate, per_item=per_item)
 
 
-def zscore_paired_cosines(xs: np.ndarray) -> np.ndarray:
-    # Input: states of one layer [n_langs, n_rows, d] (row-aligned translations). Every dimension is
-    # z-scored over all n_langs * n_rows sentences (constant dimensions are only centred). Output: paired
-    # cosines [n_langs, n_langs, n_rows] between the languages' versions of the same sentence.
+def layer_stats(xs: np.ndarray) -> tuple:
+    # Input: states of one layer [n_langs, n_rows, d]. Output: (mean [d], std [d]) of every dimension over
+    # all n_langs * n_rows sentences, in float64.
     flat = xs.reshape(-1, xs.shape[-1]).astype(np.float64)
-    sd = flat.std(0)
-    z = (flat - flat.mean(0)) / np.where(sd > 0, sd, 1.0)
-    z /= np.maximum(np.linalg.norm(z, axis=1, keepdims=True), 1e-12)
-    z = z.reshape(xs.shape)
-    return np.einsum("lnd,mnd->lmn", z, z)
+    return flat.mean(0), flat.std(0)
 
 
-def lang_pairs(langs) -> list:
-    # Input: language codes. Output: the unordered pairs (i < j) as (i, j, "a|b") in registry order.
-    return [(i, j, f"{langs[i]}|{langs[j]}") for i in range(len(langs)) for j in range(i + 1, len(langs))]
+def paired_cosines(xs: np.ndarray, mean=None, std=None) -> np.ndarray:
+    # Inputs: states of one layer [n_langs, n_rows, d] (source first, row-aligned translations) and optional
+    # per-dimension mean and std to z-score with (zero-spread dimensions are only centred). Output: cosines
+    # [n_langs - 1, n_rows] between each source sentence and every other language's translation of it.
+    x = xs.astype(np.float64)
+    if mean is not None:
+        x = (x - mean) / np.where(std > 0, std, 1.0)
+    x /= np.maximum(np.linalg.norm(x, axis=-1, keepdims=True), 1e-12)
+    return np.einsum("nd,lnd->ln", x[0], x[1:])
 
 
 def similarity_config(ctx, unit) -> dict:
     # Inputs: Ctx and Unit. Output: the fingerprinted similarity config (chained to the states fingerprint).
     return {"states": fingerprint(states_config(ctx, unit)), "standardize": "zscore_per_dim_all_langs",
-            "similarity": "mean_paired_cosine"}
+            "similarity": "paired_cosine_source_vs_reference", "plain": True}
 
 
-def layer_similarity(ctx, unit, arrays: dict, langs, li: int, label: str) -> dict:
-    # Inputs: Ctx, Unit, {lang: states [n_rows, N+1, d]}, languages, the layer index and label. Saves the
-    # per-sentence paired cosines [n_pairs, n_rows] as .npy. Output: the unit record (matrix and array ref).
-    cos = zscore_paired_cosines(np.stack([np.asarray(arrays[lang][:, li, :]) for lang in langs]))
-    pairs = lang_pairs(langs)
-    per_pair = np.stack([cos[i, j] for i, j, _ in pairs]).astype(np.float32)
-    ref = save_run_array(ctx, EXP, unit.run_id, f"similarity/{label}.npy", per_pair)
-    return {"matrix": cos.mean(-1).tolist(), "cosine": ref}
+def layer_similarity(arrays: dict, langs, li: int) -> dict:
+    # Inputs: {lang: states [n_rows, N+1, d]}, languages (source first) and the layer index. Output: the
+    # layer's per-dimension mean and std and its z-scored and plain source-vs-reference cosines.
+    xs = np.stack([np.asarray(arrays[lang][:, li, :]) for lang in langs])
+    mean, std = layer_stats(xs)
+    return {"mean": mean, "std": std, "cosine_z": paired_cosines(xs, mean, std), "cosine_raw": paired_cosines(xs)}
+
+
+def save_similarity(ctx, unit, layers: list) -> dict:
+    # Inputs: Ctx, Unit and layer_similarity outputs in layer order. Saves each quantity stacked over layers
+    # (mean/std [N+1, d], cosines [N+1, n_refs, n_rows]) as float32 .npy. Output: {name: {path, shape}}.
+    out = {}
+    for name in ("mean", "std", "cosine_z", "cosine_raw"):
+        arr = np.stack([layer[name] for layer in layers]).astype(np.float32)
+        out[name] = {"path": save_run_array(ctx, EXP, unit.run_id, f"{name}.npy", arr), "shape": list(arr.shape)}
+    return out
+
+
+def mean_by_layer(labels, refs, layers: list, name: str) -> dict:
+    # Inputs: layer labels, reference languages, layer_similarity outputs and a cosine name. Output:
+    # {label: {ref: mean cosine over sentences}}.
+    return {label: dict(zip(refs, layer[name].mean(-1).tolist())) for label, layer in zip(labels, layers)}
 
 
 @register_stage("interp.hubness.similarity", grid=GRID, is_done=done_check(EXP, "similarity", similarity_config),
                 requires=("interp.hubness.states",), order=511)
 def similarity(ctx, unit):
-    # Inputs: Ctx and a model x condition Unit. Writes per-layer 11x11 similarity matrices (aggregate) and
-    # per-sentence paired cosines for every language pair (per_item, .npy per layer); resume unit = layer.
+    # Inputs: Ctx and a model x condition x target Unit. Writes the per-layer standardisation statistics and
+    # the per-sentence z-scored and plain source-vs-reference cosines (.npy) and their per-layer means.
     if not ctx.force and done_check(EXP, "similarity", similarity_config)(ctx, unit):
         return
     st = load_result(ctx, unit, EXP, "states", states_config(ctx, unit))["per_item"]
     langs, labels = st["langs"], st["layers"]
     arrays = {lang: load_array(ctx, st["arrays"][lang]["path"], mmap=True) for lang in langs}
-    cfg = similarity_config(ctx, unit)
-    with open_units(ctx, unit, EXP, "similarity", cfg, checkpoint=False) as uf:
-        for li, label in enumerate(labels):
-            if not uf.has(label):
-                uf.put(label, layer_similarity(ctx, unit, arrays, langs, li, label))
-        matrices = {label: uf.get(label)["matrix"] for label in labels}
-        blocks = np.mean([matrices[label] for label in labels if label != EMB], axis=0)
-        per_item = {"row_ids": st["row_ids"], "langs": langs, "layers": labels,
-                    "pairs": [p for _, _, p in lang_pairs(langs)],
-                    "cosine": {label: uf.get(label)["cosine"] for label in labels},
-                    "cosine_shape": [len(lang_pairs(langs)), len(st["row_ids"])]}
-        uf.finalize({"langs": langs, "layers": labels, "matrix": matrices, "block_mean_matrix": blocks.tolist()},
-                    per_item=per_item)
+    layers = [layer_similarity(arrays, langs, li) for li in range(len(labels))]
+    with open_units(ctx, unit, EXP, "similarity", similarity_config(ctx, unit), checkpoint=False) as uf:
+        per_item = {"row_ids": st["row_ids"], "source": langs[0], "references": langs[1:], "layers": labels,
+                    "arrays": save_similarity(ctx, unit, layers)}
+        uf.finalize({"source": langs[0], "references": langs[1:], "layers": labels,
+                     "mean_cosine_z": mean_by_layer(labels, langs[1:], layers, "cosine_z"),
+                     "mean_cosine_raw": mean_by_layer(labels, langs[1:], layers, "cosine_raw")}, per_item=per_item)
 
 
-def rank_layer(sim) -> dict:
-    # Input: an [n, n] similarity matrix (diagonal ignored). Output: {"rank": [n, n] where rank[i, j] is
-    # j's rank in i's list of the others (1 = most similar, ties averaged, NaN diagonal), "mean_rank": [n]
-    # mean rank of each language in the others' lists, "nearest": [n] index of each language's nearest
-    # neighbour, "nn_count": [n] how many languages have it as nearest neighbour (ties share credit),
-    # "nn_frac": nn_count / (n - 1)}.
-    sim = np.asarray(sim, dtype=np.float64)
-    n = len(sim)
-    rank, credit = np.full((n, n), np.nan), np.zeros(n)
-    for i in range(n):
-        others = np.array([j for j in range(n) if j != i])
-        rank[i, others] = rankdata(-sim[i, others], method="average")
-        best = others[sim[i, others] == sim[i, others].max()]
-        credit[best] += 1.0 / len(best)
-    nearest = [int(np.nanargmin(rank[i])) for i in range(n)]
-    return {"rank": rank, "mean_rank": np.nanmean(rank, axis=0), "nearest": nearest, "nn_count": credit,
-            "nn_frac": credit / (n - 1)}
+def relative_depth(labels) -> list:
+    # Input: layer labels ["emb", "0", ..., "N-1"]. Output: depths in [0, 1]: 0 for the embedding output and
+    # (b + 1) / N for block b.
+    n_blocks = len(labels) - 1
+    return [0.0 if label == EMB else (int(label) + 1) / n_blocks for label in labels]
+
+
+def rank_layer(sims: dict, refs) -> dict:
+    # Inputs: {ref: similarity} of one layer and the reference order. Output: {ref: rank} (1 = most
+    # similar, ties averaged).
+    return dict(zip(refs, rankdata([-sims[r] for r in refs], method="average").tolist()))
+
+
+def english_margin(sims: dict) -> float:
+    # Input: {ref: similarity} of one layer. Output: similarity to English minus the mean over the controls.
+    return float(sims[ENGLISH] - np.mean([sims[c] for c in CONTROLS]))
+
+
+def rank_summary(refs, labels, by_layer: dict) -> tuple:
+    # Inputs: references, layer labels and {label: {ref: mean similarity}}. Output: (averages over all layers
+    # including the embedding output: mean rank per reference, references sorted by it and mean English
+    # margin; per-layer ranks and margins).
+    rank = {label: rank_layer(by_layer[label], refs) for label in labels}
+    margin = {label: english_margin(by_layer[label]) for label in labels}
+    mean_rank = {r: float(np.mean([rank[label][r] for label in labels])) for r in refs}
+    order = sorted(refs, key=lambda r: (mean_rank[r], refs.index(r)))
+    averages = {"mean_rank": mean_rank, "sorted_by_mean_rank": order,
+                "mean_english_margin": float(np.mean(list(margin.values())))}
+    return averages, {"rank": rank, "english_margin": margin}
 
 
 def ranks_config(ctx, unit) -> dict:
     # Inputs: Ctx and Unit. Output: the fingerprinted ranks config (chained to the similarity fingerprint).
-    return {"similarity": fingerprint(similarity_config(ctx, unit)), "ties": "average", "average_over": "blocks"}
-
-
-def hub_summary(langs, labels, tables: dict) -> dict:
-    # Inputs: languages, layer labels and {label: rank_layer output}. Output: the aggregate: mean rank and
-    # nearest-neighbour fraction per language averaged over block layers (embedding output excluded), the
-    # languages sorted by mean rank (registry order breaks ties) and the per-layer mean ranks.
-    blocks = [label for label in labels if label != EMB]
-    mean_rank = np.mean([tables[label]["mean_rank"] for label in blocks], axis=0)
-    nn_frac = np.mean([tables[label]["nn_frac"] for label in blocks], axis=0)
-    order = sorted(range(len(langs)), key=lambda i: (mean_rank[i], i))
-    return {"langs": list(langs), "layers": list(labels), "averaged_layers": blocks,
-            "mean_rank": {lang: float(mean_rank[i]) for i, lang in enumerate(langs)},
-            "sorted_by_mean_rank": [langs[i] for i in order],
-            "mean_nn_frac": {lang: float(nn_frac[i]) for i, lang in enumerate(langs)},
-            "mean_rank_by_layer": {label: dict(zip(langs, tables[label]["mean_rank"].tolist())) for label in labels}}
-
-
-def rank_columns(langs, labels, tables: dict) -> dict:
-    # Inputs: languages, layer labels and {label: rank_layer output}. Output: per-layer rank tables (None on
-    # the diagonal), nearest neighbours, nearest-neighbour counts and fractions.
-    return {"langs": list(langs), "layers": list(labels),
-            "rank": {label: nan_to_none(tables[label]["rank"]) for label in labels},
-            "nearest": {label: {lang: langs[j] for lang, j in zip(langs, tables[label]["nearest"])} for label in labels},
-            "nn_count": {label: dict(zip(langs, tables[label]["nn_count"].tolist())) for label in labels},
-            "nn_frac": {label: dict(zip(langs, tables[label]["nn_frac"].tolist())) for label in labels}}
+    return {"similarity": fingerprint(similarity_config(ctx, unit)), "ties": "average",
+            "average_over": "all_layers", "margin_controls": list(CONTROLS)}
 
 
 @register_stage("interp.hubness.ranks", grid=GRID, is_done=done_check(EXP, "ranks", ranks_config),
                 requires=("interp.hubness.similarity",), order=512)
 def ranks(ctx, unit):
-    # Inputs: Ctx and a model x condition Unit. Writes per-layer rank tables and nearest neighbours
-    # (per_item) and the layer-averaged mean ranks with the hub-sorted language list (aggregate).
+    # Inputs: Ctx and a model x condition x target Unit. Writes per-layer reference ranks and English margins
+    # at relative depth (per_item) and their averages over all layers (aggregate), z-scored and plain.
     if not ctx.force and done_check(EXP, "ranks", ranks_config)(ctx, unit):
         return
     sim = load_result(ctx, unit, EXP, "similarity", similarity_config(ctx, unit))["aggregate"]
-    langs, labels = sim["langs"], sim["layers"]
-    tables = {label: rank_layer(sim["matrix"][label]) for label in labels}
+    refs, labels = sim["references"], sim["layers"]
+    z_avg, z_layers = rank_summary(refs, labels, sim["mean_cosine_z"])
+    raw_avg, raw_layers = rank_summary(refs, labels, sim["mean_cosine_raw"])
     with open_units(ctx, unit, EXP, "ranks", ranks_config(ctx, unit), checkpoint=False) as uf:
-        uf.finalize(hub_summary(langs, labels, tables), per_item=rank_columns(langs, labels, tables))
+        uf.finalize({"source": sim["source"], "references": refs, "averaged_layers": labels, **z_avg,
+                     "plain": raw_avg},
+                    per_item={"layers": labels, "depth": relative_depth(labels), **z_layers, "plain": raw_layers})
 
 
 composite("interp.hubness", ("interp.hubness.states", "interp.hubness.similarity", "interp.hubness.ranks"))
