@@ -160,10 +160,11 @@ Each language is identified by exactly one GlotLID label, the one of its FLORES 
 Persian to GlotLID's `fas_Arab`, Estonian to `ekk_Latn` and Chinese to `cmn_Hani`, and a missing label is an
 error. The controls (Spanish, Chinese, Greek) are calibrated too, since their Wikipedia samples use the filter. `corpora.thresholds.lid_passes(ctx, texts, lang)` applies the same check to any texts.
 
-DecoderLens buckets each lens output by GlotLID's top label: en, src (the hub) or x when that language's label
-is on top with probability >= `InterpConfig.lid_threshold` (0.5, a fixed value to revisit before the interp
-runs), other for any other confident label, und for low confidence or empty output. It reports each bucket's
-fraction of all outputs and its share among identified (non-und) outputs.
+DecoderLens buckets each lens output by GlotLID's top label: one of the six encoded languages (source, en,
+es, zh, el, target) when that language's label is on top with probability >= `InterpConfig.lid_threshold`
+(0.5, a fixed value to revisit), other for any other confident label (each label is still stored and counted),
+und for low confidence or empty output. It reports each bucket's fraction of all outputs and its share among
+identified (non-und) outputs.
 
 ### Training
 
@@ -228,7 +229,7 @@ All interp stages run on the `best/` checkpoints of the fine-tuned models.
 | Experiment | Measurements, in order | Options |
 |---|---|---|
 | `interp.hubness` | `states`, `similarity`, `ranks` | |
-| `interp.decoderlens` | `logprob`, `lid`, `summary` | `--chunk-rows` |
+| `interp.decoderlens` | `logprob`, `lid` | `--chunk-rows` |
 | `interp.lape` | `activation_probs`, `scores`, `selection`, `overlap`, `correlation`, `ablation`, `ablation_compare` | `--variant`, `--lape-chunk`, `--lape-rows-chunk` |
 | `interp.steering` | `directions`, `select`, `logprob`, `generate`, `metrics`, `check`, `summary`, `compare` | `--steer-scales`, `--steer-all-scales`, `--steer-select-scales` |
 | `interp.stitching` | `logprob`, `generate`, `metrics`, `summary`, `compare` | `--stitch-layers`, `--stitch-rows`, `--stitch-precompute` |
@@ -240,6 +241,10 @@ Notes:
   ranks the five references by paired cosine to the source, with the English margin over es/zh/el, per layer
   (at relative depth) and averaged over all layers. Pooled states, the z-score statistics and the cosines are
   saved as arrays.
+- DecoderLens runs per direction model: the unchanged decoder reads the embedding output and every encoder
+  block through the encoder's final layer norm. `logprob` saves the per-char log-probs of the source, en,
+  es, zh, el and target references at every layer and reports English-minus-language differences; `lid`
+  stores each greedy 128-character output with its GlotLID top label, probability and bucket.
 - LAPE needs `data.wiki`, and its selection, overlap and ablation units run per k (`--variant k1`).
 - `interp.steering.estimate` times one scoring and generation pass, prints projected stage times and writes
   nothing. It is not part of the composite.
